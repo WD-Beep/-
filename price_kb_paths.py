@@ -60,23 +60,22 @@ def is_official_kb_path(path: Path | str | None) -> bool:
 
 
 def official_kb_write_allowed(*, updated_by: str = "", source: str = "") -> bool:
-    """自动/测试写入正式库默认禁止；可信报价自动学习在显式开启时可写。"""
+    """正式库默认禁止自动写入；仅后台管理员确认或显式环境变量放行。"""
     by = str(updated_by or "").strip().lower()
     src = str(source or "").strip().lower()
-    if src in {"pytest", "test", "auto_sync", "knowledge_auto", "agent_auto"}:
+    if src in {"pytest", "test", "auto_sync", "knowledge_auto", "agent_auto", "quote_auto_learn"}:
         return False
-    if by in {"agent_auto", "system", "pytest", "test"}:
+    if by in {"agent_auto", "system", "pytest", "test", "quote_auto_learn"}:
         return False
     if os.environ.get("ALLOW_OFFICIAL_KB_WRITE", "").strip().lower() in {"1", "true", "yes"}:
         return True
+    if src in {"admin_upsert", "admin_import", "admin_approve"}:
+        return True
     if src == "quote_auto_learn" and os.environ.get(
-        "ALLOW_OFFICIAL_KB_AUTO_LEARN", "1"
+        "ALLOW_OFFICIAL_KB_AUTO_LEARN", "0"
     ).strip().lower() in {"1", "true", "yes"}:
         return True
-    # 后台人工维护
-    if by in {"admin", "pm", "operator"} or src in {"admin_upsert", "admin_import", "admin_approve"}:
-        return True
-    if by and by not in {"agent_auto", "system", "quote_auto_learn"}:
+    if src in {"", "admin_upsert"} and by in {"admin", "pm", "operator"}:
         return True
     return False
 

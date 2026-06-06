@@ -51,10 +51,23 @@ function statusBadgeHtml(item) {
 
 function markerLabel(marker) {
   const m = String(marker || "").trim();
-  if (m === "AUTO_QUOTE_SYNC") return "自动补入";
+  if (m === "AUTO_QUOTE_SYNC") return "报价候选";
   if (m === "AUTO_PENDING_PRICE") return "待补价";
   if (m === "AUTO_PRICE_CONFLICT") return "价格冲突";
   return m;
+}
+
+function sourceTypeLabel(sourceType) {
+  const st = String(sourceType || "").trim();
+  const map = {
+    missing_price: "缺价/新材料",
+    ai_estimate: "AI估算",
+    admin_correction: "管理员修正",
+    price_conflict: "价格冲突",
+    low_confidence: "低置信度",
+    smart_lookup_miss: "智能查价",
+  };
+  return map[st] || st || "—";
 }
 
 function markerTagHtml(marker) {
@@ -104,6 +117,8 @@ const els = {
   btnLeaveExceptions: document.getElementById("btnLeaveExceptions"),
   btnPriceBatchDelete: document.getElementById("btnPriceBatchDelete"),
   btnPriceBatchCancel: document.getElementById("btnPriceBatchCancel"),
+  btnPriceBatchApprove: document.getElementById("btnPriceBatchApprove"),
+  btnPriceBatchReject: document.getElementById("btnPriceBatchReject"),
   priceTableHeadRow: document.getElementById("priceTableHeadRow"),
   pricePaneList: document.querySelector(".price-pane-list"),
   priceSelectAll: document.getElementById("priceSelectAll"),
@@ -164,11 +179,20 @@ function syncBatchDeleteButtonState() {
   const all = els.priceListBody.querySelectorAll(".price-row-check");
   all.forEach((cb) => {
     cb.disabled = false;
-    cb.title = "选择要删除的数据";
+    cb.title = exceptionMode ? "选择候选" : "选择要删除的数据";
   });
   if (els.btnPriceBatchDelete) {
     els.btnPriceBatchDelete.disabled = checked <= 0;
+    els.btnPriceBatchDelete.hidden = exceptionMode;
     els.btnPriceBatchDelete.textContent = checked > 0 ? `删除 (${checked})` : "删除";
+  }
+  if (els.btnPriceBatchApprove) {
+    els.btnPriceBatchApprove.disabled = checked <= 0;
+    els.btnPriceBatchApprove.textContent = checked > 0 ? `批量确认 (${checked})` : "批量确认";
+  }
+  if (els.btnPriceBatchReject) {
+    els.btnPriceBatchReject.disabled = checked <= 0;
+    els.btnPriceBatchReject.textContent = checked > 0 ? `批量驳回 (${checked})` : "批量驳回";
   }
   if (els.priceSelectAll) {
     els.priceSelectAll.disabled = false;
@@ -274,9 +298,10 @@ function renderTableHead() {
       </th>
       <th>材料名称</th>
       <th>规格</th>
-      <th>单价</th>
-      <th class="col-reason">异常原因</th>
-      <th>标记</th>
+      <th>原价</th>
+      <th>新价</th>
+      <th>来源</th>
+      <th class="col-reason">原因</th>
       <th>状态</th>
       <th>更新时间</th>
       <th class="col-actions col-actions-wide">操作</th>
@@ -334,9 +359,9 @@ function fillForm(item) {
   syncDeleteButtonState();
   els.priceEditorTitle.textContent = selectedIsException ? "修正后入库" : "编辑价格条目";
   els.priceRowId.value = selectedRowId;
-  els.priceName.value = String(item.name || "");
+  els.priceName.value = String(item.material_name || item.name || "");
   els.priceSpec.value = String(item.spec || "");
-  els.priceValue.value = String(item.price || "");
+  els.priceValue.value = String(item.new_price || item.price || "");
   els.priceMarker.value = String(item.marker || "");
   els.priceFormStatus.value = normalizeEntryStatus(item);
   els.priceUpdatedBy.value = String(item.updated_by || "admin");
@@ -460,6 +485,12 @@ async function loadList(preserveSelection = true) {
     const reasonCell = exceptionMode
       ? `<td class="col-reason">${exceptionReasonTagHtml(item.exception_reason, item.review_hint)}</td>`
       : "";
+    const displayName = String(item.material_name || item.name || "");
+    const displayPrice = String(item.new_price || item.price || "—") || "—";
+    const oldPrice = String(item.old_price || "—") || "—";
+    const sourceCell = exceptionMode
+      ? `<td title="${escapeHtml(String(item.source_type || ""))}">${escapeHtml(sourceTypeLabel(item.source_type))}</td>`
+      : "";
     const actionHtml = exceptionMode
       ? `
         <button type="button" class="btn btn-primary btn-sm btn-price-row-review" data-row-id="${escapeHtml(rowId)}">处理</button>
@@ -473,11 +504,13 @@ async function loadList(preserveSelection = true) {
       <td class="col-select">
         <input type="checkbox" class="price-row-check" data-row-id="${escapeHtml(rowId)}" aria-label="选择条目" />
       </td>
-      <td>${escapeHtml(String(item.name || ""))}</td>
+      <td>${escapeHtml(displayName)}</td>
       <td>${escapeHtml(String(item.spec || ""))}</td>
-      <td>${escapeHtml(String(item.price || "—") || "—")}</td>
+      ${exceptionMode ? `<td>${escapeHtml(oldPrice)}</td>` : ""}
+      <td>${escapeHtml(displayPrice)}</td>
+      ${sourceCell}
       ${reasonCell}
-      <td>${markerTagHtml(item.marker)}</td>
+      ${exceptionMode ? "" : `<td>${markerTagHtml(item.marker)}</td>`}
       <td>${statusBadgeHtml(item)}</td>
       <td>${escapeHtml(String(item.updated_at || ""))}</td>
       ${actionCell}
@@ -707,6 +740,94 @@ async function batchDeleteSelected() {
   } finally {
     syncBatchDeleteButtonState();
   }
+}
+
+async function batchApproveSelected() {
+  const items = getCheckedRowItems();
+  if (!items.length) {
+    window.alert("请先勾选待学习候选。");
+    return;
+  }
+  const missingPrice = items.filter((x) => !String(x.new_price || x.price || "").trim());
+  if (missingPrice.length) {
+    window.alert("所选候选中有缺少单价的条目，请先逐条补齐后再批量确认。");
+    return;
+  }
+  if (!window.confirm(`确认将选中的 ${items.length} 条候选写入正式价格库？`)) {
+    return;
+  }
+  const ids = items.map((x) => String(x.exception_id || x.candidate_id || x.row_id || "")).filter(Boolean);
+  if (els.btnPriceBatchApprove) els.btnPriceBatchApprove.disabled = true;
+  els.priceSaveHint.textContent = "正在批量确认入库…";
+  const { ok, data } = await apiJson("/admin-api/price-exceptions/approve-batch", {
+    method: "POST",
+    body: JSON.stringify({
+      exception_ids: ids,
+      updated_by: els.priceUpdatedBy.value.trim() || "admin",
+    }),
+  });
+  if (els.btnPriceBatchApprove) els.btnPriceBatchApprove.disabled = false;
+  if (!ok) {
+    if (data?.error === "forbidden") {
+      gotoLogin();
+      return;
+    }
+    window.alert(data?.message || data?.error || "批量确认失败");
+    els.priceSaveHint.textContent = "批量确认失败。";
+    await loadList(false);
+    return;
+  }
+  const approved = Number(data.approved_count || 0);
+  const errors = Array.isArray(data.errors) ? data.errors : [];
+  els.priceSaveHint.textContent = `已确认入库 ${approved} 条${errors.length ? `，失败 ${errors.length} 条` : ""}`;
+  resetForm();
+  clearPriceRowChecks();
+  await Promise.all([loadStats(), loadList(false)]);
+  if (errors.length) {
+    window.alert(
+      `成功 ${approved} 条，失败 ${errors.length} 条：\n${errors
+        .slice(0, 5)
+        .map((e) => `${e.exception_id}: ${e.message}`)
+        .join("\n")}`,
+    );
+  }
+}
+
+async function batchRejectSelected() {
+  const items = getCheckedRowItems();
+  if (!items.length) {
+    window.alert("请先勾选待学习候选。");
+    return;
+  }
+  const reason = window.prompt(`确认驳回选中的 ${items.length} 条候选？\n\n可填写驳回原因（可留空）：`, "批量驳回");
+  if (reason === null) {
+    return;
+  }
+  const ids = items.map((x) => String(x.exception_id || x.candidate_id || x.row_id || "")).filter(Boolean);
+  if (els.btnPriceBatchReject) els.btnPriceBatchReject.disabled = true;
+  els.priceSaveHint.textContent = "正在批量驳回…";
+  const { ok, data } = await apiJson("/admin-api/price-exceptions/reject-batch", {
+    method: "POST",
+    body: JSON.stringify({
+      exception_ids: ids,
+      reject_reason: String(reason || "").trim(),
+      updated_by: els.priceUpdatedBy.value.trim() || "admin",
+    }),
+  });
+  if (els.btnPriceBatchReject) els.btnPriceBatchReject.disabled = false;
+  if (!ok) {
+    if (data?.error === "forbidden") {
+      gotoLogin();
+      return;
+    }
+    window.alert(data?.message || data?.error || "批量驳回失败");
+    els.priceSaveHint.textContent = "批量驳回失败。";
+    return;
+  }
+  els.priceSaveHint.textContent = `已驳回 ${Number(data.rejected_count || ids.length)} 条候选`;
+  resetForm();
+  clearPriceRowChecks();
+  await Promise.all([loadStats(), loadList(false)]);
 }
 
 async function savePrice(ev) {
@@ -1021,6 +1142,12 @@ if (els.btnPriceDelete) {
 }
 if (els.btnPriceBatchDelete) {
   els.btnPriceBatchDelete.addEventListener("click", batchDeleteSelected);
+}
+if (els.btnPriceBatchApprove) {
+  els.btnPriceBatchApprove.addEventListener("click", batchApproveSelected);
+}
+if (els.btnPriceBatchReject) {
+  els.btnPriceBatchReject.addEventListener("click", batchRejectSelected);
 }
 els.btnPriceNew.addEventListener("click", resetForm);
 els.btnPriceRefresh.addEventListener("click", async () => {

@@ -989,6 +989,7 @@ def _compare_field(
     context: str,
     can_promote: bool,
     result: LearningCaptureResult,
+    spec: str = "",
 ) -> None:
     if old_v == new_v:
         return
@@ -1010,6 +1011,32 @@ def _compare_field(
         if hid:
             result.history_ids.append(hid)
             result.recorded_count += 1
+            if (
+                corrected_by == "admin"
+                and field_name == "unit_price"
+                and str(new_v or "").strip()
+            ):
+                try:
+                    from price_admin_store import enqueue_price_learn_candidate
+
+                    enqueue_price_learn_candidate(
+                        material_name=material_name,
+                        spec=str(spec or "-").strip() or "-",
+                        old_price=old_v,
+                        new_price=new_v,
+                        source_type="admin_correction",
+                        quote_id=quote_id,
+                        product_name=product_name,
+                        operator=corrected_by,
+                        note=f"管理员修正单价（{context}）",
+                        raw_context={
+                            "quote_uid": quote_uid,
+                            "field_name": field_name,
+                            "correction_context": context,
+                        },
+                    )
+                except Exception:
+                    logger.debug("price learn candidate enqueue skipped", exc_info=True)
             if (
                 can_promote
                 and corrected_by == "admin"
@@ -1060,6 +1087,7 @@ def capture_bom_edit_corrections(
         old_row = old_map.get(i) or {}
         name = str(new_row.get("name") or old_row.get("name") or "").strip() or f"行{i}"
         calc_note = str(new_row.get("calc_note") or new_row.get("calc_method") or "")
+        row_spec = str(new_row.get("spec") or old_row.get("spec") or "").strip() or "-"
         for field in BOM_ITEM_COMPARE_FIELDS:
             old_v = str(old_row.get(field) or "").strip()
             new_v = str(new_row.get(field) or "").strip()
@@ -1077,6 +1105,7 @@ def capture_bom_edit_corrections(
                 context="admin_bom_edit",
                 can_promote=field in ("usage", "spec", "piece_part", "unit_price", "piece_count"),
                 result=result,
+                spec=row_spec,
             )
 
     old_dr = {str(r.get("name") or ""): r for r in (oq.get("detail_rows") or []) if isinstance(r, dict)}

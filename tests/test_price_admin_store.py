@@ -253,20 +253,19 @@ class PriceAdminStoreTest(unittest.TestCase):
 
                 sugg_path = quote_sync_suggestions_path()
                 sugg_text = sugg_path.read_text(encoding="utf-8") if sugg_path.is_file() else ""
-            self.assertEqual(summary["auto_inserted"], 1)
-            self.assertEqual(summary["pending"], 2)
+            self.assertEqual(summary["auto_inserted"], 0)
+            self.assertEqual(summary["pending"], 3)
             self.assertEqual(summary["conflicts"], 1)
             self.assertEqual(summary["skipped"], 1)
-            self.assertEqual(_mock_note.call_count, 1)
-            self.assertEqual(_mock_reload.call_count, 1)
+            self.assertEqual(_mock_note.call_count, 0)
+            self.assertEqual(_mock_reload.call_count, 0)
 
             items, total = list_price_entries(page=1, page_size=20, kb_path=kb_path)
-            self.assertEqual(total, 2)
+            self.assertEqual(total, 1)
             existing_rows = [x for x in items if x["name"] == "EXISTING_FABRIC"]
             self.assertEqual(sorted(x["price"] for x in existing_rows), ["12/Y"])
             webbing = [x for x in items if x["name"] == "NEW_ACTIVE_WEBBING"]
-            self.assertEqual(len(webbing), 1)
-            self.assertEqual(webbing[0]["price"], "0.5/M")
+            self.assertEqual(len(webbing), 0)
 
             self.assertNotIn("NEW_ACTIVE_WEBBING", sugg_text)
 
@@ -275,16 +274,16 @@ class PriceAdminStoreTest(unittest.TestCase):
                 page_size=20,
                 exception_path=root / "price_exceptions.jsonl",
             )
-            self.assertEqual(pending_total, 2)
+            self.assertEqual(pending_total, 3)
             pending_by_name = {x["name"]: x for x in pending_rows}
             self.assertEqual(pending_by_name["MISSINGBUCKLE"]["marker"], AUTO_PENDING_MARKER)
             self.assertEqual(pending_by_name["EXISTING_FABRIC"]["marker"], AUTO_CONFLICT_MARKER)
+            self.assertEqual(pending_by_name["NEW_ACTIVE_WEBBING"]["marker"], AUTO_SYNC_MARKER)
 
             kb = get_price_kb(kb_path)
             self.assertIsNone(kb.lookup("MISSINGBUCKLE", "777ZZ", min_score=0.05))
             hit = kb.lookup("NEW_ACTIVE_WEBBING", "25MM", min_score=0.05)
-            self.assertIsNotNone(hit)
-            self.assertEqual(hit.entry.raw_price, "0.5/M")
+            self.assertIsNone(hit)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -322,13 +321,13 @@ class PriceAdminStoreTest(unittest.TestCase):
                 sugg_path = quote_sync_suggestions_path()
                 safe_sugg = sugg_path.read_text(encoding="utf-8") if sugg_path.is_file() else ""
 
-            self.assertEqual(summary["auto_inserted"], 1)
-            self.assertEqual(summary["pending"], 0)
+            self.assertEqual(summary["auto_inserted"], 0)
+            self.assertEqual(summary["pending"], 1)
             self.assertGreaterEqual(summary["skipped"], 3)
             items, total = list_price_entries(page=1, page_size=20, kb_path=kb_path)
-            self.assertEqual(total, 2)
+            self.assertEqual(total, 1)
             names = {x["name"] for x in items}
-            self.assertIn("SAFE_WEBBING", names)
+            self.assertNotIn("SAFE_WEBBING", names)
             self.assertNotIn("SAFE_WEBBING", safe_sugg)
             self.assertNotIn("300D??", names)
             self.assertNotIn("210D????", names)
@@ -338,10 +337,10 @@ class PriceAdminStoreTest(unittest.TestCase):
                 page_size=20,
                 exception_path=root / "price_exceptions.jsonl",
             )
-            self.assertEqual(pending_total, 0)
-            self.assertEqual(pending_rows, [])
-            self.assertEqual(_mock_note.call_count, 1)
-            self.assertEqual(_mock_reload.call_count, 1)
+            self.assertEqual(pending_total, 1)
+            self.assertEqual(pending_rows[0]["name"], "SAFE_WEBBING")
+            self.assertEqual(_mock_note.call_count, 0)
+            self.assertEqual(_mock_reload.call_count, 0)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -412,16 +411,13 @@ class PriceAdminStoreTest(unittest.TestCase):
                 sugg_path = quote_sync_suggestions_path()
                 role_sugg = sugg_path.read_text(encoding="utf-8") if sugg_path.is_file() else ""
 
-            self.assertGreaterEqual(summary["auto_inserted"], 2)
-            self.assertEqual(summary["pending"], 0)
+            self.assertEqual(summary["auto_inserted"], 0)
+            self.assertGreaterEqual(summary["pending"], 2)
             self.assertEqual(summary["skipped"], 0)
             items, total = list_price_entries(page=1, page_size=20, kb_path=kb_path)
-            self.assertEqual(total, 2)
-            names = {x["name"] for x in items}
-            self.assertIn("210D尼龙", names)
-            self.assertIn("国产X-PAC", names)
-            self.assertEqual(_mock_note.call_count, 1)
-            self.assertEqual(_mock_reload.call_count, 1)
+            self.assertEqual(total, 0)
+            self.assertEqual(_mock_note.call_count, 0)
+            self.assertEqual(_mock_reload.call_count, 0)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

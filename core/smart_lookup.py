@@ -69,24 +69,23 @@ def _append_pending_auto_learn_record(
     candidates: list[dict[str, Any]],
     reason: str,
 ) -> None:
-    path = knowledge_auto_learn_pending_file().resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rec = {
-        "type": "kb_auto_learn_candidate",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "query": query,
-        "spec": spec,
-        "confidence": round(float(confidence), 6),
-        "reason": reason,
-        "material": {
-            "name": str(material.get("name") or "").strip(),
-            "spec": str(material.get("spec") or "").strip(),
-            "price": str(material.get("price") or "").strip(),
-        },
-        "candidates": candidates,
-    }
-    with path.open("a", encoding="utf-8") as fp:
-        fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    """写入统一待学习候选队列（price_exceptions.jsonl）。"""
+    try:
+        from price_admin_store import enqueue_price_learn_candidate
+
+        src_type = "low_confidence" if "low_confidence" in str(reason or "") else "smart_lookup_miss"
+        enqueue_price_learn_candidate(
+            material_name=str(material.get("name") or query or "").strip(),
+            spec=str(material.get("spec") or spec or "-").strip() or "-",
+            new_price=str(material.get("price") or "").strip(),
+            source_type=src_type,
+            confidence=float(confidence),
+            operator="smart_lookup",
+            note=str(reason or "smart_lookup miss candidate"),
+            raw_context={"query": query, "spec": spec, "candidates": candidates, "reason": reason},
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[knowledge-closure] enqueue candidate failed: {exc}", flush=True)
 
 
 def enqueue_knowledge_learn_after_rule_miss(
@@ -195,9 +194,7 @@ def _knowledge_miss_closure(
     try:
         if not get_kimi_config().api_key:
             return
-        from core.knowledge_apply import apply_kb_write
         from core.knowledge_judge import judge_write_decision
-        from core.knowledge_reload import KNOWLEDGE_MUTATION_LOCK, knowledge_reload_hook
 
         decision = judge_write_decision(query, spec_norm, candidates)
         act = str(decision.get("action") or "").strip()
@@ -216,7 +213,7 @@ def _knowledge_miss_closure(
         if act != "write_to_kb" or conf < min_conf:
             return
 
-        from kb_data_quality import KB_ACTION_AUTO, KB_ACTION_DROP, KB_ACTION_REVIEW, judge_kb_insert_candidate
+        from kb_data_quality import KB_ACTION_DROP, KB_ACTION_REVIEW, judge_kb_insert_candidate
 
         quality = judge_kb_insert_candidate(
             mat.get("name", ""),
@@ -244,28 +241,18 @@ def _knowledge_miss_closure(
             )
             return
 
-        if not knowledge_auto_write_enabled():
-            _append_pending_auto_learn_record(
-                query=query,
-                spec=spec_norm,
-                confidence=conf,
-                material=mat,
-                candidates=candidates,
-                reason="auto_write_disabled",
-            )
-            print(
-                f"[knowledge-closure] auto-write disabled, queued for review query={query!r} conf={conf:.3f}",
-                flush=True,
-            )
-            return
-
-        with KNOWLEDGE_MUTATION_LOCK:
-            if apply_kb_write(mat, kb_path):
-                try:
-                    knowledge_reload_hook(kb_path)
-                except Exception as reload_exc:  # noqa: BLE001
-                    print(f"[knowledge-closure] reload failed: {reload_exc}", flush=True)
-                    get_embedding_index().mark_unready()
+        _append_pending_auto_learn_record(
+            query=query,
+            spec=spec_norm,
+            confidence=conf,
+            material=mat,
+            candidates=candidates,
+            reason="smart_lookup_miss",
+        )
+        print(
+            f"[knowledge-closure] queued for admin review query={query!r} conf={conf:.3f}",
+            flush=True,
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"[knowledge-closure] {exc}", flush=True)
 

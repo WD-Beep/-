@@ -188,6 +188,7 @@ from embedding.bge_encoder import embedding_enabled
 from price_kb import format_kb_entry_price_display, get_price_kb, KBHit
 from price_admin_store import (
     approve_price_exception,
+    approve_price_exceptions_bulk,
     delete_price_exception,
     delete_price_exceptions_bulk,
     exclude_price_exception,
@@ -198,6 +199,8 @@ from price_admin_store import (
     list_price_history,
     price_exception_stats,
     price_admin_stats,
+    reject_price_exception,
+    reject_price_exceptions_bulk,
     sync_quote_detail_rows_to_price_kb,
     delete_price_entry,
     upsert_price_entry,
@@ -3205,6 +3208,74 @@ class QuoteHandler(BaseHTTPRequestHandler):
                 return
             self.write_json(result)
             return
+        if path == "/admin-api/price-exceptions/approve-batch":
+            if not admin_http_access_ok(self.headers):
+                self.write_json({"error": "forbidden", "message": "需要管理员权限。"}, status=403)
+                return
+            body = self.read_json()
+            if not isinstance(body, dict):
+                self.write_json({"error": "invalid_request", "message": "JSON 对象。"}, status=400)
+                return
+            raw_ids = body.get("exception_ids") or body.get("candidate_ids") or body.get("ids") or []
+            if not isinstance(raw_ids, list):
+                self.write_json({"error": "invalid_request", "message": "exception_ids 必须是数组。"}, status=400)
+                return
+            try:
+                result = approve_price_exceptions_bulk(
+                    [str(x) for x in raw_ids],
+                    updated_by=str(body.get("updated_by") or "admin"),
+                )
+            except ValueError as exc:
+                self.write_json({"error": "invalid_request", "message": str(exc)}, status=400)
+                return
+            except RuntimeError as exc:
+                self.write_json({"error": "price_exception_approve_failed", "message": str(exc)}, status=500)
+                return
+            self.write_json(result)
+            return
+        if path == "/admin-api/price-exceptions/reject":
+            if not admin_http_access_ok(self.headers):
+                self.write_json({"error": "forbidden", "message": "需要管理员权限。"}, status=403)
+                return
+            body = self.read_json()
+            if not isinstance(body, dict):
+                self.write_json({"error": "invalid_request", "message": "JSON 对象。"}, status=400)
+                return
+            try:
+                result = reject_price_exception(
+                    str(body.get("exception_id") or body.get("candidate_id") or body.get("row_id") or ""),
+                    updated_by=str(body.get("updated_by") or "admin"),
+                    reject_reason=str(body.get("reject_reason") or body.get("note") or "").strip(),
+                    note=str(body.get("note") or "").strip(),
+                )
+            except ValueError as exc:
+                self.write_json({"error": "invalid_request", "message": str(exc)}, status=400)
+                return
+            self.write_json(result)
+            return
+        if path == "/admin-api/price-exceptions/reject-batch":
+            if not admin_http_access_ok(self.headers):
+                self.write_json({"error": "forbidden", "message": "需要管理员权限。"}, status=403)
+                return
+            body = self.read_json()
+            if not isinstance(body, dict):
+                self.write_json({"error": "invalid_request", "message": "JSON 对象。"}, status=400)
+                return
+            raw_ids = body.get("exception_ids") or body.get("candidate_ids") or body.get("ids") or []
+            if not isinstance(raw_ids, list):
+                self.write_json({"error": "invalid_request", "message": "exception_ids 必须是数组。"}, status=400)
+                return
+            try:
+                result = reject_price_exceptions_bulk(
+                    [str(x) for x in raw_ids],
+                    updated_by=str(body.get("updated_by") or "admin"),
+                    reject_reason=str(body.get("reject_reason") or body.get("note") or "").strip(),
+                )
+            except ValueError as exc:
+                self.write_json({"error": "invalid_request", "message": str(exc)}, status=400)
+                return
+            self.write_json(result)
+            return
         if path == "/admin-api/price-exceptions/exclude":
             if not admin_http_access_ok(self.headers):
                 self.write_json({"error": "forbidden", "message": "需要管理员权限。"}, status=403)
@@ -5136,7 +5207,7 @@ def _warm_embedding_daemon() -> None:
 
 
 def _pending_auto_learn_daemon() -> None:
-    """Periodically inject approved pending auto-learn rows when explicitly enabled."""
+    """周期性将 legacy pending_auto_learn.jsonl 迁入统一候选队列（不写正式库）。"""
     if str(os.environ.get("KNOWLEDGE_PENDING_AUTO_APPLY") or "").strip().lower() not in {
         "1",
         "true",

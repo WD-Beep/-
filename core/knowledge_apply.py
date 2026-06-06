@@ -162,16 +162,16 @@ def kb_material_name_spec_exists(material: dict[str, Any], kb_path: Path) -> boo
 
 
 def apply_kb_write(material: dict[str, Any], kb_path: Path) -> bool:
-    """向工作表追加一行 [材料名称, 规格, 单价, KB自增]。调用方已持 KNOWLEDGE_MUTATION_LOCK。"""
-    from price_kb_paths import assert_official_kb_write_allowed, is_official_kb_path
+    """向工作表追加一行。正式价格库一律禁止非管理员审核写入。"""
+    from price_kb_paths import is_official_kb_path
 
     path = Path(kb_path).expanduser().resolve()
     if is_official_kb_path(path):
-        try:
-            assert_official_kb_write_allowed(path, updated_by="agent_auto", source="knowledge_auto")
-        except PermissionError as exc:
-            print(f"[knowledge-apply] blocked official write: {exc}", flush=True)
-            return False
+        print(
+            "[knowledge-apply] blocked: official price KB requires admin approval workflow",
+            flush=True,
+        )
+        return False
 
     name = str(material.get("name") or "").strip()
     spec = str(material.get("spec") or "").strip() or "-"

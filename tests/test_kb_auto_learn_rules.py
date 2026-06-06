@@ -77,10 +77,15 @@ class KbAutoLearnRulesTest(unittest.TestCase):
                     ],
                 },
             )
-            self.assertEqual(summary["auto_inserted"], 1)
+            self.assertEqual(summary["auto_inserted"], 0)
+            self.assertEqual(summary["pending"], 1)
             items, total = list_price_entries(page=1, page_size=20, kb_path=kb_path)
-            self.assertEqual(total, 1)
-            self.assertEqual(items[0]["name"], "600D牛津布")
+            self.assertEqual(total, 0)
+            pending, pending_total = list_price_exceptions(
+                page=1, page_size=20, exception_path=root / "price_exceptions.jsonl"
+            )
+            self.assertEqual(pending_total, 1)
+            self.assertEqual(pending[0]["name"], "600D牛津布")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -108,9 +113,15 @@ class KbAutoLearnRulesTest(unittest.TestCase):
                     ],
                 },
             )
-            self.assertEqual(summary["auto_inserted"], 1)
+            self.assertEqual(summary["auto_inserted"], 0)
+            self.assertEqual(summary["pending"], 1)
             items, _ = list_price_entries(page=1, page_size=20, kb_path=kb_path)
-            self.assertEqual(items[0]["price"], "0.3元/条")
+            self.assertEqual(len(items), 0)
+            pending, total = list_price_exceptions(
+                page=1, page_size=20, exception_path=root / "price_exceptions.jsonl"
+            )
+            self.assertEqual(total, 1)
+            self.assertEqual(pending[0]["price"], "0.3元/条")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

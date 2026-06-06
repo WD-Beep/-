@@ -59,6 +59,20 @@ class PriceExceptionsApproveRouteTest(unittest.TestCase):
         self.assertEqual(code, 403, msg=body)
         self.assertEqual(body.get("error"), "forbidden")
 
+    def test_approve_batch_requires_admin(self) -> None:
+        code, body = self._post_json(
+            "/admin-api/price-exceptions/approve-batch",
+            {"exception_ids": ["exc-a", "exc-b"]},
+        )
+        self.assertEqual(code, 403, msg=body)
+
+    def test_reject_batch_requires_admin(self) -> None:
+        code, body = self._post_json(
+            "/admin-api/price-exceptions/reject-batch",
+            {"exception_ids": ["exc-a"], "reject_reason": "no"},
+        )
+        self.assertEqual(code, 403, msg=body)
+
     def test_approve_route_missing_id_returns_400(self) -> None:
         code, body = self._post_json(
             "/admin-api/price-exceptions/approve",

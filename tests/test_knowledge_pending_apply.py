@@ -5,7 +5,8 @@ import uuid
 from pathlib import Path
 
 from core.knowledge_pending_apply import apply_pending_auto_learn
-from price_kb import get_price_kb, reset_price_kb
+from price_admin_store import list_price_exceptions
+from price_kb import reset_price_kb
 
 
 try:
@@ -22,6 +23,7 @@ class KnowledgePendingApplyTest(unittest.TestCase):
         try:
             kb_path = root / "price_kb.xlsx"
             pending_file = root / "pending_auto_learn.jsonl"
+            exc_path = root / "price_exceptions.jsonl"
 
             wb = Workbook()
             ws = wb.active
@@ -77,22 +79,23 @@ class KnowledgePendingApplyTest(unittest.TestCase):
                 kb_path=kb_path,
                 min_confidence=0.8,
                 reload_after_write=False,
+                exception_path=exc_path,
             )
 
             self.assertEqual(result.total, 5)
             self.assertEqual(result.applied, 1)
+            self.assertEqual(result.enqueued, 1)
             self.assertEqual(result.skipped_existing, 1)
             self.assertEqual(result.invalid, 3)
             self.assertEqual(result.failed, 0)
             self.assertEqual(result.kept, 3)
 
             reset_price_kb()
-            kb = get_price_kb(kb_path)
-            self.assertEqual(kb.size, 2)
-            hit = kb.lookup("auto-learn-new-row", "XL", min_score=0.1)
-            self.assertIsNotNone(hit)
-            assert hit is not None
-            self.assertTrue(hit.entry.auto_learned)
+            pending_rows, exc_total = list_price_exceptions(
+                page=1, page_size=20, exception_path=exc_path
+            )
+            self.assertEqual(exc_total, 1)
+            self.assertEqual(pending_rows[0]["name"], "auto-learn-new-row")
 
             kept_lines = [line for line in pending_file.read_text(encoding="utf-8").splitlines() if line]
             self.assertEqual(len(kept_lines), 3)
@@ -124,6 +127,7 @@ class KnowledgePendingApplyTest(unittest.TestCase):
         try:
             kb_path = root / "price_kb.xlsx"
             pending_file = root / "pending_auto_learn.jsonl"
+            exc_path = root / "price_exceptions.jsonl"
 
             wb = Workbook()
             ws = wb.active
@@ -159,16 +163,18 @@ class KnowledgePendingApplyTest(unittest.TestCase):
                 kb_path=kb_path,
                 min_confidence=0.8,
                 reload_after_write=False,
+                exception_path=exc_path,
             )
 
             self.assertEqual(result.total, 3)
             self.assertEqual(result.applied, 1)
+            self.assertEqual(result.enqueued, 1)
             self.assertEqual(result.invalid, 2)
-            reset_price_kb()
-            kb = get_price_kb(kb_path)
-            self.assertIsNone(kb.lookup("300D??", "152cm", min_score=0.1))
-            self.assertIsNone(kb.lookup("210D", "58#", min_score=0.1))
-            self.assertIsNotNone(kb.lookup("safe-row", "M", min_score=0.1))
+            pending_rows, exc_total = list_price_exceptions(
+                page=1, page_size=20, exception_path=exc_path
+            )
+            self.assertEqual(exc_total, 1)
+            self.assertEqual(pending_rows[0]["name"], "safe-row")
             kept = [json.loads(line) for line in pending_file.read_text(encoding="utf-8").splitlines() if line]
             reasons = {str(row.get("_pending_apply_error") or "") for row in kept}
             self.assertEqual(len(reasons), 1)
@@ -182,6 +188,7 @@ class KnowledgePendingApplyTest(unittest.TestCase):
         try:
             kb_path = root / "price_kb.xlsx"
             pending_file = root / "pending_auto_learn.jsonl"
+            exc_path = root / "price_exceptions.jsonl"
 
             wb = Workbook()
             ws = wb.active
@@ -219,6 +226,7 @@ class KnowledgePendingApplyTest(unittest.TestCase):
         try:
             kb_path = root / "price_kb.xlsx"
             pending_file = root / "pending_auto_learn.jsonl"
+            exc_path = root / "price_exceptions.jsonl"
 
             wb = Workbook()
             ws = wb.active

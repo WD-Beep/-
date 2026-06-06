@@ -83,7 +83,7 @@
               </div>
               <div class="price-import-secondary">
                 <div id="priceExceptionEntry" class="price-exception-entry" aria-live="polite">
-                  <span class="price-exception-entry-label">待审核建议（本地队列）</span>
+                  <span class="price-exception-entry-label">待学习候选（审核队列）</span>
                   <strong id="priceExceptionCount" class="price-exception-entry-count">0</strong>
                   <button type="button" id="btnHandleExceptions" class="btn btn-secondary btn-sm">打开整理台</button>
                 </div>
@@ -94,11 +94,13 @@
           <div id="priceExceptionWorkbench" class="price-exception-workbench" hidden aria-label="异常数据整理台">
             <div class="pew-head">
               <div class="pew-head-text">
-                <h3 class="pew-title">异常数据整理台</h3>
-                <p class="pew-desc muted">本地待审核队列（非正式 Excel）：修正后可入库正式库，测试污染项已自动隐藏</p>
+                <h3 class="pew-title">待学习候选整理台</h3>
+                <p class="pew-desc muted">统一审核队列：确认后写入正式价格库并 reload；驳回/排除不会污染正式库</p>
               </div>
               <div class="pew-head-actions">
                 <button type="button" id="btnLeaveExceptions" class="btn btn-ghost btn-sm">返回价格库</button>
+                <button type="button" id="btnPriceBatchApprove" class="btn btn-primary btn-sm" disabled>批量确认</button>
+                <button type="button" id="btnPriceBatchReject" class="btn btn-secondary btn-sm" disabled>批量驳回</button>
               </div>
             </div>
             <div class="pew-stats" aria-live="polite">

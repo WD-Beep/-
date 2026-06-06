@@ -1,4 +1,4 @@
-"""Apply reviewed auto-learn candidates from JSONL into the PriceKB workbook."""
+"""Apply reviewed auto-learn candidates from JSONL into unified price learn queue."""
 
 from __future__ import annotations
 
@@ -10,10 +10,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core.knowledge_apply import apply_kb_write, kb_material_name_spec_exists, kb_material_row_exists
-from core.knowledge_reload import KNOWLEDGE_MUTATION_LOCK, knowledge_reload_hook
 from core.smart_lookup import knowledge_auto_learn_min_confidence, knowledge_auto_learn_pending_file
-from price_kb_paths import is_official_kb_path, official_kb_path
+from price_admin_store import enqueue_price_learn_candidate
+from price_kb_paths import exception_path as default_exception_path, official_kb_path
 
 
 @dataclass
@@ -24,6 +23,7 @@ class PendingApplyResult:
     invalid: int = 0
     failed: int = 0
     kept: int = 0
+    enqueued: int = 0
     applied_records: list[dict[str, Any]] = field(default_factory=list)
     kept_records: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -36,19 +36,17 @@ def apply_pending_auto_learn(
     min_confidence: float | None = None,
     dry_run: bool = False,
     reload_after_write: bool = True,
+    exception_path: Path | None = None,
 ) -> PendingApplyResult:
-    """Consume pending auto-learn JSONL rows and inject accepted materials into PriceKB.
+    """Consume legacy pending_auto_learn JSONL and enqueue unified learn candidates.
 
-    Successful writes and already-existing rows are removed from the pending file.
-    Invalid or failed rows are kept so they can be corrected and retried.
+    不再直接写入正式价格库；审核通过后由后台 approve 写库并 reload。
     """
+    _ = kb_path, reload_after_write  # 兼容旧签名
     queue_path = Path(pending_file or knowledge_auto_learn_pending_file()).resolve()
+    target_exc = Path(exception_path or default_exception_path()).resolve()
     target_kb = Path(kb_path or official_kb_path()).resolve()
     result = PendingApplyResult()
-
-    if is_official_kb_path(target_kb):
-        result.errors.append("blocked_official_kb_auto_apply")
-        return result
 
     if not queue_path.is_file():
         return result
@@ -60,54 +58,55 @@ def apply_pending_auto_learn(
     )
 
     raw_lines = queue_path.read_text(encoding="utf-8").splitlines()
-    with KNOWLEDGE_MUTATION_LOCK:
-        wrote_any = False
-        for line_no, raw_line in enumerate(raw_lines, start=1):
-            line = raw_line.strip()
-            if not line:
-                continue
-            result.total += 1
-            rec = _load_record(line, line_no, result)
-            if rec is None:
-                continue
+    for line_no, raw_line in enumerate(raw_lines, start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        result.total += 1
+        rec = _load_record(line, line_no, result)
+        if rec is None:
+            continue
 
-            ok, reason = _record_is_applyable(rec, threshold)
-            if not ok:
-                result.invalid += 1
-                result.kept += 1
-                _keep_record(result, rec, reason)
+        ok, reason = _record_is_enqueueable(rec, threshold)
+        if not ok:
+            result.invalid += 1
+            result.kept += 1
+            _keep_record(result, rec, reason)
+            continue
+
+        material = _extract_material(rec)
+        try:
+            from core.knowledge_apply import kb_material_name_spec_exists, kb_material_row_exists
+
+            if kb_material_row_exists(material, target_kb):
+                result.skipped_existing += 1
                 continue
-
-            material = _extract_material(rec)
-            try:
-                if kb_material_row_exists(material, target_kb):
-                    result.skipped_existing += 1
-                    continue
-                if kb_material_name_spec_exists(material, target_kb):
-                    result.skipped_existing += 1
-                    continue
-                if dry_run:
-                    result.applied += 1
-                    result.applied_records.append(rec)
-                    continue
-                if apply_kb_write(material, target_kb):
-                    wrote_any = True
-                    result.applied += 1
-                    result.applied_records.append(rec)
-                else:
-                    result.failed += 1
-                    result.kept += 1
-                    _keep_record(result, rec, "write_failed")
-            except Exception as exc:  # noqa: BLE001
-                result.failed += 1
-                result.kept += 1
-                _keep_record(result, rec, f"exception:{exc}")
-
-        if wrote_any and reload_after_write:
-            try:
-                knowledge_reload_hook(target_kb)
-            except Exception as exc:  # noqa: BLE001
-                result.errors.append(f"reload_failed:{exc}")
+            if kb_material_name_spec_exists(material, target_kb):
+                result.skipped_existing += 1
+                continue
+            if dry_run:
+                result.enqueued += 1
+                result.applied += 1
+                result.applied_records.append(rec)
+                continue
+            enqueue_price_learn_candidate(
+                material_name=material["name"],
+                spec=material["spec"],
+                new_price=material["price"],
+                source_type="low_confidence" if reason == "low_confidence" else "smart_lookup_miss",
+                confidence=float(rec.get("confidence") or 0.0),
+                operator="pending_auto_learn",
+                note=str(rec.get("reason") or "legacy pending_auto_learn"),
+                raw_context={"legacy_record": rec},
+                exception_path=target_exc,
+            )
+            result.enqueued += 1
+            result.applied += 1
+            result.applied_records.append(rec)
+        except Exception as exc:  # noqa: BLE001
+            result.failed += 1
+            result.kept += 1
+            _keep_record(result, rec, f"exception:{exc}")
 
     if not dry_run:
         _rewrite_pending_file(queue_path, result.kept_records)
@@ -132,7 +131,7 @@ def _load_record(line: str, line_no: int, result: PendingApplyResult) -> dict[st
     return rec
 
 
-def _record_is_applyable(rec: dict[str, Any], min_confidence: float) -> tuple[bool, str]:
+def _record_is_enqueueable(rec: dict[str, Any], min_confidence: float) -> tuple[bool, str]:
     if str(rec.get("type") or "").strip() != "kb_auto_learn_candidate":
         return False, "unexpected_type"
     try:

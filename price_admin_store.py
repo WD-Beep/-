@@ -3,11 +3,12 @@ from __future__ import annotations
 import base64
 import json
 import re
+import shutil
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from kb_data_quality import (
     KB_ACTION_AUTO,
@@ -37,6 +38,20 @@ from price_kb_pollution import (
     is_test_price_exception_record,
     is_test_quote_sync_context,
 )
+from price_learn_candidate import (
+    QUEUE_PENDING_AUTO_LEARN,
+    QUEUE_PRICE_EXCEPTIONS,
+    QUEUE_QUOTE_SYNC_SUGGESTIONS,
+    STATUS_APPROVED,
+    STATUS_PENDING,
+    STATUS_REJECTED,
+    build_learn_candidate,
+    candidate_dedupe_key,
+    is_pending_candidate,
+    normalize_learn_candidate,
+    pending_auto_row_to_candidate,
+    suggestion_row_to_candidate,
+)
 from sheet_parser import normalize_rows, parse_sheet_xml_rows, read_sheet_entries, read_shared_strings
 
 
@@ -64,19 +79,200 @@ def _drop_target(log_path: Path | None = None) -> Path:
 
 
 def _load_merged_exception_entries() -> list[dict[str, Any]]:
-    """合并待审核队列文件（新目录 + 遗留 data/），去重 exception_id。"""
-    paths: list[Path] = []
-    for p in (review_exception_file(), LEGACY_EXCEPTION_PATH):
-        rp = p.resolve()
-        if rp.is_file() and rp not in paths:
-            paths.append(rp)
+    """合并待审核队列（price_exceptions + 遗留 suggestions + pending_auto_learn）。"""
+    return load_unified_learn_candidates()
+
+
+def _read_jsonl_objects(path: Path) -> list[dict[str, Any]]:
+    path = path.resolve()
+    if not path.is_file():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            row = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            out.append(row)
+    return out
+
+
+def _pending_auto_learn_queue_path() -> Path:
+    try:
+        from core.smart_lookup import knowledge_auto_learn_pending_file
+
+        return knowledge_auto_learn_pending_file().resolve()
+    except Exception:
+        return (ROOT / "knowledge_updates" / "pending_auto_learn.jsonl").resolve()
+
+
+def load_unified_learn_candidates(*, exception_path: Path | None = None) -> list[dict[str, Any]]:
+    """统一读取所有待学习候选（虚拟合并，不形成孤岛）。"""
     merged: dict[str, dict[str, Any]] = {}
-    for p in paths:
-        for row in _read_exception_entries(p):
-            eid = str(row.get("exception_id") or row.get("row_id") or "").strip()
-            key = eid or f"__row_{len(merged)}_{row.get('name')}"
-            merged[key] = row
+
+    def _put(row: dict[str, Any]) -> None:
+        norm = normalize_learn_candidate(row)
+        if not norm.get("queue_source"):
+            norm["queue_source"] = QUEUE_PRICE_EXCEPTIONS
+        cid = str(norm.get("candidate_id") or norm.get("exception_id") or "").strip()
+        if not cid:
+            return
+        key = candidate_dedupe_key(norm)
+        existing = merged.get(cid)
+        if existing is None:
+            merged[cid] = norm
+            return
+        if str(existing.get("queue_source") or "") == QUEUE_PRICE_EXCEPTIONS:
+            return
+        if str(norm.get("queue_source") or "") == QUEUE_PRICE_EXCEPTIONS:
+            merged[cid] = norm
+            return
+        if str(norm.get("updated_at") or "") >= str(existing.get("updated_at") or ""):
+            merged[cid] = norm
+
+    if exception_path is not None:
+        exc_paths = [_exc_target(exception_path)]
+    else:
+        exc_paths = []
+        for p in (review_exception_file(), LEGACY_EXCEPTION_PATH):
+            rp = p.resolve()
+            if rp.is_file() and rp not in exc_paths:
+                exc_paths.append(rp)
+
+    for p in exc_paths:
+        for raw in _read_jsonl_objects(p):
+            row = _normalize_exception_row(raw)
+            row["queue_source"] = QUEUE_PRICE_EXCEPTIONS
+            _put(row)
+
+    if exception_path is None:
+        for raw in _read_jsonl_objects(quote_sync_suggestions_path()):
+            st = str(raw.get("status") or "pending_review").strip().lower()
+            if st not in {"pending_review", "open", "pending", ""}:
+                continue
+            _put(suggestion_row_to_candidate(raw))
+
+        for raw in _read_jsonl_objects(_pending_auto_learn_queue_path()):
+            if str(raw.get("type") or "").strip() not in {"", "kb_auto_learn_candidate"}:
+                continue
+            _put(pending_auto_row_to_candidate(raw))
+
     return list(merged.values())
+
+
+def _find_unified_learn_candidate(
+    candidate_id: str,
+    *,
+    exception_path: Path | None = None,
+) -> dict[str, Any] | None:
+    eid = str(candidate_id or "").strip()
+    if not eid:
+        return None
+    for row in load_unified_learn_candidates(exception_path=exception_path):
+        rid = str(row.get("candidate_id") or row.get("exception_id") or "")
+        if rid == eid:
+            return row
+    return None
+
+
+def _remove_jsonl_rows(path: Path, *, drop_if: Callable[[dict[str, Any]], bool]) -> int:
+    path = path.resolve()
+    if not path.is_file():
+        return 0
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for raw in _read_jsonl_objects(path):
+        if drop_if(raw):
+            dropped += 1
+        else:
+            kept.append(raw)
+    if dropped:
+        _write_jsonl_objects(path, kept)
+    return dropped
+
+
+def _write_jsonl_objects(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = "\n".join(json.dumps(x, ensure_ascii=False) for x in rows)
+    path.write_text((text + "\n") if text else "", encoding="utf-8")
+
+
+def _remove_legacy_queue_candidate(candidate: dict[str, Any]) -> None:
+    queue = str(candidate.get("queue_source") or QUEUE_PRICE_EXCEPTIONS)
+    cid = str(candidate.get("candidate_id") or candidate.get("exception_id") or "")
+    if queue == QUEUE_QUOTE_SYNC_SUGGESTIONS:
+        path = quote_sync_suggestions_path()
+
+        def _drop_sugg(raw: dict[str, Any]) -> bool:
+            converted = suggestion_row_to_candidate(raw)
+            return str(converted.get("candidate_id") or "") == cid
+
+        _remove_jsonl_rows(path, drop_if=_drop_sugg)
+        return
+    if queue == QUEUE_PENDING_AUTO_LEARN:
+        path = _pending_auto_learn_queue_path()
+
+        def _drop_pending(raw: dict[str, Any]) -> bool:
+            converted = pending_auto_row_to_candidate(raw)
+            return str(converted.get("candidate_id") or "") == cid
+
+        _remove_jsonl_rows(path, drop_if=_drop_pending)
+
+
+def _note_candidate_approve_failure(
+    candidate_id: str,
+    message: str,
+    *,
+    exception_path: Path | None = None,
+) -> None:
+    eid = str(candidate_id or "").strip()
+    if not eid:
+        return
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    target = _find_unified_learn_candidate(eid, exception_path=exception_path)
+    if target is None:
+        return
+    queue = str(target.get("queue_source") or QUEUE_PRICE_EXCEPTIONS)
+    if queue != QUEUE_PRICE_EXCEPTIONS:
+        return
+    path = _exc_target(exception_path)
+    entries = _read_exception_entries(path)
+    for item in entries:
+        rid = str(item.get("exception_id") or item.get("candidate_id") or "")
+        if rid != eid:
+            continue
+        item["last_approve_error"] = str(message or "").strip()
+        item["updated_at"] = now
+        item["status"] = STATUS_PENDING
+        item["exception_status"] = "open"
+    _write_exception_entries(entries, path)
+
+
+def _archive_resolved_candidate(resolved: dict[str, Any], *, exception_path: Path | None = None) -> None:
+    path = _exc_target(exception_path)
+    normalized = normalize_learn_candidate(resolved)
+    normalized["queue_source"] = QUEUE_PRICE_EXCEPTIONS
+    existing = _read_exception_entries(path)
+    eid = str(normalized.get("candidate_id") or normalized.get("exception_id") or "")
+    replaced = False
+    for item in existing:
+        rid = str(item.get("exception_id") or item.get("candidate_id") or "")
+        if rid == eid:
+            item.clear()
+            item.update(normalized)
+            replaced = True
+            break
+    if not replaced:
+        existing.append(normalized)
+    _write_exception_entries(existing, path)
 
 
 def _count_auto_learn_log_entries() -> int:
@@ -107,20 +303,27 @@ def _count_quote_sync_suggestions() -> int:
 
 
 def _append_quote_sync_suggestions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """legacy 文件名保留；实际写入统一 price_exceptions 候选队列。"""
     if not rows:
         return []
-    path = quote_sync_suggestions_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     saved: list[dict[str, Any]] = []
-    with path.open("a", encoding="utf-8") as fh:
-        for raw in rows:
-            rec = dict(raw)
-            rec.setdefault("queued_at", now)
-            rec.setdefault("status", "pending_review")
-            rec.setdefault("source", "quote_auto_sync")
-            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            saved.append(rec)
+    for raw in rows:
+        name = str(raw.get("name") or "").strip()
+        spec = str(raw.get("spec") or "-").strip() or "-"
+        price = str(raw.get("price") or "").strip()
+        if not name:
+            continue
+        rec = enqueue_price_learn_candidate(
+            material_name=name,
+            spec=spec,
+            new_price=price,
+            source_type="missing_price",
+            operator=str(raw.get("updated_by") or "quote_auto_sync"),
+            marker=str(raw.get("marker") or AUTO_SYNC_MARKER),
+            note=str(raw.get("note") or "legacy quote_sync_suggestions 转入统一队列"),
+            raw_context={"legacy_queue": QUEUE_QUOTE_SYNC_SUGGESTIONS, "legacy_row": dict(raw)},
+        )
+        saved.append(rec)
     return saved
 
 _KB_SLASH_PRICE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*/\s*[A-Za-z?]+\s*", re.I)
@@ -244,22 +447,26 @@ def price_admin_stats(kb_path: Path | None = None) -> dict[str, Any]:
 
 
 def price_exception_stats(exception_path: Path | None = None) -> dict[str, Any]:
-    if exception_path is not None:
-        entries, hidden_test = filter_visible_exceptions(_read_exception_entries(_exc_target(exception_path)))
-    else:
-        entries, hidden_test = filter_visible_exceptions(_load_merged_exception_entries())
+    entries, hidden_test = filter_visible_exceptions(
+        load_unified_learn_candidates(exception_path=exception_path)
+    )
     open_items = [x for x in entries if str(x.get("exception_status") or "open") == "open"]
     resolved = [x for x in entries if str(x.get("exception_status") or "") == "resolved"]
     excluded = [x for x in entries if str(x.get("exception_status") or "") == "excluded"]
     fixable = [x for x in open_items if str(x.get("review_hint") or "") == "fixable"]
     exclude_suggest = [x for x in open_items if str(x.get("review_hint") or "") == "exclude_suggest"]
+    legacy_sugg = sum(
+        1 for x in open_items if str(x.get("queue_source") or "") == QUEUE_QUOTE_SYNC_SUGGESTIONS
+    )
+    legacy_pending = sum(
+        1 for x in open_items if str(x.get("queue_source") or "") == QUEUE_PENDING_AUTO_LEARN
+    )
     latest = max((str(x.get("updated_at") or "") for x in entries), default="")
     drop_log_count = _count_drop_log_entries()
-    sugg_pending = _count_quote_sync_suggestions()
     return {
         "total_exceptions": len(entries),
         "open_exceptions": len(open_items),
-        "pending_review_count": len(open_items) + sugg_pending,
+        "pending_review_count": len(open_items),
         "resolved_exceptions": len(resolved),
         "excluded_exceptions": len(excluded),
         "fixable_exceptions": len(fixable),
@@ -270,7 +477,8 @@ def price_exception_stats(exception_path: Path | None = None) -> dict[str, Any]:
         "hidden_test_pollution": hidden_test,
         "exception_queue_is_local_cache": True,
         "exception_queue_path": str(review_exception_file()),
-        "quote_sync_suggestions_pending": sugg_pending,
+        "quote_sync_suggestions_pending": legacy_sugg,
+        "pending_auto_learn_pending": legacy_pending,
     }
 
 
@@ -282,22 +490,34 @@ def list_price_exceptions(
     status: str | None = "open",
     exception_path: Path | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
-    if exception_path is not None:
-        entries, _hidden = filter_visible_exceptions(_read_exception_entries(_exc_target(exception_path)))
-    else:
-        entries, _hidden = filter_visible_exceptions(_load_merged_exception_entries())
+    entries, _hidden = filter_visible_exceptions(
+        load_unified_learn_candidates(exception_path=exception_path)
+    )
     q = str(search_q or "").strip().lower()
     if q:
         entries = [
             x
             for x in entries
             if q
-            in f"{x.get('name')} {x.get('spec')} {x.get('price')} {x.get('note')} {x.get('updated_by')}".lower()
+            in " ".join(
+                [
+                    str(x.get("material_name") or x.get("name") or ""),
+                    str(x.get("spec") or ""),
+                    str(x.get("new_price") or x.get("price") or ""),
+                    str(x.get("source_type") or ""),
+                    str(x.get("note") or ""),
+                    str(x.get("operator") or x.get("updated_by") or ""),
+                ]
+            ).lower()
         ]
     sf = str(status or "open").strip().lower()
     if sf in {"open", "resolved", "excluded"}:
         entries = [x for x in entries if str(x.get("exception_status") or "open") == sf]
-    entries.sort(key=lambda x: (str(x.get("updated_at") or ""), str(x.get("exception_id") or "")), reverse=True)
+    entries.sort(
+        key=lambda x: (str(x.get("updated_at") or ""), str(x.get("candidate_id") or x.get("exception_id") or "")),
+        reverse=True,
+    )
+    entries = [_normalize_exception_row(x) for x in entries]
     total = len(entries)
     p = max(1, int(page))
     ps = max(1, min(int(page_size), 200))
@@ -313,49 +533,104 @@ def approve_price_exception(
     history_path: Path | None = None,
     exception_path: Path | None = None,
 ) -> dict[str, Any]:
-    eid = str(exception_id or payload.get("exception_id") or "").strip()
+    eid = str(exception_id or payload.get("exception_id") or payload.get("candidate_id") or "").strip()
     if not eid:
         raise ValueError("缺少异常数据 ID。")
-    if exception_path is not None:
-        merged_list = _read_exception_entries(_exc_target(exception_path))
-    else:
-        merged_list = _load_merged_exception_entries()
-    target = next((x for x in merged_list if str(x.get("exception_id") or "") == eid), None)
+    target = _find_unified_learn_candidate(eid, exception_path=exception_path)
     if target is None:
         raise ValueError("异常数据不存在，请刷新后重试。")
-    if str(target.get("exception_status") or "open") == "resolved":
+    target_norm = normalize_learn_candidate(target)
+    if str(target_norm.get("status") or STATUS_PENDING) != STATUS_PENDING:
         raise ValueError("这条异常数据已经处理过。")
 
-    merged = dict(target)
-    merged.update(payload or {})
-    merged["row_id"] = ""
-    merged["status"] = "active"
-    merged["marker"] = str(merged.get("marker") or "").strip()
-    merged["updated_by"] = str(merged.get("updated_by") or "admin")
-    result = upsert_price_entry(merged, kb_path=kb_path, history_path=history_path)
+    merged = dict(target_norm)
+    incoming = payload or {}
+    merged.update(incoming)
+    name = str(incoming.get("name") or incoming.get("material_name") or merged.get("material_name") or "").strip()
+    spec = str(incoming.get("spec") or merged.get("spec") or "-").strip() or "-"
+    new_price = str(incoming.get("price") or incoming.get("new_price") or merged.get("new_price") or "").strip()
+    if not name:
+        raise ValueError("材料名称不能为空。")
+    if not new_price:
+        raise ValueError("审核入库前请先补齐单价。")
+
+    quality = judge_kb_insert_candidate(name, spec, new_price)
+    if quality.action == KB_ACTION_DROP:
+        raise ValueError(f"价格质量校验未通过：{quality.reason}")
+
+    kb_target = _kb_target(kb_path)
+    conflict_price = _kb_name_spec_conflict_price(name, spec, new_price, kb_path=kb_target)
+    if conflict_price:
+        raise ValueError(
+            f"同名同规格已有不同价格「{conflict_price}」，不能静默覆盖；请处理冲突后再入库。"
+        )
+
+    backup_name = _backup_kb_file(kb_target)
+    operator = str(incoming.get("updated_by") or incoming.get("operator") or merged.get("operator") or "admin")
+    upsert_payload = {
+        "name": name,
+        "spec": spec,
+        "price": new_price,
+        "marker": str(merged.get("marker") or "").strip(),
+        "status": "active",
+        "updated_by": operator,
+        "note": str(merged.get("note") or "").strip(),
+    }
+    try:
+        result = upsert_price_entry(
+            upsert_payload,
+            kb_path=kb_path,
+            history_path=history_path,
+            source="admin_approve",
+        )
+    except Exception:
+        raise
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    sources: list[Path] = []
-    if exception_path is not None:
-        sources.append(_exc_target(exception_path))
-    else:
-        sources.extend([review_exception_file(), LEGACY_EXCEPTION_PATH])
-    for src in sources:
-        if not src.is_file():
-            continue
-        entries = _read_exception_entries(src)
-        touched = False
-        for item in entries:
-            if str(item.get("exception_id") or "") != eid:
-                continue
-            item["exception_status"] = "resolved"
-            item["resolved_at"] = now
-            item["resolved_by"] = str(merged.get("updated_by") or "admin")
-            item["approved_entry"] = result.get("entry")
-            touched = True
-        if touched:
-            _write_exception_entries(entries, src)
-    return {"ok": True, "entry": result.get("entry"), "exception_id": eid}
+    _append_history(
+        {
+            "ts": now,
+            "action": "admin_approve_learn",
+            "name": name,
+            "spec": spec,
+            "old_price": str(merged.get("old_price") or "").strip(),
+            "new_price": new_price,
+            "updated_by": operator,
+            "operator": operator,
+            "source_type": str(merged.get("source_type") or ""),
+            "quote_id": str(merged.get("quote_id") or merged.get("source_quote_id") or ""),
+            "quote_version_id": str(merged.get("quote_version_id") or ""),
+            "candidate_id": eid,
+            "note": str(merged.get("note") or "").strip(),
+            "backup_file": backup_name,
+        },
+        _hist_target(history_path),
+    )
+
+    resolved = normalize_learn_candidate(
+        {
+            **merged,
+            "material_name": name,
+            "name": name,
+            "spec": spec,
+            "new_price": new_price,
+            "price": new_price,
+            "status": STATUS_APPROVED,
+            "operator": operator,
+            "updated_by": operator,
+            "updated_at": now,
+        }
+    )
+    resolved["resolved_at"] = now
+    resolved["resolved_by"] = operator
+    resolved["approved_entry"] = result.get("entry")
+    resolved["last_approve_error"] = ""
+
+    queue = str(target_norm.get("queue_source") or QUEUE_PRICE_EXCEPTIONS)
+    if queue != QUEUE_PRICE_EXCEPTIONS:
+        _remove_legacy_queue_candidate(target_norm)
+    _archive_resolved_candidate(resolved, exception_path=exception_path)
+    return {"ok": True, "entry": result.get("entry"), "exception_id": eid, "candidate_id": eid}
 
 
 def delete_price_exception(
@@ -442,7 +717,9 @@ def exclude_price_exception(
     if target is None:
         raise ValueError("异常数据不存在，请刷新后重试。")
     if str(target.get("exception_status") or "open") != "open":
-        raise ValueError("这条异常数据已经处理过。")
+        norm = normalize_learn_candidate(target)
+        if str(norm.get("status") or STATUS_PENDING) != STATUS_PENDING:
+            raise ValueError("这条异常数据已经处理过。")
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     _append_auto_drop_log(
@@ -461,23 +738,229 @@ def exclude_price_exception(
         _drop_target(drop_log_path),
     )
     for item in entries:
-        if str(item.get("exception_id") or "") != eid:
+        if str(item.get("exception_id") or item.get("candidate_id") or "") != eid:
             continue
-        item["exception_status"] = "excluded"
-        item["excluded_at"] = now
-        item["excluded_by"] = str(updated_by or "admin")
-        if note:
-            item["note"] = str(note).strip()
+        rejected = normalize_learn_candidate(
+            {
+                **target,
+                **item,
+                "status": STATUS_REJECTED,
+                "reject_reason": str(note or target.get("reject_reason") or "人工标记排除"),
+                "operator": str(updated_by or "admin"),
+                "updated_by": str(updated_by or "admin"),
+                "updated_at": now,
+            }
+        )
+        rejected["excluded_at"] = now
+        rejected["excluded_by"] = str(updated_by or "admin")
+        item.clear()
+        item.update(rejected)
     _write_exception_entries(entries, path)
     return {
         "ok": True,
         "exception_id": eid,
+        "candidate_id": eid,
         "excluded": {
             "exception_id": eid,
-            "name": str(target.get("name") or ""),
+            "name": str(target.get("name") or target.get("material_name") or ""),
             "spec": str(target.get("spec") or ""),
         },
     }
+
+
+def reject_price_exception(
+    exception_id: str,
+    *,
+    exception_path: Path | None = None,
+    drop_log_path: Path | None = None,
+    updated_by: str = "admin",
+    reject_reason: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    reason = str(reject_reason or note or "人工驳回").strip() or "人工驳回"
+    return exclude_price_exception(
+        exception_id,
+        exception_path=exception_path,
+        drop_log_path=drop_log_path,
+        updated_by=updated_by,
+        note=reason,
+    )
+
+
+def approve_price_exceptions_bulk(
+    exception_ids: list[str],
+    *,
+    updated_by: str = "admin",
+    kb_path: Path | None = None,
+    history_path: Path | None = None,
+    exception_path: Path | None = None,
+) -> dict[str, Any]:
+    ids = [str(x).strip() for x in (exception_ids or []) if str(x).strip()]
+    if not ids:
+        raise ValueError("请至少选择一条待学习候选。")
+    all_entries = load_unified_learn_candidates(exception_path=exception_path)
+    by_id = {
+        str(x.get("exception_id") or x.get("candidate_id") or ""): normalize_learn_candidate(x)
+        for x in all_entries
+        if str(x.get("exception_id") or x.get("candidate_id") or "")
+    }
+    approved: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for eid in ids:
+        target = by_id.get(eid)
+        if target is None or str(target.get("status") or STATUS_PENDING) != STATUS_PENDING:
+            msg = "候选不存在或已处理"
+            errors.append({"exception_id": eid, "message": msg})
+            _note_candidate_approve_failure(eid, msg, exception_path=exception_path)
+            continue
+        try:
+            result = approve_price_exception(
+                eid,
+                {
+                    "name": target.get("material_name") or target.get("name"),
+                    "spec": target.get("spec"),
+                    "price": target.get("new_price") or target.get("price"),
+                    "updated_by": updated_by,
+                    "note": target.get("note"),
+                },
+                kb_path=kb_path,
+                history_path=history_path,
+                exception_path=exception_path,
+            )
+            approved.append({"exception_id": eid, "entry": result.get("entry")})
+        except (ValueError, RuntimeError, PermissionError) as exc:
+            msg = str(exc)
+            errors.append({"exception_id": eid, "message": msg})
+            _note_candidate_approve_failure(eid, msg, exception_path=exception_path)
+    if not approved and errors:
+        raise ValueError(errors[0]["message"])
+    return {
+        "ok": True,
+        "approved_count": len(approved),
+        "approved": approved,
+        "errors": errors,
+        "failed_count": len(errors),
+    }
+
+
+def reject_price_exceptions_bulk(
+    exception_ids: list[str],
+    *,
+    exception_path: Path | None = None,
+    drop_log_path: Path | None = None,
+    updated_by: str = "admin",
+    reject_reason: str = "",
+) -> dict[str, Any]:
+    ids = [str(x).strip() for x in (exception_ids or []) if str(x).strip()]
+    if not ids:
+        raise ValueError("请至少选择一条待学习候选。")
+    rejected: list[str] = []
+    errors: list[dict[str, str]] = []
+    reason = str(reject_reason or "批量驳回").strip() or "批量驳回"
+    for eid in ids:
+        try:
+            reject_price_exception(
+                eid,
+                exception_path=exception_path,
+                drop_log_path=drop_log_path,
+                updated_by=updated_by,
+                reject_reason=reason,
+            )
+            rejected.append(eid)
+        except ValueError as exc:
+            errors.append({"exception_id": eid, "message": str(exc)})
+    if not rejected and errors:
+        raise ValueError(errors[0]["message"])
+    return {
+        "ok": True,
+        "rejected_count": len(rejected),
+        "rejected_ids": rejected,
+        "errors": errors,
+    }
+
+
+def enqueue_price_learn_candidate(
+    *,
+    material_name: str,
+    spec: str = "-",
+    old_price: str = "",
+    new_price: str = "",
+    source_type: str = "smart_lookup_miss",
+    confidence: float | None = None,
+    quote_id: str = "",
+    quote_version_id: str = "",
+    product_name: str = "",
+    operator: str = "system",
+    note: str = "",
+    marker: str = "",
+    exception_reason: str = "",
+    review_hint: str = "",
+    raw_context: dict[str, Any] | None = None,
+    exception_path: Path | None = None,
+) -> dict[str, Any]:
+    path = _exc_target(exception_path)
+    existing = _read_exception_entries(path)
+    candidate = build_learn_candidate(
+        material_name=material_name,
+        spec=spec or "-",
+        old_price=old_price,
+        new_price=new_price,
+        source_type=source_type,
+        confidence=confidence,
+        quote_id=quote_id,
+        quote_version_id=quote_version_id,
+        product_name=product_name,
+        operator=operator,
+        note=note,
+        marker=marker,
+        exception_reason=exception_reason,
+        review_hint=review_hint,
+        raw_context=raw_context,
+    )
+    if not candidate.get("exception_reason"):
+        candidate["exception_reason"] = _derive_exception_reason_from_note(note)
+    if candidate.get("review_hint") not in {"fixable", "exclude_suggest", "review"}:
+        candidate["review_hint"] = _derive_review_hint_from_reason(str(candidate.get("exception_reason") or ""))
+    dedupe_key = candidate_dedupe_key(candidate)
+    for item in existing:
+        if is_pending_candidate(item) and candidate_dedupe_key(item) == dedupe_key:
+            return normalize_learn_candidate(item)
+    normalized = normalize_learn_candidate(candidate)
+    _append_price_exceptions([normalized], path)
+    return normalized
+
+
+def _backup_kb_file(kb_path: Path) -> str:
+    target = Path(kb_path).resolve()
+    if not target.is_file():
+        return ""
+    bak_path = target.with_suffix(f".bak-{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx")
+    try:
+        shutil.copy2(target, bak_path)
+        return str(bak_path.name)
+    except OSError:
+        return ""
+
+
+def _kb_name_spec_conflict_price(
+    name: str,
+    spec: str,
+    new_price: str,
+    *,
+    kb_path: Path,
+) -> str:
+    key = (_norm_key(name), _norm_key(spec))
+    new_pk = _norm_price(new_price)
+    if not key[0] or not new_pk:
+        return ""
+    for item in _read_entries(kb_path):
+        item_key = (_norm_key(item.name), _norm_key(item.spec))
+        if item_key != key:
+            continue
+        existing_pk = _norm_price(item.price)
+        if existing_pk and existing_pk != new_pk:
+            return str(item.price or "")
+    return ""
 
 
 def list_price_history(*, limit: int = 50, history_path: Path | None = None) -> list[dict[str, Any]]:
@@ -1245,58 +1728,68 @@ def _build_exception_payload(
     source_quote_id: str = "",
     product_name: str = "",
     is_combined_split: bool = False,
+    source_type: str = "",
+    old_price: str = "",
+    quote_version_id: str = "",
+    confidence: float | None = None,
+    raw_context: dict[str, Any] | None = None,
+    row: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     has_price = _has_usable_price(price)
-    return {
-        "name": name,
-        "spec": spec or "-",
-        "price": price,
-        "marker": marker,
-        "status": "open",
-        "updated_by": updated_by,
-        "note": note,
-        "source_quote_id": source_quote_id,
-        "product_name": product_name,
-        "exception_reason": format_exception_reason_label(quality, is_combined_split=is_combined_split),
-        "review_hint": classify_exception_review_hint(
-            name,
-            quality,
-            has_price=has_price,
-            is_combined_split=is_combined_split,
-        ),
-    }
+    reason = format_exception_reason_label(quality, is_combined_split=is_combined_split)
+    hint = classify_exception_review_hint(
+        name,
+        quality,
+        has_price=has_price,
+        is_combined_split=is_combined_split,
+    )
+    return build_learn_candidate(
+        material_name=name,
+        spec=spec or "-",
+        old_price=old_price,
+        new_price=price,
+        source_type=source_type or infer_source_type_from_sync(marker, row, has_price=has_price),
+        confidence=confidence,
+        quote_id=source_quote_id,
+        quote_version_id=quote_version_id,
+        product_name=product_name,
+        operator=updated_by,
+        note=note,
+        marker=marker,
+        exception_reason=reason,
+        review_hint=hint,
+        raw_context=raw_context,
+        row=row,
+    )
+
+
+def infer_source_type_from_sync(
+    marker: str,
+    row: dict[str, Any] | None,
+    *,
+    has_price: bool = True,
+) -> str:
+    from price_learn_candidate import infer_source_type
+
+    if marker == AUTO_CONFLICT_MARKER:
+        return "price_conflict"
+    if row and _row_price_needs_human_review(row):
+        return "ai_estimate"
+    if not has_price:
+        return "missing_price"
+    return "missing_price"
 
 
 def _normalize_exception_row(row: dict[str, Any]) -> dict[str, Any]:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    status = str(row.get("exception_status") or row.get("status") or "open").strip().lower()
-    if status not in {"open", "resolved", "excluded"}:
-        status = "open"
-    eid = str(row.get("exception_id") or "").strip() or f"ex-{uuid.uuid4().hex}"
-    reason = str(row.get("exception_reason") or "").strip()
+    norm = normalize_learn_candidate(row)
+    reason = str(norm.get("exception_reason") or "").strip()
     if not reason:
-        reason = _derive_exception_reason_from_note(str(row.get("note") or ""))
-    review_hint = str(row.get("review_hint") or "").strip()
+        reason = _derive_exception_reason_from_note(str(norm.get("note") or ""))
+        norm["exception_reason"] = reason
+    review_hint = str(norm.get("review_hint") or "").strip()
     if review_hint not in {"fixable", "exclude_suggest", "review"}:
-        review_hint = _derive_review_hint_from_reason(reason)
-    return {
-        "exception_id": eid,
-        "row_id": eid,
-        "name": str(row.get("name") or "").strip(),
-        "spec": str(row.get("spec") or "").strip() or "-",
-        "price": str(row.get("price") or "").strip(),
-        "marker": str(row.get("marker") or "").strip(),
-        "status": "pending",
-        "exception_status": status,
-        "exception_reason": reason,
-        "review_hint": review_hint,
-        "note": str(row.get("note") or "").strip(),
-        "updated_at": str(row.get("updated_at") or "").strip() or now,
-        "updated_by": str(row.get("updated_by") or "").strip() or "agent_auto",
-        "source_quote_id": str(row.get("source_quote_id") or "").strip(),
-        "product_name": str(row.get("product_name") or "").strip(),
-        "is_exception": True,
-    }
+        norm["review_hint"] = _derive_review_hint_from_reason(reason)
+    return norm
 
 
 def _auto_insert_trusted_entries(
@@ -1307,46 +1800,23 @@ def _auto_insert_trusted_entries(
     quote_id: str = "",
     product_name: str = "",
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    """可信材料自动写入 KB；正式库禁止时退回 suggestions 队列。"""
+    """已禁用自动写库：可信项仅进入统一候选队列。"""
+    _ = kb_path, history_path
     if not payloads:
         return [], []
-    path = _kb_target(kb_path)
-    try:
-        assert_official_kb_write_allowed(path, updated_by="quote_auto_learn", source="quote_auto_learn")
-    except PermissionError:
-        return [], payloads
-
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    rows = []
     for raw in payloads:
-        item = dict(raw)
-        item.setdefault("updated_at", now)
-        item.setdefault("updated_by", "quote_auto_learn")
-        item.setdefault("status", "active")
-        rows.append(item)
-    try:
-        saved = _upsert_price_entries_bulk(
-            rows,
-            kb_path=kb_path,
-            history_path=history_path,
-            source="quote_auto_learn",
+        enqueue_price_learn_candidate(
+            material_name=str(raw.get("name") or "").strip(),
+            spec=str(raw.get("spec") or "-").strip() or "-",
+            new_price=str(raw.get("price") or "").strip(),
+            source_type="missing_price",
+            quote_id=quote_id,
+            product_name=product_name,
+            operator="quote_auto_learn",
+            marker=str(raw.get("marker") or AUTO_SYNC_MARKER),
+            note=str(raw.get("note") or "quote_auto_learn 已禁用直写，转统一候选队列"),
         )
-    except Exception:
-        return [], payloads
-
-    for entry in saved:
-        _append_auto_learn_log(
-            {
-                "ts": now,
-                "action": "auto_insert",
-                "name": entry.get("name"),
-                "spec": entry.get("spec"),
-                "price": entry.get("price"),
-                "source_quote_id": quote_id,
-                "product_name": product_name,
-            }
-        )
-    return saved, []
+    return [], []
 
 
 def sync_quote_detail_rows_to_price_kb(
@@ -1357,13 +1827,12 @@ def sync_quote_detail_rows_to_price_kb(
     exception_path: Path | None = None,
     updated_by: str = "agent_auto",
 ) -> dict[str, Any]:
-    """报价完成后自动学习价格库。
+    """报价完成后收集待学习候选（禁止直写正式价格库）。
 
     规则：
     - 名称 + 规格 + 单价完全相同：跳过；
-    - 名称 + 规格相同但单价不同：进待审核异常队列；
-    - 可信新材料且有单价：自动写入 KB（正式库需 ALLOW_OFFICIAL_KB_AUTO_LEARN）；
-    - 可疑/缺价：进待审核异常队列；
+    - 名称 + 规格相同但单价不同：进待审核候选队列；
+    - 新材料/AI 估算/缺价/低置信：进待审核候选队列；
     - 非材料/垃圾：丢弃并记日志。
     """
     if not isinstance(quote_result, dict):
@@ -1396,6 +1865,9 @@ def sync_quote_detail_rows_to_price_kb(
     seen_this_quote: set[tuple[str, str, str]] = set()
     quote_id = str(quote_result.get("quote_id") or "").strip()
     product_name = str(quote_result.get("product_name") or "").strip()
+    quote_version_id = str(
+        quote_result.get("quote_version_id") or quote_result.get("version_id") or ""
+    ).strip()
     payloads_to_save: list[dict[str, str]] = []
     exceptions_to_save: list[dict[str, Any]] = []
 
@@ -1512,6 +1984,10 @@ def sync_quote_detail_rows_to_price_kb(
                         ),
                         source_quote_id=quote_id,
                         product_name=product_name,
+                        source_type="price_conflict",
+                        old_price=", ".join(sorted(existing_prices)),
+                        quote_version_id=quote_version_id,
+                        row=row,
                     )
                     exceptions_to_save.append(payload)
                     summary["conflicts"] += 1
@@ -1535,20 +2011,33 @@ def sync_quote_detail_rows_to_price_kb(
                     quality=quality,
                     source_quote_id=quote_id,
                     product_name=product_name,
+                    source_type="ai_estimate" if row_price_needs_review else "missing_price",
+                    quote_version_id=quote_version_id,
+                    row=row,
                 )
                 exceptions_to_save.append(payload)
                 summary["pending"] += 1
             elif has_price and quality.action == KB_ACTION_AUTO:
-                payload = _auto_price_payload(
+                note = (
+                    f"报价发现新材料，需人工确认后入库。"
+                    f"报价ID：{quote_id}；产品：{product_name}"
+                )
+                payload = _build_exception_payload(
                     name=name,
                     spec=spec,
                     price=price,
-                    status="active",
                     marker=AUTO_SYNC_MARKER,
-                    updated_by="quote_auto_learn",
-                    note=f"报价自动补入；报价ID：{quote_id}；产品：{product_name}",
+                    updated_by=updated_by,
+                    note=note,
+                    quality=quality,
+                    source_quote_id=quote_id,
+                    product_name=product_name,
+                    source_type="missing_price",
+                    quote_version_id=quote_version_id,
+                    row=row,
                 )
-                payloads_to_save.append(payload)
+                exceptions_to_save.append(payload)
+                summary["pending"] += 1
             else:
                 if is_combined_name:
                     note = (
@@ -1573,6 +2062,9 @@ def sync_quote_detail_rows_to_price_kb(
                     source_quote_id=quote_id,
                     product_name=product_name,
                     is_combined_split=is_combined_name,
+                    source_type="missing_price",
+                    quote_version_id=quote_version_id,
+                    row=row,
                 )
                 exceptions_to_save.append(payload)
                 summary["pending"] += 1
@@ -1595,40 +2087,6 @@ def sync_quote_detail_rows_to_price_kb(
                 "exception_id": entry.get("exception_id"),
             }
         )
-
-    if payloads_to_save:
-        inserted, fallback = _auto_insert_trusted_entries(
-            payloads_to_save,
-            kb_path=kb_path,
-            history_path=history_path,
-            quote_id=quote_id,
-            product_name=product_name,
-        )
-        summary["created"] = int(summary.get("created") or 0) + len(inserted)
-        summary["auto_inserted"] = int(summary.get("auto_inserted") or 0) + len(inserted)
-        for entry in inserted:
-            summary["items"].append(
-                {
-                    "name": entry.get("name"),
-                    "spec": entry.get("spec"),
-                    "price": entry.get("price"),
-                    "status": "active",
-                    "marker": AUTO_SYNC_MARKER,
-                }
-            )
-        if fallback:
-            queued = _append_quote_sync_suggestions(fallback)
-            summary["suggestions_queued"] = int(summary.get("suggestions_queued") or 0) + len(queued)
-            for payload in queued:
-                summary["items"].append(
-                    {
-                        "name": payload.get("name"),
-                        "spec": payload.get("spec"),
-                        "price": payload.get("price"),
-                        "status": "pending_review",
-                        "marker": payload.get("marker"),
-                    }
-                )
 
     return summary
 
