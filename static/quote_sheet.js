@@ -761,12 +761,16 @@
   function formatMoneyByLang(n, lang) {
     const x = Number(n);
     if (!Number.isFinite(x)) {
-      return "0.00";
+      return "0";
     }
-    return new Intl.NumberFormat(lang === "en" ? "en-US" : "zh-CN", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(x);
+    const rounded =
+      typeof formatDisplayNumber === "function"
+        ? formatDisplayNumber(x)
+        : String(Math.round(x * 10) / 10).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+    if (lang === "en") {
+      return rounded;
+    }
+    return rounded;
   }
 
   function lineTotal(qtyStr, priceStr) {
@@ -1555,12 +1559,16 @@
       const qtyTd = document.createElement("td");
       qtyTd.className = "col-qty qs-pdf-arial";
       qtyTd.style.textAlign = "center";
-      qtyTd.textContent =
+      let qtyDisp =
         translatedRow?.qty !== undefined && translatedRow?.qty !== null && translatedRow?.qty !== ""
           ? String(translatedRow.qty)
           : qtyEl?.value !== undefined && qtyEl.value !== ""
             ? String(qtyEl.value)
             : "";
+      if (typeof formatNumbersInDisplayText === "function") {
+        qtyDisp = formatNumbersInDisplayText(qtyDisp);
+      }
+      qtyTd.textContent = qtyDisp;
       tr.appendChild(qtyTd);
 
       const priceTd = document.createElement("td");
@@ -1625,6 +1633,10 @@
               ? String(priceEl.value)
               : "";
         totalDisp = formatMoneyByLang(totalVal, lang);
+      }
+      if (typeof formatNumbersInDisplayText === "function") {
+        priceDisp = formatNumbersInDisplayText(priceDisp);
+        totalDisp = formatNumbersInDisplayText(totalDisp);
       }
       priceTd.textContent = priceDisp;
       tr.appendChild(priceTd);

@@ -45,14 +45,14 @@
         <div id="workspaceChat" class="workspace-pane workspace-pane-visible">
           <section class="chat-window">
             <header class="chat-header">
-              <div class="agent-meta">
-                <div class="agent-avatar">栢博</div>
-                <div>
+              <div class="agent-meta welcome-identity">
+                <div class="agent-avatar" aria-hidden="true">栢博</div>
+                <div class="welcome-identity-text">
                   <h2>报价客服</h2>
                   <p>在线 · 自动报价引擎</p>
                 </div>
               </div>
-              <div id="llmStatus" class="model-status">AI 模型状态：未连接</div>
+              <div id="llmStatus" class="model-status" role="status">AI 模型状态：未连接</div>
             </header>
 
             <div id="adminUpdatesBanner" class="admin-updates-banner" hidden>
@@ -516,7 +516,8 @@
       </div>
     </main>
     <script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
-    <script src="/static/app.js"></script>
+    <script src="/static/display_number_format.js?v=display-num-1"></script>
+    <script src="/static/app.js?v=display-num-1"></script>
     <div id="qsExportPreflightModal" class="qs-export-preflight" hidden aria-hidden="true">
       <div class="qs-export-preflight-backdrop" data-export-preflight-dismiss="1"></div>
       <div

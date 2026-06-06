@@ -361,6 +361,56 @@ def apply_pricing_gate(
 
         out_rows.append(r)
 
+    structure_text = str(
+        payload.get("structure_text_snapshot") or payload.get("structure_text") or ""
+    ).strip()
+    try:
+        from structure_gap_hints import (
+            build_anomaly_review_hints,
+            build_structure_gap_hints,
+            enrich_row_ambiguous_classification,
+            merge_gap_hints_into_data_notice,
+        )
+
+        out_rows = [
+            enrich_row_ambiguous_classification(r, context=structure_text)
+            if isinstance(r, dict)
+            else r
+            for r in out_rows
+        ]
+        gap_hints = payload.get("structure_gap_hints")
+        if not isinstance(gap_hints, list) or not gap_hints:
+            gap_hints = build_structure_gap_hints(
+                structure_text,
+                out_rows,
+                demand_template=bool(payload.get("demand_template")),
+            )
+        if gap_hints:
+            result["structure_gap_hints"] = gap_hints
+            result["data_notice"] = merge_gap_hints_into_data_notice(
+                str(result.get("data_notice") or ""),
+                gap_hints,
+            )
+        try:
+            mt = float(result.get("material_total") or 0)
+        except (TypeError, ValueError):
+            mt = None
+        try:
+            pf = float(payload.get("processing_fee") or 0)
+        except (TypeError, ValueError):
+            pf = None
+        anomaly = build_anomaly_review_hints(
+            items=out_rows,
+            structure_text=structure_text,
+            gap_hints=gap_hints if isinstance(gap_hints, list) else None,
+            processing_fee=pf,
+            material_total=mt,
+        )
+        if anomaly:
+            result["anomaly_review_hints"] = anomaly
+    except Exception:
+        pass
+
     result["detail_rows"] = out_rows
 
     bag_gate = enrich_pricing_gate_for_bag_quote(result, payload)

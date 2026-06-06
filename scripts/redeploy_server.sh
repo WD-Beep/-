@@ -62,8 +62,8 @@ if [[ "${SKIP_PIP_INSTALL:-0}" != "1" ]]; then
   fi
 fi
 
-if [[ -z "${OPENAI_API_KEY:-}" && -z "${ANTHROPIC_API_KEY:-}" && -z "${MOONSHOT_API_KEY:-}" && -z "${KIMI_API_KEY:-}" ]]; then
-  echo "Error: configure OPENAI_API_KEY, ANTHROPIC_API_KEY, MOONSHOT_API_KEY, or KIMI_API_KEY in $ENV_FILE" >&2
+if [[ -z "${OPENAI_API_KEY:-}" && -z "${MOONSHOT_API_KEY:-}" && -z "${KIMI_API_KEY:-}" ]]; then
+  echo "Error: configure OPENAI_API_KEY (recommended) or MOONSHOT_API_KEY / KIMI_API_KEY in $ENV_FILE" >&2
   exit 1
 fi
 

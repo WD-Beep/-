@@ -344,9 +344,22 @@ _MISSING_QUOTE_FIELD_TEXT = {"", "-", "—", "无", "空", "none", "null", "nan"
 _PENDING_RECOGNITION_STATUSES = frozenset({RECOGNITION_CANDIDATE, RECOGNITION_SPLIT})
 
 
-def _is_missing_quote_field_text(value: object) -> bool:
+def is_missing_quote_field_text(value: object) -> bool:
     text = str(value or "").strip().lower()
     return not text or text in _MISSING_QUOTE_FIELD_TEXT
+
+
+def structure_gap_row_ready_for_cost(row: dict[str, Any]) -> bool:
+    """结构缺项行是否已具备参与计价的用量与单价。"""
+    if not bool(row.get("from_structure_gap_hint")):
+        return True
+    usage_ok = not is_missing_quote_field_text(row.get("usage"))
+    price_ok = looks_like_valid_unit_price_text(str(row.get("unit_price") or ""))
+    return usage_ok and price_ok
+
+
+def _is_missing_quote_field_text(value: object) -> bool:
+    return is_missing_quote_field_text(value)
 
 
 def _row_active_for_formal_quote(row: dict[str, Any]) -> bool:
@@ -358,16 +371,28 @@ def _row_active_for_formal_quote(row: dict[str, Any]) -> bool:
     return status != RECOGNITION_IGNORED
 
 
+def row_has_ai_estimate_pricing(row: dict[str, Any]) -> bool:
+    """AI/规则已补全用量与单价，可继续报价但需管理员复核。"""
+    if not isinstance(row, dict):
+        return False
+    has_ai_flag = any(bool(row.get(k)) for k in ("usage_ai", "unit_price_ai", "amount_ai"))
+    if not has_ai_flag and not bool(row.get("pricing_review_required")):
+        return False
+    return structure_gap_row_ready_for_cost(row)
+
+
 def summarize_structure_quote_gaps(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """列出正式报价前仍缺字段或待确认的行（不含已删除/已忽略）。"""
     gaps: list[dict[str, Any]] = []
     for idx, raw in enumerate(items):
         if not isinstance(raw, dict) or not _row_active_for_formal_quote(raw):
             continue
+        if row_has_ai_estimate_pricing(raw):
+            continue
         name = str(raw.get("name") or "").strip() or f"第{idx + 1}行"
         reasons: list[str] = []
         status = str(raw.get("recognition_status") or "").strip()
-        if status in _PENDING_RECOGNITION_STATUSES:
+        if status in _PENDING_RECOGNITION_STATUSES and not bool(raw.get("pricing_review_required")):
             reasons.append("待确认")
         if _is_missing_quote_field_text(raw.get("spec")):
             reasons.append("规格为空")
@@ -390,12 +415,15 @@ def validate_structure_items_for_formal_quote(
     gaps = summarize_structure_quote_gaps(items)
     pending_count = sum(1 for g in gaps if "待确认" in g.get("reasons", []))
     missing_price_count = sum(1 for g in gaps if "缺单价" in g.get("reasons", []))
+    ai_estimate_count = sum(1 for r in items if isinstance(r, dict) and row_has_ai_estimate_pricing(r))
     summary: dict[str, Any] = {
         "gaps": gaps,
         "gap_count": len(gaps),
         "pending_count": pending_count,
         "missing_price_count": missing_price_count,
     }
+    if ai_estimate_count:
+        summary["ai_estimate_count"] = ai_estimate_count
     if not gaps:
         return True, summary
     if allow_estimate:

@@ -351,18 +351,41 @@ def infer_missing_cost_candidates(
     *,
     vision_text: str = "",
     image_present: bool = False,
+    demand_template: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     根据结构说明 / 附图上下文，推理 Excel 未覆盖的成本候选项。
     返回 (candidate_rows, report)。
     """
+    from demand_field_sources import should_add_guarded_structure_component
+
     rows = [r for r in items if isinstance(r, dict)]
     working = list(rows)
     new_rows: list[dict[str, Any]] = []
     added_meta: list[dict[str, str]] = []
+    skipped_meta: list[dict[str, str]] = []
     existing_keys = {_dedupe_key(str(r.get("name") or "")) for r in working}
+    inference_blob = str(structure_text or "").strip()
+    if demand_template or not inference_blob:
+        explicit_n = count_excel_explicit_rows(working)
+        return [], {
+            "candidates_added": 0,
+            "added": [],
+            "skipped_guarded": skipped_meta,
+            "excel_explicit_row_count": explicit_n,
+            "detected_structure_component_count": 0,
+            "inferred_row_count": 0,
+            "sparse_excel_risk": assess_excel_sparse_risk(
+                structure_text=inference_blob,
+                items=working,
+                detected_component_count=0,
+                image_present=image_present,
+            ),
+            "image_present": bool(image_present),
+            "demand_template_suppressed": bool(demand_template),
+        }
 
-    for comp in _all_detected_components(structure_text):
+    for comp in _all_detected_components(inference_blob):
         if not comp.get("affects_cost"):
             continue
         name = str(comp.get("name") or "").strip()
@@ -372,13 +395,23 @@ def infer_missing_cost_candidates(
         key = _dedupe_key(name)
         if key in existing_keys:
             continue
+        snippet = _snippet_for_inference(name, comp, inference_blob)
+        confidence = float(comp.get("extracted_confidence") or 0.0)
+        if not should_add_guarded_structure_component(
+            name,
+            confidence=confidence,
+            source_snippet=snippet,
+            demand_template=demand_template,
+        ):
+            skipped_meta.append({"name": name, "reason": "guarded_structure_low_evidence"})
+            continue
         source_type = SOURCE_STRUCTURE
         if image_present and name in _vision_suggests_extra_components(vision_text):
             source_type = SOURCE_IMAGE
         row = build_inferred_candidate_row(
             component_name=name,
             source_type=source_type,
-            source_snippet=_snippet_for_inference(name, comp, structure_text),
+            source_snippet=snippet,
             structure_id=str(comp.get("structure_id") or ""),
             category_label=str(comp.get("category_label") or ""),
         )
@@ -386,7 +419,7 @@ def infer_missing_cost_candidates(
         existing_keys.add(key)
         added_meta.append({"name": name, "source_type": source_type})
 
-    if image_present:
+    if image_present and not demand_template:
         for hint in _vision_suggests_extra_components(vision_text):
             key = _dedupe_key(hint)
             if key in existing_keys:
@@ -394,21 +427,30 @@ def infer_missing_cost_candidates(
             synonyms = (hint,)
             if _items_cover_component(working + new_rows, synonyms):
                 continue
-            if _structure_mentions_keyword_safe(structure_text, synonyms):
+            if _structure_mentions_keyword_safe(inference_blob, synonyms):
+                continue
+            vis_snippet = str(vision_text or "")[:120] or "产品附图/结构图"
+            if not should_add_guarded_structure_component(
+                hint,
+                confidence=0.9,
+                source_snippet=vis_snippet,
+                demand_template=demand_template,
+            ):
+                skipped_meta.append({"name": hint, "reason": "guarded_structure_low_evidence"})
                 continue
             row = build_inferred_candidate_row(
                 component_name=hint,
                 source_type=SOURCE_IMAGE,
-                source_snippet=str(vision_text or "")[:120] or "产品附图/结构图",
+                source_snippet=vis_snippet,
             )
             new_rows.append(row)
             existing_keys.add(key)
             added_meta.append({"name": hint, "source_type": SOURCE_IMAGE})
 
     explicit_n = count_excel_explicit_rows(working)
-    detected_n = len(_all_detected_components(structure_text))
+    detected_n = len(_all_detected_components(inference_blob))
     sparse_risk = assess_excel_sparse_risk(
-        structure_text=structure_text,
+        structure_text=inference_blob,
         items=working,
         detected_component_count=detected_n,
         image_present=image_present,
@@ -416,11 +458,13 @@ def infer_missing_cost_candidates(
     report = {
         "candidates_added": len(new_rows),
         "added": added_meta,
+        "skipped_guarded": skipped_meta,
         "excel_explicit_row_count": explicit_n,
         "detected_structure_component_count": detected_n,
         "inferred_row_count": len(new_rows),
         "sparse_excel_risk": sparse_risk,
         "image_present": bool(image_present),
+        "demand_template_suppressed": bool(demand_template),
     }
     return new_rows, report
 
@@ -462,6 +506,7 @@ def merge_material_inference_candidates(
     structure_text: str,
     vision_text: str = "",
     image_present: bool = False,
+    demand_template: bool = False,
 ) -> dict[str, Any]:
     """将推理候选项并入 payload.items（不覆盖已有 Excel 行）。"""
     items = payload.get("items") if isinstance(payload.get("items"), list) else []
@@ -470,6 +515,7 @@ def merge_material_inference_candidates(
         items,
         vision_text=vision_text,
         image_present=image_present,
+        demand_template=demand_template,
     )
     if candidates and not payload.get("material_inference_merged"):
         payload["items"] = list(items) + candidates

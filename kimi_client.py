@@ -24,11 +24,8 @@ FALLBACK_BASE_URLS = (
 )
 DEFAULT_MODEL = "kimi-k2.6"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
-DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
-DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_OPENAI_MODEL = "codex5.5"
-ANTHROPIC_API_VERSION = "2023-06-01"
+DEFAULT_OPENAI_MODEL = "gpt-5.3-codex"
 # Cloudflare 等网关会拦截 Python-urllib 默认 UA（403 / error code 1010）。
 LLM_HTTP_USER_AGENT = "QuoteEngine/1.0 (compatible; curl/8.0)"
 
@@ -77,19 +74,7 @@ def _split_base_urls(raw: str) -> list[str]:
 
 
 def _configured_fallback_base_urls(api_key_source: str) -> list[str]:
-    provider_envs: tuple[str, ...]
-    if api_key_source == "ANTHROPIC_API_KEY":
-        provider_envs = ("ANTHROPIC_FALLBACK_BASE_URLS", "CLAUDE_FALLBACK_BASE_URLS")
-    elif api_key_source == "OPENAI_API_KEY":
-        provider_envs = ("OPENAI_FALLBACK_BASE_URLS",)
-    elif api_key_source == "DEEPSEEK_API_KEY":
-        provider_envs = ("DEEPSEEK_FALLBACK_BASE_URLS",)
-    elif api_key_source == "OPENCLAW_API_KEY":
-        provider_envs = ("OPENCLAW_FALLBACK_BASE_URLS",)
-    elif api_key_source in {"KIMI_API_KEY", "MOONSHOT_API_KEY"}:
-        provider_envs = ("KIMI_FALLBACK_BASE_URLS", "MOONSHOT_FALLBACK_BASE_URLS")
-    else:
-        provider_envs = ()
+    provider_envs: tuple[str, ...] = ("OPENAI_FALLBACK_BASE_URLS",) if api_key_source == "OPENAI_API_KEY" else ()
 
     out: list[str] = []
     seen: set[str] = set()
@@ -111,65 +96,17 @@ def _mask_api_key(key: str) -> str:
     return f"{text[:7]}…{text[-4:]}"
 
 
-class AnthropicVisionUnsupportedError(RuntimeError):
-    """Raised when OpenAI-style vision payload cannot be sent on Anthropic native API."""
-
-
 def _is_openai_config(config: Any = None, *, api_key_source: str = "") -> bool:
     if config is not None:
         api_key_source = config.api_key_source
     return str(api_key_source or "").strip() == "OPENAI_API_KEY"
 
 
-def _is_anthropic_config(config: Any = None, *, base_url: str = "", api_key_source: str = "") -> bool:
-    if config is not None:
-        base_url = config.base_url
-        api_key_source = config.api_key_source
-    if api_key_source == "OPENAI_API_KEY":
-        return False
-    bu = (base_url or "").lower()
-    if api_key_source == "ANTHROPIC_API_KEY":
-        return True
-    return "anthropic" in bu
-
-
-def _configured_llm_provider() -> str:
-    return str(os.getenv("LLM_PROVIDER") or os.getenv("QUOTE_LLM_PROVIDER") or "").strip().lower()
-
-
-def _forced_provider_api_key() -> tuple[str, str]:
-    provider = _configured_llm_provider()
-    if provider in {"anthropic", "claude", "claude-code"}:
-        api_key, source = first_non_empty_env("ANTHROPIC_API_KEY")
-        return api_key, source or "ANTHROPIC_API_KEY"
-    if provider in {"kimi", "moonshot"}:
-        api_key, source = first_non_empty_env("MOONSHOT_API_KEY", "KIMI_API_KEY")
-        return api_key, source or "MOONSHOT_API_KEY"
-    if provider == "deepseek":
-        api_key, source = first_non_empty_env("DEEPSEEK_API_KEY")
-        return api_key, source or "DEEPSEEK_API_KEY"
-    if provider in {"openai", "codex", "openai-codex"}:
-        api_key, source = first_non_empty_env("OPENAI_API_KEY")
-        return api_key, source or "OPENAI_API_KEY"
-    if provider == "openclaw":
-        api_key, source = first_non_empty_env("OPENCLAW_API_KEY")
-        return api_key, source or "OPENCLAW_API_KEY"
-    return "", ""
-
-
 def _resolve_provider_name(config: KimiConfig) -> str:
-    if _is_openai_config(config):
-        if "codex" in str(config.model or "").lower():
-            return "openai-codex"
+    bu = str(config.base_url or "").lower()
+    if "api.openai.com" in bu:
         return "openai"
-    bu = config.base_url.lower()
-    if _is_anthropic_config(config):
-        return "anthropic"
-    if "deepseek" in bu:
-        return "deepseek"
-    if "moonshot" in bu:
-        return "moonshot-kimi"
-    return "openai-compat"
+    return "openai-compatible"
 
 
 def _classify_http_error(http_code: int, body: str) -> str:
@@ -193,33 +130,14 @@ def _classify_http_error(http_code: int, body: str) -> str:
 
 def _openai_model_error_hint(error_code: str) -> str:
     if error_code == "invalid_model":
-        return "请检查 OPENAI_MODEL 是否为当前 API 可用模型（例如 codex5.5）。"
+        return "请检查 OPENAI_MODEL 是否为当前 API 可用模型（例如 gpt-5.3-codex）。"
     if error_code == "http_400":
         return "OpenAI 接口返回 HTTP 400，请检查请求体与 OPENAI_MODEL。"
     return ""
 
 
 def _resolve_base_url_for_source(api_key_source: str) -> str:
-    if api_key_source == "OPENAI_API_KEY":
-        return (os.getenv("OPENAI_BASE_URL") or DEFAULT_OPENAI_BASE_URL).strip()
-    if api_key_source == "ANTHROPIC_API_KEY":
-        return (os.getenv("ANTHROPIC_BASE_URL") or DEFAULT_ANTHROPIC_BASE_URL).strip()
-    if api_key_source == "DEEPSEEK_API_KEY":
-        return (os.getenv("DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_BASE_URL).strip()
-    if api_key_source in {"KIMI_API_KEY", "MOONSHOT_API_KEY"}:
-        raw, _ = first_non_empty_env("KIMI_BASE_URL", "MOONSHOT_BASE_URL")
-        return raw or DEFAULT_BASE_URL
-    if api_key_source == "OPENCLAW_API_KEY":
-        raw, _ = first_non_empty_env("OPENCLAW_BASE_URL")
-        return raw or DEFAULT_BASE_URL
-    raw, _ = first_non_empty_env(
-        "KIMI_BASE_URL",
-        "MOONSHOT_BASE_URL",
-        "OPENAI_BASE_URL",
-        "DEEPSEEK_BASE_URL",
-        "OPENCLAW_BASE_URL",
-    )
-    return raw or DEFAULT_BASE_URL
+    return (os.getenv("OPENAI_BASE_URL") or DEFAULT_OPENAI_BASE_URL).strip()
 
 
 def _record_last_call(*, success: bool, error: str = "", endpoint: str = "") -> None:
@@ -234,9 +152,8 @@ def _record_last_call(*, success: bool, error: str = "", endpoint: str = "") -> 
 
 def _endpoint_base_url(endpoint: str) -> str:
     ep = (endpoint or "").rstrip("/")
-    for suffix in ("/chat/completions", "/messages"):
-        if ep.endswith(suffix):
-            return ep[: -len(suffix)]
+    if ep.endswith("/chat/completions"):
+        return ep[: -len("/chat/completions")]
     return ep
 
 
@@ -340,41 +257,9 @@ class KimiConfig:
 
 
 def get_kimi_config() -> KimiConfig:
-    api_key, api_key_source = _forced_provider_api_key()
-    if not api_key_source:
-        api_key, api_key_source = first_non_empty_env(
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "KIMI_API_KEY",
-            "MOONSHOT_API_KEY",
-            "DEEPSEEK_API_KEY",
-            "OPENCLAW_API_KEY",
-            "API_KEY",
-        )
-    base_url = _resolve_base_url_for_source(api_key_source)
-    base_url = normalize_base_url(base_url)
-    if api_key_source == "ANTHROPIC_API_KEY" or _is_anthropic_config(
-        base_url=base_url,
-        api_key_source=api_key_source,
-    ):
-        model = (os.getenv("ANTHROPIC_MODEL") or DEFAULT_ANTHROPIC_MODEL).strip()
-    elif api_key_source in {"KIMI_API_KEY", "MOONSHOT_API_KEY"} or "moonshot" in base_url.lower():
-        model = (os.getenv("KIMI_MODEL") or os.getenv("MOONSHOT_MODEL") or DEFAULT_MODEL).strip()
-    elif api_key_source == "DEEPSEEK_API_KEY":
-        model = (os.getenv("DEEPSEEK_MODEL") or DEFAULT_DEEPSEEK_MODEL).strip()
-    elif api_key_source == "OPENAI_API_KEY":
-        model = (os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL).strip()
-    elif api_key_source == "OPENCLAW_API_KEY":
-        model = (os.getenv("OPENCLAW_MODEL") or DEFAULT_MODEL).strip()
-    else:
-        model = (
-            os.getenv("KIMI_MODEL")
-            or os.getenv("ANTHROPIC_MODEL")
-            or os.getenv("OPENAI_MODEL")
-            or os.getenv("DEEPSEEK_MODEL")
-            or os.getenv("OPENCLAW_MODEL")
-            or DEFAULT_MODEL
-        ).strip()
+    api_key, api_key_source = first_non_empty_env("OPENAI_API_KEY")
+    base_url = normalize_base_url(_resolve_base_url_for_source(api_key_source))
+    model = (os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL).strip()
     timeout_s = _parse_timeout(os.getenv("KIMI_TIMEOUT_SECONDS"), 25)
     temperature = _parse_temperature(os.getenv("KIMI_TEMPERATURE"), 1.0)
     return KimiConfig(
@@ -777,12 +662,9 @@ def complete_demand_quote(
     tried_vision = bool(use_struct_vision and vision_slice)
     err_tag = str(status.get("error") or "")
     vision_retry = tried_vision and (
-        err_tag == "anthropic_vision_unsupported"
-        or (raw is None and err_tag not in {"http_401", "http_403", "http_404"})
+        raw is None and err_tag not in {"http_401", "http_403", "http_404"}
     )
     if vision_retry:
-        if err_tag == "anthropic_vision_unsupported":
-            status["structure_vision_unsupported"] = True
         status.pop("error", None)
         status["structure_vision_fallback"] = True
         req_body_plain = {
@@ -945,12 +827,6 @@ def _call_kimi_with_fallback(
     t0 = time.perf_counter()
     network_failures: list[str] = []
     http_failures: list[tuple[int, str, str]] = []
-    use_anthropic = _is_anthropic_config(config)
-    if use_anthropic and _openai_messages_have_vision(req_body.get("messages")):
-        status["error"] = "anthropic_vision_unsupported"
-        status["duration_ms"] = int((time.perf_counter() - t0) * 1000)
-        _record_last_call(success=False, error="anthropic_vision_unsupported")
-        return None, status
     endpoint_candidates = build_endpoint_candidates(
         config.base_url,
         api_key_source=config.api_key_source,
@@ -965,7 +841,6 @@ def _call_kimi_with_fallback(
                     body=req_body,
                     timeout_s=config.timeout_s,
                     disable_proxy=False,
-                    use_anthropic_native=use_anthropic,
                 )
                 status["base_url"] = _endpoint_base_url(endpoint)
                 if attempt > 1:
@@ -973,11 +848,6 @@ def _call_kimi_with_fallback(
                 status["duration_ms"] = int((time.perf_counter() - t0) * 1000)
                 _record_last_call(success=True, error="", endpoint=endpoint)
                 return raw, status
-            except AnthropicVisionUnsupportedError as exc:
-                status["error"] = "anthropic_vision_unsupported"
-                status["duration_ms"] = int((time.perf_counter() - t0) * 1000)
-                _record_last_call(success=False, error=str(exc))
-                return None, status
             except error.HTTPError as exc:
                 err_body = _http_error_body(exc)
                 http_failures.append((exc.code, endpoint, err_body))
@@ -998,7 +868,6 @@ def _call_kimi_with_fallback(
                         body=req_body,
                         timeout_s=config.timeout_s,
                         disable_proxy=True,
-                        use_anthropic_native=use_anthropic,
                     )
                     status["base_url"] = _endpoint_base_url(endpoint)
                     if attempt > 1:
@@ -1006,11 +875,6 @@ def _call_kimi_with_fallback(
                     status["duration_ms"] = int((time.perf_counter() - t0) * 1000)
                     _record_last_call(success=True, error="", endpoint=endpoint)
                     return raw, status
-                except AnthropicVisionUnsupportedError as inner_vision_exc:
-                    status["error"] = "anthropic_vision_unsupported"
-                    status["duration_ms"] = int((time.perf_counter() - t0) * 1000)
-                    _record_last_call(success=False, error=str(inner_vision_exc))
-                    return None, status
                 except error.HTTPError as inner_exc:
                     ib = _http_error_body(inner_exc)
                     http_failures.append((inner_exc.code, endpoint, ib))
@@ -1045,7 +909,6 @@ def _call_kimi_with_fallback(
                         body=req_body,
                         timeout_s=config.timeout_s,
                         disable_proxy=True,
-                        use_anthropic_native=use_anthropic,
                     )
                     status["base_url"] = _endpoint_base_url(endpoint)
                     if attempt > 1:
@@ -1053,11 +916,6 @@ def _call_kimi_with_fallback(
                     status["duration_ms"] = int((time.perf_counter() - t0) * 1000)
                     _record_last_call(success=True, error="", endpoint=endpoint)
                     return raw, status
-                except AnthropicVisionUnsupportedError as exc:
-                    status["error"] = "anthropic_vision_unsupported"
-                    status["duration_ms"] = int((time.perf_counter() - t0) * 1000)
-                    _record_last_call(success=False, error=str(exc))
-                    return None, status
                 except error.HTTPError as inner_exc:
                     ib = _http_error_body(inner_exc)
                     http_failures.append((inner_exc.code, endpoint, ib))
@@ -1291,7 +1149,7 @@ def autofill_items_with_kimi(
     )
 
     user_message_content: str | list[dict[str, Any]]
-    if use_struct_vision and vision_slice and not _is_anthropic_config(config):
+    if use_struct_vision and vision_slice:
         parts: list[dict[str, Any]] = [
             {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
             for mime, b64 in vision_slice
@@ -1301,9 +1159,6 @@ def autofill_items_with_kimi(
         status["structure_vision_attempt"] = True
     else:
         user_message_content = user_body
-        if use_struct_vision and vision_slice and _is_anthropic_config(config):
-            status["structure_vision_unsupported"] = True
-            status["structure_vision_attempt"] = True
 
     req_body = {
         "model": config.model,
@@ -1402,9 +1257,9 @@ def _compose_connect_failure_hint(
         parts.append(status_error)
     head = " ".join(parts) if parts else "未获得上游具体错误。"
     tail = (
-        "建议核对：① 已设置 OPENAI_API_KEY / ANTHROPIC_API_KEY / KIMI_API_KEY 或 MOONSHOT_API_KEY；"
-        "② OpenAI 默认 OPENAI_BASE_URL=https://api.openai.com/v1 与 OPENAI_MODEL=codex5.5；"
-        "③ 国内 Moonshot 可设 MOONSHOT_BASE_URL=https://api.moonshot.cn/v1 ；"
+        "建议核对：① 已设置 OPENAI_API_KEY（及 OPENAI_BASE_URL / OPENAI_MODEL）；"
+        "② 默认 OPENAI_MODEL=gpt-5.3-codex，中转站示例 OPENAI_BASE_URL=https://code.codingplay.top/redeem；"
+        "③ 备选 Moonshot 可设 MOONSHOT_BASE_URL=https://api.moonshot.cn/v1 ；"
         "④ 代理环境可尝试关闭系统代理或为该域名设置 NO_PROXY；⑤ Key 与 Base URL 须匹配。"
     )
     return f"{head} {tail}"
@@ -1413,7 +1268,7 @@ def _compose_connect_failure_hint(
 def build_endpoint_candidates(base_url: str, *, api_key_source: str = "") -> list[str]:
     normalized = base_url.strip().rstrip("/")
     if not normalized:
-        normalized = DEFAULT_BASE_URL
+        normalized = DEFAULT_OPENAI_BASE_URL
     configured_fallbacks = _configured_fallback_base_urls(api_key_source)
     bases: list[str] = []
     seen: set[str] = set()
@@ -1423,8 +1278,6 @@ def build_endpoint_candidates(base_url: str, *, api_key_source: str = "") -> lis
             continue
         seen.add(u)
         bases.append(u)
-    if _is_anthropic_config(base_url=normalized, api_key_source=api_key_source):
-        return [f"{u}/messages" for u in bases]
     # 非 Moonshot 底座（DeepSeek / 自建网关等）：禁止静默切换域名，避免 Key 错配。
     if not _moonshot_compatible_base(normalized):
         return [f"{u}/chat/completions" for u in bases]
@@ -1456,123 +1309,6 @@ def _openai_messages_have_vision(messages: Any) -> bool:
     return False
 
 
-def split_openai_messages_for_anthropic(
-    messages: list[dict[str, Any]],
-) -> tuple[str, list[dict[str, Any]]]:
-    """Split OpenAI-style messages into Anthropic system + messages."""
-    system_parts: list[str] = []
-    out: list[dict[str, Any]] = []
-    for msg in messages:
-        if not isinstance(msg, dict):
-            continue
-        role = str(msg.get("role") or "user").strip().lower()
-        content = msg.get("content")
-        if role == "system":
-            if isinstance(content, str):
-                system_parts.append(content)
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        system_parts.append(str(part.get("text") or ""))
-            continue
-        if role not in {"user", "assistant"}:
-            role = "user"
-        if isinstance(content, str):
-            out.append({"role": role, "content": [{"type": "text", "text": content}]})
-        elif isinstance(content, list):
-            if _openai_messages_have_vision([msg]):
-                raise AnthropicVisionUnsupportedError(
-                    "Anthropic 原生 API 暂不支持 OpenAI image_url 多模态；请关闭结构附图或改用 Moonshot。"
-                )
-            text_bits: list[str] = []
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    text_bits.append(str(part.get("text") or ""))
-            joined = "\n".join(t for t in text_bits if t)
-            out.append({"role": role, "content": [{"type": "text", "text": joined}]})
-        else:
-            out.append({"role": role, "content": [{"type": "text", "text": str(content or "")}]})
-    if not out:
-        out = [{"role": "user", "content": [{"type": "text", "text": ""}]}]
-    return "\n\n".join(p for p in system_parts if p.strip()), out
-
-
-def build_anthropic_request_body(openai_body: dict[str, Any]) -> dict[str, Any]:
-    messages_in = openai_body.get("messages")
-    if not isinstance(messages_in, list):
-        messages_in = []
-    system_text, anthropic_messages = split_openai_messages_for_anthropic(messages_in)
-    if openai_body.get("response_format"):
-        system_text = (
-            (system_text + "\n\n" if system_text else "")
-            + "You must respond with valid JSON only, no markdown fences."
-        )
-    max_tokens = openai_body.get("max_completion_tokens") or openai_body.get("max_tokens") or 1024
-    try:
-        max_tokens = int(max_tokens)
-    except (TypeError, ValueError):
-        max_tokens = 1024
-    max_tokens = max(16, min(max_tokens, 8192))
-    temperature = openai_body.get("temperature")
-    if temperature is None:
-        temperature = 1.0
-    body: dict[str, Any] = {
-        "model": openai_body.get("model"),
-        "max_tokens": max_tokens,
-        "messages": anthropic_messages,
-    }
-    if system_text.strip():
-        body["system"] = system_text
-    if temperature is not None:
-        body["temperature"] = temperature
-    return body
-
-
-def anthropic_raw_to_openai_compat(raw: str) -> str:
-    """Convert Anthropic /messages response JSON to OpenAI chat.completion shape."""
-    payload = json.loads(raw)
-    text_parts: list[str] = []
-    for block in payload.get("content") or []:
-        if isinstance(block, dict) and block.get("type") == "text":
-            text_parts.append(str(block.get("text") or ""))
-    content = "".join(text_parts)
-    openai_shape = {
-        "choices": [{"message": {"role": "assistant", "content": content}}],
-        "model": payload.get("model"),
-    }
-    return json.dumps(openai_shape, ensure_ascii=False)
-
-
-def send_anthropic_messages_request(
-    *,
-    endpoint: str,
-    api_key: str,
-    body: dict[str, Any],
-    timeout_s: int,
-    disable_proxy: bool,
-) -> str:
-    anthropic_body = build_anthropic_request_body(body)
-    http_request = request.Request(
-        endpoint,
-        data=json.dumps(anthropic_body, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": LLM_HTTP_USER_AGENT,
-            "x-api-key": api_key,
-            "anthropic-version": ANTHROPIC_API_VERSION,
-        },
-        method="POST",
-    )
-    if disable_proxy:
-        opener = request.build_opener(request.ProxyHandler({}))
-        with opener.open(http_request, timeout=timeout_s) as resp:
-            raw = resp.read().decode("utf-8")
-    else:
-        with request.urlopen(http_request, timeout=timeout_s) as resp:
-            raw = resp.read().decode("utf-8")
-    return anthropic_raw_to_openai_compat(raw)
-
-
 def send_chat_request(
     *,
     endpoint: str,
@@ -1580,16 +1316,7 @@ def send_chat_request(
     body: dict[str, Any],
     timeout_s: int,
     disable_proxy: bool,
-    use_anthropic_native: bool = False,
 ) -> str:
-    if use_anthropic_native or endpoint.rstrip("/").endswith("/messages"):
-        return send_anthropic_messages_request(
-            endpoint=endpoint,
-            api_key=api_key,
-            body=body,
-            timeout_s=timeout_s,
-            disable_proxy=disable_proxy,
-        )
     http_request = request.Request(
         endpoint,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -1668,7 +1395,6 @@ def _send_chat_request_moonshot_with_400_relax(
     body: dict[str, Any],
     timeout_s: int,
     disable_proxy: bool,
-    use_anthropic_native: bool = False,
 ) -> str:
     """同一 endpoint 上对 400 做参数降级重试；其它 HTTP 状态立即抛出。"""
     last_400: error.HTTPError | None = None
@@ -1680,7 +1406,6 @@ def _send_chat_request_moonshot_with_400_relax(
                 body=vb,
                 timeout_s=timeout_s,
                 disable_proxy=disable_proxy,
-                use_anthropic_native=use_anthropic_native or endpoint.rstrip("/").endswith("/messages"),
             )
         except error.HTTPError as exc:
             if exc.code == 400:
@@ -2664,9 +2389,16 @@ def _kb_hit_has_valid_unit_price(row: dict[str, Any]) -> bool:
 
 
 MARKET_ESTIMATE_NOTE = "市场估算，需人工复核"
+STRUCTURE_GAP_AI_ESTIMATE_NOTE = "AI估算价，待管理员复核"
+
+
+def _is_structure_gap_row(row: dict[str, Any]) -> bool:
+    return bool(row.get("from_structure_gap_hint"))
 
 
 def _is_structure_or_split_market_candidate(row: dict[str, Any]) -> bool:
+    if _is_structure_gap_row(row):
+        return True
     st = str(row.get("source_type") or "").strip()
     if st in {"structure_inferred", "image_inferred"}:
         return True
@@ -2806,9 +2538,79 @@ def _apply_local_price_fallback(items: list[dict[str, Any]]) -> list[dict[str, A
     return merged
 
 
+def _apply_structure_gap_process_usage_defaults(row: dict[str, Any]) -> None:
+    if not _is_structure_gap_row(row):
+        return
+    usage = str(row.get("usage") or "").strip()
+    if usage and not _is_missing(usage):
+        return
+    blob = " ".join(
+        [
+            str(row.get("name") or "").strip().lower(),
+            str(row.get("calc_note") or "").strip().lower(),
+            str(row.get("role") or "").strip().lower(),
+        ]
+    )
+    if any(keyword in blob for keyword in ("丝印", "烫印", "热转", "印刷", "刺绣", "logo")):
+        row["usage"] = "1处"
+        row["usage_ai"] = True
+    elif any(keyword in blob for keyword in ("车缝", "缝纫", "加工", "工艺费")):
+        row["usage"] = "1道工序"
+        row["usage_ai"] = True
+    elif any(keyword in blob for keyword in ("织带", "webbing", "包边")):
+        row["usage"] = "1条"
+        row["usage_ai"] = True
+    else:
+        row["usage"] = "1处"
+        row["usage_ai"] = True
+
+
+def _apply_structure_gap_row_cost_flags(row: dict[str, Any]) -> None:
+    if not _is_structure_gap_row(row):
+        return
+    from material_row_validity import structure_gap_row_ready_for_cost
+
+    if structure_gap_row_ready_for_cost(row):
+        row["exclude_from_cost"] = False
+        row["amount_in_cost"] = True
+        row["structure_gap_pending_pricing"] = False
+        row["needs_manual_confirm"] = True
+        row["pricing_review_required"] = True
+        if any(_as_bool(row.get(k)) for k in ("usage_ai", "unit_price_ai", "amount_ai")):
+            row["recognition_reason"] = "AI估算用量/单价，待管理员复核"
+            cn = str(row.get("calc_note") or "").strip()
+            if STRUCTURE_GAP_AI_ESTIMATE_NOTE not in cn:
+                row["calc_note"] = f"{cn}；{STRUCTURE_GAP_AI_ESTIMATE_NOTE}" if cn else STRUCTURE_GAP_AI_ESTIMATE_NOTE
+            if _needs_market_unit_price_estimate(row) or _as_bool(row.get("unit_price_ai")):
+                _apply_market_estimate_row_meta(row)
+    else:
+        row["exclude_from_cost"] = True
+        row["amount_in_cost"] = False
+        row["structure_gap_pending_pricing"] = True
+
+
+def finalize_structure_gap_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """结构缺项：本地规则 + 知识库行情估算用量/单价，并标记待复核。"""
+    staged: list[dict[str, Any]] = []
+    for source in items:
+        if not isinstance(source, dict):
+            continue
+        row = dict(source)
+        if _is_structure_gap_row(row):
+            _apply_structure_gap_process_usage_defaults(row)
+        staged.append(row)
+    filled = _apply_local_price_fallback(staged)
+    out: list[dict[str, Any]] = []
+    for row in filled:
+        if _is_structure_gap_row(row):
+            _apply_structure_gap_row_cost_flags(row)
+        out.append(row)
+    return out
+
+
 def prepare_structure_rows_for_market_estimate(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Fill visible market estimates for structure/split candidates before confirmation."""
-    return _apply_local_price_fallback(items)
+    """Fill visible market estimates for structure/split/gap candidates before confirmation."""
+    return finalize_structure_gap_rows(items)
 
 
 def _estimate_unit_price_text(row: dict[str, Any]) -> str:
@@ -2871,6 +2673,9 @@ def _estimate_unit_price_text(row: dict[str, Any]) -> str:
     if any(keyword in joined for keyword in ("logo", "丝印", "烫印", "热转印", "刺绣", "反光")):
         unit = "元/处"
         return _format_price_text(4.0, unit)
+    if any(keyword in joined for keyword in ("车缝", "缝纫", "加工费", "工艺费")):
+        unit = "元/处"
+        return _format_price_text(3.0, unit)
     if any(keyword in joined for keyword in ("加固", "辅料", "reinforce", "trim")):
         unit = "元/处"
         return _format_price_text(3.0, unit)
@@ -2994,7 +2799,6 @@ def explain_quote_advisory(
                 body=req_payload,
                 timeout_s=config.timeout_s,
                 disable_proxy=False,
-                use_anthropic_native=_is_anthropic_config(config),
             )
             status["base_url"] = _endpoint_base_url(endpoint)
             break

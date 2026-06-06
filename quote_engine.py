@@ -75,11 +75,13 @@ class LineItem:
     unit_conversion_basis: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        from display_number_format import format_numbers_in_display_text
+
         out = {
             "name": self.name,
-            "spec": self.spec or "-",
-            "usage": self.usage or "-",
-            "unit_price": self.unit_price or "-",
+            "spec": format_numbers_in_display_text(self.spec or "-"),
+            "usage": format_numbers_in_display_text(self.usage or "-"),
+            "unit_price": format_numbers_in_display_text(self.unit_price or "-"),
             "amount": round(self.amount, 2),
             "amount_text": format_money(self.amount),
             "source": normalize_source(self.source),
@@ -381,11 +383,15 @@ def default_line_items() -> tuple[LineItem, ...]:
 
 
 def format_money(value: float) -> str:
-    return f"{value:.2f}元"
+    from display_number_format import format_display_money_cny
+
+    return format_display_money_cny(value)
 
 
 def format_money_usd(value: float) -> str:
-    return f"${round(float(value), 2):.2f}"
+    from display_number_format import format_display_money_usd
+
+    return format_display_money_usd(value)
 
 
 VAT_ON_COST_RATE = 0.13

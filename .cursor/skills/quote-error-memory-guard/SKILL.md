@@ -292,6 +292,15 @@ description: >-
 - 必测项：PDF 尺寸完整 `37×12×17cm`；描述仍 `210D涤纶`；黄色条在；含税价有值；`pytest tests/test_quote_sheet_pdf_layout.py`
 - 相关文件/模块：static/styles.css、static/quote_sheet.js、static/index.html
 
+### 错误模式：结构说明误生成 BOM / 缺项静默漏算 / 歧义物料算错类
+- 发生场景：规范需求表 B 区结构说明、备注、成本要求；物料名含「外带反射」等歧义词
+- 错误表现：网袋/隔层/侧袋等自动生成推理待核 BOM 并计价；或结构说明有结构词但无提示；外带反射被静默按主面料面积算
+- 根因：结构说明与 C 区显式字段未分流；缺项无覆盖检查；歧义物料无归类说明
+- 正确做法：C 区外料/里料/拉链/工艺等直接进 BOM；结构说明只进 `structure_gap_hints`（`participates_in_cost=False`）；用户确认后 `confirmation_source=structure_confirmed` 才入 BOM；歧义物料输出 `ambiguous_material_classification`
+- 禁止做法：结构说明关键词直接生成正式 BOM；歧义物料低置信度静默计价；改动 PDF/审批主流程
+- 必测项：`pytest tests/test_structure_gap_hints.py tests/test_demand_template_structure_inference.py`
+- 相关文件/模块：structure_gap_hints.py、bag_quote_pipeline.py、server.py、quote_validation_gate.py、static/app.js
+
 ### 错误模式：推理待核结构件/工艺件默认用量 1套/1组
 - 发生场景：结构推理生成 BOM、结构确认表、物料明细「规格/用量」列
 - 错误表现：侧袋/背垫/提手/隔层/工艺费等显示 `推理待核 / 1套`，并按 1 套参与小计
@@ -300,6 +309,33 @@ description: >-
 - 禁止做法：推理待核项默认 `1套/1组`；待填数量参与正式计价
 - 必测项：`pytest tests/test_pending_inference_usage.py tests/test_structure_confirmation_merge.py tests/test_material_detail_display.py tests/test_bag_quote_pipeline.py`；BOM 中背垫→几片、提手→几条、工艺费→几道工序
 - 相关文件/模块：material_inference.py、kimi_client.py、material_detail_display.py
+
+### 错误模式：需求表结构说明误生成推理待核 BOM（网袋/隔层）
+- 发生场景：规范需求表（A–G 区块）上传后结构确认弹窗
+- 错误表现：结构说明/参考图/成本要求中的「隔层」「网袋」等被当成真实结构件，自动生成「推理待核」BOM 行
+- 根因：`apply_bag_quote_preparse` 对完整 `structure_text`（含 B 区结构说明 + xlsx 附录）做结构清单/推理补漏，未区分字段来源
+- 正确做法：`demand_field_sources` 标记字段类型；`demand_template=True` 时 `structure_inference_text=""`；仅 `explicit_material_field`/`explicit_accessory_field`/`process_field` 生成 BOM；备注命中只进 `structure_inference_hints` 风险提示
+- 禁止做法：从「结构说明」「参考图片/链接」「成本要控制」自动生成网袋/隔层/侧袋等待核行
+- 必测项：`pytest tests/test_demand_template_structure_inference.py`；模板表上传后结构确认表无网袋/隔层推理行；C 区拉链/外料仍正常
+- 相关文件/模块：demand_field_sources.py、demand_parser.py、bag_quote_pipeline.py、material_inference.py、server.py
+
+### 错误模式：结构缺项缺用量/单价阻断正式报价
+- 发生场景：结构/明细预览中丝印、车缝等结构缺项勾选「加入正式 BOM」
+- 错误表现：显示「待补用量/单价」，提示必须手填后才能报价，业务员无法继续
+- 根因：缺项行 `exclude_from_cost=True`；校验默认阻断；`merge_structure_confirmation_user_items` 合并补丁时清掉 AI 标记
+- 正确做法：规则估算用量/单价；徽章「AI估算待复核」；允许继续报价并在结果中提示待复核；管理员改价保存视为确认
+- 禁止做法：AI 估算伪装知识库命中；客户 PDF 出现「AI估算」
+- 必测项：`pytest tests/test_structure_gap_ai_estimate.py`
+- 相关文件/模块：kimi_client.py、material_row_validity.py、server.py、static/app.js、static/admin/admin.js
+
+### 错误模式：展示层漏格式化（2 位及以上小数 / 整数带 .0）
+- 发生场景：前台计算过程拆解表、物料合计、管理员 BOM/板房用量表、报价单 PDF/预填接口
+- 错误表现：`12.5579元/㎡`、`20.50元`、`2.3901元` 等长小数或固定两位小数直接输出
+- 根因：部分渲染函数仍 `String(...)` / `.toFixed(2)`；预填接口 text 字段原样透传 tier 长小数
+- 正确做法：展示层统一 `formatNumbersInDisplayText` / `formatDisplayNumber` / `formatBomDisplayNumberText` / `formatMoney`；预填用 `format_numbers_in_display_text` 格式化客户可见 price text；计算仍用原始数值字段
+- 禁止做法：为展示提前 round 后端 tier/amount 数值；`.toFixed(2)` 固定两位展示
+- 必测项：`pytest tests/test_display_number_format.py tests/test_display_format_layers.py`；前台/后台/PDF 不出现 2 位及以上小数；整数不显示 `.0`
+- 相关文件/模块：static/app.js、static/admin/admin.js、static/quote_sheet.js、quote_sheet_prefill.py、display_number_format.py
 
 ## 快速验收命令（自报项目目录）
 

@@ -63,6 +63,7 @@ from material_row_validity import (
     apply_material_validity_layer,
     confirm_material_candidates_for_quote,
     should_skip_knowledge_learn_row,
+    structure_gap_row_ready_for_cost,
     summarize_structure_quote_gaps,
     validate_structure_items_for_formal_quote,
 )
@@ -86,9 +87,6 @@ def _load_local_env_file() -> None:
         return
     merge_keys = frozenset(
         {
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_MODEL",
             "LLM_PROVIDER",
             "QUOTE_LLM_PROVIDER",
             "MOONSHOT_API_KEY",
@@ -572,15 +570,60 @@ def merge_structure_confirmation_user_items(
             row["calc_method"] = cn
             touched = True
         if touched:
-            for mk in ai_keys:
-                row.pop(mk, None)
+            has_ai_estimate_patch = any(
+                entry.get(k) for k in ("usage_ai", "unit_price_ai", "amount_ai", "pricing_review_required")
+            ) or str(entry.get("source") or "").strip().lower() == "ai"
+            if has_ai_estimate_patch:
+                for k in ("usage_ai", "unit_price_ai", "amount_ai"):
+                    if k in entry:
+                        row[k] = bool(entry.get(k))
+                if entry.get("pricing_review_required") is not None:
+                    row["pricing_review_required"] = bool(entry.get("pricing_review_required"))
+                for k in ("recognition_reason", "recognition_status"):
+                    if entry.get(k) is not None:
+                        row[k] = str(entry.get(k) or "").strip()
+                src = str(entry.get("source") or "").strip()
+                if src:
+                    row["source"] = src
+            else:
+                for mk in ai_keys:
+                    row.pop(mk, None)
+                row.pop("pricing_review_required", None)
         if unit_price_patched and not amount_patched:
             reconcile_row_amount_after_unit_price_change(
                 row,
                 old_unit_text=old_unit_text,
                 old_amount=old_amount_value,
             )
+        if entry.get("from_structure_gap_hint") or entry.get("confirmation_source"):
+            src = str(entry.get("confirmation_source") or "").strip()
+            if src:
+                row["confirmation_source"] = src
+            if entry.get("from_structure_gap_hint"):
+                row["from_structure_gap_hint"] = True
+                hid = str(entry.get("structure_gap_hint_id") or row.get("structure_gap_hint_id") or "").strip()
+                if hid:
+                    row["structure_gap_hint_id"] = hid
+                row["source"] = "structure_confirmed"
+                if structure_gap_row_ready_for_cost(row):
+                    row["exclude_from_cost"] = False
+                    row["amount_in_cost"] = True
+                else:
+                    row["exclude_from_cost"] = True
+                    row["amount_in_cost"] = False
         if is_new_row and touched and str(row.get("name") or "").strip():
+            if not row.get("confirmation_source"):
+                row["confirmation_source"] = "structure_confirmed"
+            if row.get("from_structure_gap_hint"):
+                if structure_gap_row_ready_for_cost(row):
+                    row["exclude_from_cost"] = False
+                    row["amount_in_cost"] = True
+                else:
+                    row["exclude_from_cost"] = True
+                    row["amount_in_cost"] = False
+            else:
+                row.pop("exclude_from_cost", None)
+                row.setdefault("amount_in_cost", True)
             appended.append(row)
     return [row for row in out + appended if not row.get("_structure_deleted")]
 
@@ -602,6 +645,12 @@ def build_structure_confirmation_payload(
             product_size=payload.get("product_size")
             if isinstance(payload.get("product_size"), dict)
             else None,
+        )
+        from structure_gap_hints import enrich_items_ambiguous_classification
+
+        rows = enrich_items_ambiguous_classification(
+            rows,
+            context=str(structure_text or "").strip(),
         )
         payload["items"] = rows
     size = payload.get("product_size") if isinstance(payload.get("product_size"), dict) else {}
@@ -669,6 +718,26 @@ def build_structure_confirmation_payload(
     inferred_n = int(inf_report.get("inferred_row_count") or inf_report.get("candidates_added") or 0)
     if inferred_n:
         risks.append(f"{inferred_n} 项结构/图片推理成本候选项（需人工复核）")
+    gap_hints = payload.get("structure_gap_hints")
+    if not isinstance(gap_hints, list) or not gap_hints:
+        from structure_gap_hints import build_structure_gap_hints
+
+        gap_hints = build_structure_gap_hints(
+            str(structure_text or ""),
+            rows,
+            demand_template=bool(payload.get("demand_template")),
+        )
+        if gap_hints:
+            payload["structure_gap_hints"] = gap_hints
+    if isinstance(gap_hints, list) and gap_hints:
+        uncovered = [h for h in gap_hints if isinstance(h, dict) and not h.get("bom_covered")]
+        if uncovered:
+            names = "、".join(str(h.get("detected_text") or h.get("name") or "") for h in uncovered[:6])
+            risks.append(f"结构说明提及 {names}，BOM 可能未覆盖，请确认缺项")
+        else:
+            hint_names = "、".join(str(h.get("name") or "") for h in gap_hints[:6] if isinstance(h, dict))
+            if hint_names:
+                risks.append(f"结构说明提及 {hint_names}，请核对是否已完整计入")
     sparse = inf_report.get("sparse_excel_risk")
     if isinstance(sparse, dict) and sparse.get("triggered"):
         risks.append(str(sparse.get("reason") or "Excel 材料行偏少，相对结构/图片复杂度存在漏计风险"))
@@ -698,6 +767,16 @@ def build_structure_confirmation_payload(
         resp["structure_items"] = structure_checklist.get("items") or []
         resp["bag_quote_skill"] = payload.get("bag_quote_skill")
         resp["bag_quote_pipeline"] = payload.get("bag_quote_pipeline")
+    if isinstance(gap_hints, list) and gap_hints:
+        resp["structure_gap_hints"] = gap_hints
+        from structure_gap_hints import build_anomaly_review_hints
+
+        resp["anomaly_review_hints"] = build_anomaly_review_hints(
+            items=rows,
+            structure_text=str(structure_text or ""),
+            gap_hints=gap_hints,
+            processing_fee=payload.get("processing_fee"),
+        )
     return resp
 
 
@@ -1208,6 +1287,8 @@ def _persist_quote_with_sales_user(
             "product_size",
             "product_size_text",
             "structure_checklist",
+            "structure_gap_hints",
+            "anomaly_review_hints",
         ):
             val = payload.get(key)
             if val is None or val == "":
@@ -3856,6 +3937,8 @@ class QuoteHandler(BaseHTTPRequestHandler):
                 apply_bag_quote_preparse(
                     payload,
                     structure_text=str(demand_parse_result.structure_text or ""),
+                    structure_inference_text=str(demand_parse_result.structure_inference_text or ""),
+                    demand_template=bool(demand_parse_result.is_demand_template),
                     product_type=str(demand_parse_result.product_type or ""),
                     product_name=str(demand_parse_result.product_name or ""),
                     user_prompt=user_text,
@@ -4002,6 +4085,8 @@ class QuoteHandler(BaseHTTPRequestHandler):
                 apply_bag_quote_preparse(
                     payload,
                     structure_text=structure_blob,
+                    structure_inference_text=str(payload.get("structure_inference_text") or "").strip(),
+                    demand_template=bool(payload.get("demand_template")),
                     product_type=str(payload.get("product_type") or "").strip(),
                     product_name=str(payload.get("product_name") or "").strip(),
                     user_prompt=user_text,
@@ -4039,6 +4124,24 @@ class QuoteHandler(BaseHTTPRequestHandler):
                     list(payload["items"]),
                     sc_patch if isinstance(sc_patch, list) else [],
                 )
+                confirmed_gap_ids = payload.get("confirmed_structure_gap_ids")
+                if isinstance(confirmed_gap_ids, list) and confirmed_gap_ids:
+                    from structure_gap_hints import apply_confirmed_structure_gaps
+
+                    gap_hints = payload.get("structure_gap_hints")
+                    if not isinstance(gap_hints, list):
+                        from structure_gap_hints import build_structure_gap_hints
+
+                        gap_hints = build_structure_gap_hints(
+                            str(payload.get("structure_text_snapshot") or ""),
+                            list(payload.get("items") or []),
+                            demand_template=bool(payload.get("demand_template")),
+                        )
+                    payload["items"] = apply_confirmed_structure_gaps(
+                        list(payload["items"]),
+                        gap_hints if isinstance(gap_hints, list) else [],
+                        confirmed_gap_ids,
+                    )
                 _log_quote_stage(
                     self,
                     "structure_confirm_merge_done",
@@ -4046,9 +4149,13 @@ class QuoteHandler(BaseHTTPRequestHandler):
                     embedding_skip=not embedding_enabled(),
                     **_quote_items_stage_metrics(payload.get("items")),
                 )
+                payload["items"] = prepare_structure_rows_for_market_estimate(
+                    list(payload.get("items") or [])
+                )
                 allow_estimate = _parse_boolish(
                     payload.get("allow_estimate_with_incomplete_items")
                     or payload.get("allow_incomplete_structure_quote")
+                    or True
                 )
                 ok_items, gap_summary = validate_structure_items_for_formal_quote(
                     list(payload.get("items") or []),
@@ -4088,10 +4195,6 @@ class QuoteHandler(BaseHTTPRequestHandler):
                     embedding_skip=not embedding_enabled(),
                     **_quote_items_stage_metrics(payload.get("items")),
                 )
-                if allow_estimate or int(gap_summary.get("gap_count") or 0) > 0:
-                    payload["items"] = prepare_structure_rows_for_market_estimate(
-                        list(payload["items"])
-                    )
                 _log_quote_stage(
                     self,
                     "market_estimate_done",
@@ -4511,7 +4614,10 @@ class QuoteHandler(BaseHTTPRequestHandler):
         kb_hits: list[dict[str, object]] = []
         kb_misses: list[str] = []
 
+        from demand_field_sources import material_row_source_type
+
         for material in demand.materials:
+            field_src = material_row_source_type(material.source, material.role)
             row: dict[str, object] = {
                 "name": material.name,
                 "role": material.role,
@@ -4527,6 +4633,7 @@ class QuoteHandler(BaseHTTPRequestHandler):
                 "amount_ai": False,
                 "source": "kb" if material.inline_price else "ai",
                 "demand_source": material.source,
+                "field_source_type": field_src,
             }
             qu = str(getattr(material, "quoted_usage", "") or "").strip()
             if qu:
@@ -4565,6 +4672,13 @@ class QuoteHandler(BaseHTTPRequestHandler):
             else:
                 kb_misses.append(material.name)
             items.append(row)
+
+        from structure_gap_hints import enrich_items_ambiguous_classification
+
+        sec_b_text = " ".join(
+            str(v) for v in (demand.sections.get("B", {}) or {}).values() if str(v or "").strip()
+        )
+        items = enrich_items_ambiguous_classification(items, context=sec_b_text)
 
         margin = demand.quote_settings.get("gross_margin_rate")
         if margin is not None:
@@ -4620,6 +4734,9 @@ class QuoteHandler(BaseHTTPRequestHandler):
         }
         apply_sales_fields_to_payload(payload)
         payload["product_size"] = demand.product_size or {}
+        payload["demand_field_sources"] = dict(demand.field_sources or {})
+        payload["structure_inference_text"] = str(demand.structure_inference_text or "").strip()
+        payload["demand_template"] = bool(demand.is_demand_template)
         sec_b = demand.sections.get("B", {}) if isinstance(demand.sections.get("B"), dict) else {}
         for size_key in ("成品尺寸", "尺寸", "产品尺寸"):
             raw_size = str(sec_b.get(size_key) or "").strip()

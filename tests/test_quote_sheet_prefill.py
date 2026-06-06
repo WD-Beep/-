@@ -256,7 +256,7 @@ class QuoteSheetPrefillTest(unittest.TestCase):
         self.assertNotIn("篮球包", desc)
         self.assertNotIn("很长的结构说明", desc)
         self.assertEqual(rows[0].get("qty"), "500")
-        self.assertEqual(rows[0].get("price"), "12.50")
+        self.assertEqual(rows[0].get("price"), "12.5")
 
     def test_three_tiers_yield_one_row_using_preferred_500_tier(self) -> None:
         quote = {
@@ -286,8 +286,8 @@ class QuoteSheetPrefillTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["name"], "篮球包")
         self.assertEqual(rows[0]["qty"], "500")
-        self.assertEqual(rows[0]["price"], "9.50")
-        self.assertEqual(rows[0]["total"], "4750.00")
+        self.assertEqual(rows[0]["price"], "9.5")
+        self.assertEqual(rows[0]["total"], "4750")
 
     def test_tier_unit_price_from_cost_before_margin_per_piece(self) -> None:
         quote = {
@@ -302,8 +302,8 @@ class QuoteSheetPrefillTest(unittest.TestCase):
         }
         rows = _rows_from_quote(quote, {})
         self.assertEqual(rows[0]["qty"], "500")
-        self.assertEqual(rows[0]["price"], "26.15")
-        self.assertEqual(rows[0]["total"], "13075.00")
+        self.assertEqual(rows[0]["price"], "26.2")
+        self.assertEqual(rows[0]["total"], "13076.9")
 
     def test_size_excludes_piece_names_when_piece_area_present(self) -> None:
         quote = {
@@ -332,7 +332,7 @@ class QuoteSheetPrefillTest(unittest.TestCase):
         self.assertIn("45", rows[0]["size"])
         self.assertNotIn("前片", rows[0]["size"])
         self.assertNotIn("后片", rows[0]["size"])
-        self.assertEqual(rows[0]["price"], "12.50")
+        self.assertEqual(rows[0]["price"], "12.5")
 
     def test_unit_price_from_checkpoint_when_tier_lacks_exw(self) -> None:
         quote = {
@@ -344,7 +344,7 @@ class QuoteSheetPrefillTest(unittest.TestCase):
         }
         rows = _rows_from_quote(quote, {})
         self.assertEqual(rows[0]["qty"], "500")
-        self.assertEqual(rows[0]["price"], "18.20")
+        self.assertEqual(rows[0]["price"], "18.2")
 
     def test_pack_strips_system_estimate_still_has_unit_price(self) -> None:
         quote = {
@@ -363,8 +363,8 @@ class QuoteSheetPrefillTest(unittest.TestCase):
         rows = _rows_from_quote(quote, {})
         self.assertEqual(rows[0]["pack"], "1个")
         self.assertNotIn("系统估算", rows[0]["pack"])
-        self.assertEqual(rows[0]["price"], "15.00")
-        self.assertEqual(rows[0]["total"], "7500.00")
+        self.assertEqual(rows[0]["price"], "15")
+        self.assertEqual(rows[0]["total"], "7500")
 
     def test_pack_defaults_when_only_internal_usage(self) -> None:
         quote = {
@@ -426,10 +426,10 @@ class QuoteSheetPrefillTest(unittest.TestCase):
             ],
         }
         rows = _rows_from_quote(quote, {})
-        self.assertEqual(rows[0]["price"], "85.19")
-        self.assertEqual(rows[0]["fob_price"], "89.19")
-        self.assertEqual(rows[0]["fob_price_usd"], "12.47")
-        self.assertEqual(rows[0]["fob_total_usd"], "6235.00")
+        self.assertEqual(rows[0]["price"], "85.2")
+        self.assertEqual(rows[0]["fob_price"], "89.2")
+        self.assertEqual(rows[0]["fob_price_usd"], "12.5")
+        self.assertEqual(rows[0]["fob_total_usd"], "6237.1")
 
     def test_prefill_row_carries_tier_fob_without_overwriting_exw(self) -> None:
         quote = {
@@ -448,12 +448,12 @@ class QuoteSheetPrefillTest(unittest.TestCase):
             ],
         }
         rows = _rows_from_quote(quote, {})
-        self.assertEqual(rows[0]["price"], "87.69")
-        self.assertEqual(rows[0]["fob_price"], "91.69")
-        self.assertEqual(rows[0]["fob_price_usd"], "12.81")
-        self.assertIn("12.81", rows[0]["fob_price_usd_text"])
-        self.assertEqual(rows[0]["fob_total"], "45845.00")
-        self.assertEqual(rows[0]["total"], "43845.00")
+        self.assertEqual(rows[0]["price"], "87.7")
+        self.assertEqual(rows[0]["fob_price"], "91.7")
+        self.assertEqual(rows[0]["fob_price_usd"], "12.8")
+        self.assertIn("12.8", rows[0]["fob_price_usd_text"])
+        self.assertEqual(rows[0]["fob_total"], "45845")
+        self.assertEqual(rows[0]["total"], "43845")
 
     def test_prefers_500_qty_tier_with_exw_price(self) -> None:
         quote = {
@@ -466,7 +466,7 @@ class QuoteSheetPrefillTest(unittest.TestCase):
         }
         rows = _rows_from_quote(quote, {})
         self.assertEqual(rows[0]["qty"], "500")
-        self.assertEqual(rows[0]["price"], "12.50")
+        self.assertEqual(rows[0]["price"], "12.5")
 
     def test_selected_tier_index_used_for_single_product_row(self) -> None:
         quote = {
@@ -480,7 +480,7 @@ class QuoteSheetPrefillTest(unittest.TestCase):
         rows = _rows_from_quote(quote, {})
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["qty"], "500")
-        self.assertEqual(rows[0]["price"], "9.50")
+        self.assertEqual(rows[0]["price"], "9.5")
 
     def test_prefill_row_includes_taxed_price_when_tier_has_field(self) -> None:
         quote = {
@@ -497,7 +497,7 @@ class QuoteSheetPrefillTest(unittest.TestCase):
         }
         rows = _rows_from_quote(quote, {})
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["taxed_price"], "97.94")
+        self.assertEqual(rows[0]["taxed_price"], "97.9")
 
     def test_multi_size_variants_still_multiple_rows(self) -> None:
         quote = {
@@ -519,8 +519,8 @@ class QuoteSheetPrefillTest(unittest.TestCase):
         }
         rows = _rows_from_quote(quote, {})
         self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0]["price"], "10.00")
-        self.assertEqual(rows[1]["price"], "11.00")
+        self.assertEqual(rows[0]["price"], "10")
+        self.assertEqual(rows[1]["price"], "11")
 
     def test_single_product_row_image_from_marked_excel_embed(self) -> None:
         b64 = base64.b64encode(minimal_png_bytes(140, 180)).decode()

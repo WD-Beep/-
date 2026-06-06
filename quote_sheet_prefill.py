@@ -68,7 +68,19 @@ def _parse_number(text: Any) -> float | None:
 
 
 def _format_money(n: float) -> str:
-    return f"{n:.2f}"
+    from display_number_format import format_display_number
+
+    return format_display_number(n)
+
+
+def _format_customer_price_text(text: Any) -> str:
+    """客户可见价格/金额文本：最多 1 位小数，不影响 tier 原始数值字段。"""
+    from display_number_format import format_numbers_in_display_text
+
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    return format_numbers_in_display_text(raw)
 
 
 def _compose_size_for_sheet(dims: str, piece_part: str = "") -> str:
@@ -390,18 +402,17 @@ def _tier_fob_display_fields(
     if fob_rmb is not None:
         out["fob_price"] = _format_money(fob_rmb)
         out["fob_total"] = _format_money(qty_n * fob_rmb) if qty_n is not None else ""
-    out["fob_price_text"] = str(tier.get("fob_price_text") or "").strip()
+    out["fob_price_text"] = _format_customer_price_text(tier.get("fob_price_text"))
     if fob_usd is not None:
         out["fob_price_usd"] = _format_money(fob_usd)
-        usd_rounded = _parse_number(out["fob_price_usd"])
-        if fob_total_usd is None and qty_n is not None and usd_rounded is not None:
-            fob_total_usd = qty_n * usd_rounded
+        if fob_total_usd is None and qty_n is not None:
+            fob_total_usd = qty_n * fob_usd
         out["fob_total_usd"] = (
             _format_money(fob_total_usd) if fob_total_usd is not None else ""
         )
     elif fob_total_usd is not None:
         out["fob_total_usd"] = _format_money(fob_total_usd)
-    out["fob_price_usd_text"] = usd_text
+    out["fob_price_usd_text"] = _format_customer_price_text(usd_text)
     return out
 
 
@@ -416,27 +427,43 @@ def _tier_taxed_unit_price(tier: dict[str, Any]) -> str:
     n = _parse_number(tier.get("taxed_price"))
     if n is not None:
         return _format_money(n)
+    if text:
+        return _format_customer_price_text(text)
     return ""
 
 
-def _tier_unit_price_from_tier(tier: dict[str, Any]) -> str:
-    """从单档 tier 解析出厂/EXW 每件单价（不含 FOB，避免 FOB PDF 误用加价兜底）。"""
+def _tier_unit_price_numeric_from_tier(tier: dict[str, Any]) -> float | None:
+    """从单档 tier 解析出厂/EXW 每件单价数值（不含 FOB）。"""
     if not isinstance(tier, dict):
-        return ""
+        return None
     for key in ("exw_unit_price_text", "exw_price_text", "unit_exw_text", "taxed_price_text"):
         n = _parse_number(tier.get(key))
         if n is not None:
-            return _format_money(n)
+            return n
     for key in ("exw_price", "taxed_price"):
         n = _parse_number(tier.get(key))
         if n is not None:
-            return _format_money(n)
+            return n
     cost = _parse_number(tier.get("cost_before_margin") or tier.get("total_cost"))
     if cost is not None:
         margin = _parse_number(tier.get("margin_rate"))
         if margin is not None and 0 <= margin < 1:
-            return _format_money(cost / max(0.01, 1 - margin))
-        return _format_money(cost)
+            return cost / max(0.01, 1 - margin)
+        return cost
+    return None
+
+
+def _tier_unit_price_from_tier(tier: dict[str, Any]) -> str:
+    """从单档 tier 解析出厂/EXW 每件单价展示文本。"""
+    n = _tier_unit_price_numeric_from_tier(tier)
+    if n is not None:
+        return _format_money(n)
+    if not isinstance(tier, dict):
+        return ""
+    for key in ("exw_unit_price_text", "exw_price_text", "unit_exw_text"):
+        text = str(tier.get(key) or "").strip()
+        if text:
+            return _format_customer_price_text(text)
     return ""
 
 
@@ -458,23 +485,33 @@ def _unit_price_from_sales_checkpoints(quote: dict[str, Any], qty: float | None)
     return ""
 
 
-def _tier_unit_price(tier: dict[str, Any], quote: dict[str, Any]) -> str:
-    """报价单单价：tier → 对账检查点 → 其它档位 → 报价根字段。"""
-    price = _tier_unit_price_from_tier(tier)
-    if price:
-        return price
+def _tier_unit_price_numeric(tier: dict[str, Any], quote: dict[str, Any]) -> float | None:
+    """报价单单价数值：tier → 对账检查点 → 其它档位 → 报价根字段。"""
+    n = _tier_unit_price_numeric_from_tier(tier)
+    if n is not None:
+        return n
     qty = _parse_number(tier.get("quantity")) if isinstance(tier, dict) else None
-    price = _unit_price_from_sales_checkpoints(quote, qty)
-    if price:
-        return price
+    cp = _unit_price_from_sales_checkpoints(quote, qty)
+    if cp:
+        parsed = _parse_number(cp)
+        if parsed is not None:
+            return parsed
     for cand in _tiers_list(quote):
-        price = _tier_unit_price_from_tier(cand)
-        if price:
-            return price
+        n = _tier_unit_price_numeric_from_tier(cand)
+        if n is not None:
+            return n
     for key in ("exw_unit_price_text", "exw_price_text", "exw_price"):
         n = _parse_number(quote.get(key))
         if n is not None:
-            return _format_money(n)
+            return n
+    return None
+
+
+def _tier_unit_price(tier: dict[str, Any], quote: dict[str, Any]) -> str:
+    """报价单单价展示文本。"""
+    n = _tier_unit_price_numeric(tier, quote)
+    if n is not None:
+        return _format_money(n)
     return ""
 
 
@@ -663,9 +700,9 @@ def _product_row(
     pack_raw = _pack_text_from_quote(vquote) or _pack_text_from_quote(quote)
     pack = sanitize_customer_pack_display(pack_raw)
     qty = _tier_qty_text(t)
-    price = _tier_unit_price(t, quote)
+    price_n = _tier_unit_price_numeric(t, quote)
+    price = _format_money(price_n) if price_n is not None else ""
     qty_n = _parse_number(qty)
-    price_n = _parse_number(price)
     total = ""
     if qty_n is not None and price_n is not None:
         total = _format_money(qty_n * price_n)
@@ -702,7 +739,9 @@ def _product_row(
         "total": total,
         "note": "",
         "taxed_price": taxed_price,
-        "taxed_price_text": str(t.get("taxed_price_text") or "").strip() if isinstance(t, dict) else "",
+        "taxed_price_text": _format_customer_price_text(t.get("taxed_price_text"))
+        if isinstance(t, dict)
+        else "",
         "image_data_url": _pick_image_for_line(image_map, row_index, product_count),
         **fob_fields,
     }

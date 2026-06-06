@@ -4,7 +4,7 @@ from demand_parser import parse_demand_from_rows
 
 
 class DemandStrictTableMaterialsTest(unittest.TestCase):
-    def test_missing_outer_material_can_use_structure_main_fabric_fallback(self) -> None:
+    def test_missing_outer_material_does_not_use_structure_note_fallback(self) -> None:
         rows = [
             ["B. \u4ea7\u54c1\u89c4\u683c"],
             [
@@ -57,12 +57,13 @@ class DemandStrictTableMaterialsTest(unittest.TestCase):
         names = [m.name for m in out.materials]
 
         self.assertIn("210D\u6da4\u7eb6", names)
-        self.assertIn("\u56fd\u4ea7X-PAC", names)
         self.assertIn("#5\u5c3c\u9f99\u62c9\u94fe", names)
         self.assertIn("YKK\u9632\u6c34\u62c9\u94fe", names)
+        self.assertNotIn("\u56fd\u4ea7X-PAC", names)
         self.assertNotIn("\u56fd\u4ea7X-PAC\uff08\u4e3b\u4f53\u9762\u6599", names)
         self.assertNotIn("\u4ec5\u7528\u4e8e\u5305\u4f53\u6700\u4e0b\u65b9\u7684\u5e95\u90e8\u8d34\u7247", names)
         self.assertNotIn("210D\u5c3c\u9f99\uff08\u5185\u886c\uff09", names)
+        self.assertFalse(any(m.source.startswith("structure_inline") for m in out.materials))
 
     def test_structure_main_fabric_does_not_override_valid_outer_cell(self) -> None:
         rows = [

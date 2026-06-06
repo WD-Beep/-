@@ -246,6 +246,17 @@ def _normalize_items(items: list[Any]) -> list[dict[str, Any]]:
         src = str(raw.get("source") or "").strip()
         if src:
             row["source"] = src
+        if bool(raw.get("admin_confirm_ai_price")):
+            row["source"] = "admin"
+            row["unit_price_ai"] = False
+            row["usage_ai"] = False
+            row["amount_ai"] = False
+            row["pricing_review_required"] = False
+            row["admin_confirmed_price"] = True
+        elif bool(raw.get("pricing_review_required")) or bool(raw.get("unit_price_ai")):
+            row["pricing_review_required"] = bool(raw.get("pricing_review_required"))
+            row["unit_price_ai"] = bool(raw.get("unit_price_ai"))
+            row["usage_ai"] = bool(raw.get("usage_ai"))
         if unit and row["unit_price"] in ("-", "—", ""):
             row["unit_price"] = unit
         out.append(row)

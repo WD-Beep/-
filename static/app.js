@@ -800,6 +800,7 @@ async function requestQuote(options = {}) {
           structureRowOverrides: {},
           structureAddedRows: [],
           structureSelectedRowIndex: null,
+          confirmedStructureGapIds: {},
           data: result,
         };
         replaceLoadingByToken(loadingToken, {
@@ -1055,9 +1056,9 @@ function renderProcessMaterialLines(materialLines) {
         `<td class="mat-col-src">${src}</td>` +
         `<td>${escapeHtml(formatMeasureNumbersTwoDecimals(String(mt.spec != null ? mt.spec : "-")))}</td>` +
         `<td>${escapeHtml(formatMeasureNumbersTwoDecimals(String(mt.usage != null ? mt.usage : "-")))}</td>` +
-        `<td>${escapeHtml(String(mt.unit_price != null ? mt.unit_price : "—"))}</td>` +
-        `<td class="mat-col-formula">${escapeHtml(String(mt.formula_short != null ? mt.formula_short : "—"))}</td>` +
-        `<td class="mat-col-sub">${escapeHtml(String(mt.subtotal != null ? mt.subtotal : "—"))}</td>` +
+        `<td>${escapeHtml(formatNumbersInDisplayText(String(mt.unit_price != null ? mt.unit_price : "—")))}</td>` +
+        `<td class="mat-col-formula">${escapeHtml(formatNumbersInDisplayText(String(mt.formula_short != null ? mt.formula_short : "—")))}</td>` +
+        `<td class="mat-col-sub">${escapeHtml(formatNumbersInDisplayText(String(mt.subtotal != null ? mt.subtotal : "—")))}</td>` +
         `<td class="mat-col-status">${statusHtml}</td>` +
         `</tr>`;
       return mainRow;
@@ -1585,9 +1586,11 @@ function buildQuoteCardInnerHtml(quote, fileName, msgId, cardOpts = {}) {
   const cleanedRows = cleanDetailRowsForDisplay(quote.detail_rows || []).filter(
     (row) => !isReferenceOnlyRowName(row?.name),
   );
-  const cleanedMaterialTotal = cleanedRows
-    .reduce((sum, row) => sum + parseAmountValue(row.amount), 0)
-    .toFixed(2);
+  const cleanedMaterialTotalNum = cleanedRows.reduce(
+    (sum, row) => sum + parseAmountValue(row.amount),
+    0,
+  );
+  const cleanedMaterialTotal = formatDisplayNumber(cleanedMaterialTotalNum);
   const rawTitle = String(quote.product_name || state.baseConfig.product_name || "").trim();
   const productTitle = escapeHtml(rawTitle || "报价核算");
   const sourceLabel = fileName
@@ -1648,9 +1651,10 @@ function buildQuoteCardInnerHtml(quote, fileName, msgId, cardOpts = {}) {
       const trialNote = row.trial_price_note
         ? `<div class="trial-price-note">${escapeHtml(row.trial_price_note)}</div>`
         : "";
+      const upDisp = formatNumbersInDisplayText(String(row.unit_price || "-"));
       const upHtml = trialNote
-        ? `${escapeHtml(row.unit_price || "-")}${trialNote}`
-        : escapeHtml(row.unit_price || "-");
+        ? `${escapeHtml(upDisp)}${trialNote}`
+        : escapeHtml(upDisp);
       const autoKbBadge = buildMaterialRecognitionBadge(row);
       const calcRaw = String(row.calc_note ?? row.calc_method ?? "").trim() || "—";
       const calcHtml = calcRaw === "—" ? escapeHtml("—") : escapeNl(calcRaw);
@@ -1698,7 +1702,7 @@ function buildQuoteCardInnerHtml(quote, fileName, msgId, cardOpts = {}) {
   );
   const usdRate = Number.isFinite(usdRateRaw) && usdRateRaw > 0 ? usdRateRaw : 7.15;
   const toUsd = (v) => (Number.isFinite(v) ? v / usdRate : NaN);
-  const fmtUsd = (v) => (Number.isFinite(v) ? `$${v.toFixed(2)}` : "-");
+  const fmtUsd = (v) => (Number.isFinite(v) ? `$${formatDisplayNumber(v)}` : "-");
   const tier0CostNum = Number(quote.tiers?.[0]?.cost_before_margin ?? quote.tiers?.[0]?.total_cost);
   const systemCostDisplay = costUsdMode
     ? fmtUsd(toUsd(tier0CostNum))
@@ -1727,7 +1731,7 @@ function buildQuoteCardInnerHtml(quote, fileName, msgId, cardOpts = {}) {
         const tp = taxedUnitPriceFromTier(tier);
         const show =
           String(tier.taxed_price_text || "").trim() ||
-          (Number.isFinite(tp) ? `${tp.toFixed(2)}元` : "—");
+          (Number.isFinite(tp) ? formatDisplayMoneyCny(tp) : "—");
         taxTd = `<td class="numeric quote-tier-tax-cell"><strong>${escapeHtml(show)}</strong></td>`;
       } else {
         taxTd = `<td class="numeric muted quote-tier-tax-cell">${escapeHtml(
@@ -1799,7 +1803,7 @@ function buildQuoteCardInnerHtml(quote, fileName, msgId, cardOpts = {}) {
   ) {
     const d = Number(opts.costDelta);
     const sign = Number.isFinite(d) && d > 0 ? "+" : "";
-    const dv = Number.isFinite(d) ? d.toFixed(2) : "-";
+    const dv = Number.isFinite(d) ? formatDisplayNumber(d) : "-";
     compareRowHtml = `<p class="quote-extra-compare">与原始 <strong>${escapeHtml(
       String(opts.originalQuantity),
     )}件</strong> 相比：单包系统成本差异 <strong>${sign}${escapeHtml(dv)}元/件</strong>（未计毛利前）</p>`;
@@ -1812,8 +1816,8 @@ function buildQuoteCardInnerHtml(quote, fileName, msgId, cardOpts = {}) {
     const cd = Number(opts.costDelta);
     const s1 = Number.isFinite(mtd) && mtd > 0 ? "+" : "";
     const s2 = Number.isFinite(cd) && cd > 0 ? "+" : "";
-    const mv = Number.isFinite(mtd) ? mtd.toFixed(2) : "-";
-    const cv = Number.isFinite(cd) ? cd.toFixed(2) : "-";
+    const mv = Number.isFinite(mtd) ? formatDisplayNumber(mtd) : "-";
+    const cv = Number.isFinite(cd) ? formatDisplayNumber(cd) : "-";
     compareRowHtml = `<p class="quote-material-compare">与原始方案相比：物料合计差异 <strong>${s1}${escapeHtml(
       mv,
     )}元</strong>；单包系统成本差异 <strong>${s2}${escapeHtml(cv)}元/件</strong>（未计毛利前）</p>`;
@@ -1845,7 +1849,7 @@ function buildQuoteCardInnerHtml(quote, fileName, msgId, cardOpts = {}) {
               const show =
                 escapeHtml(
                   String(t0.taxed_price_text || "").trim() ||
-                    (Number.isFinite(tp) ? `${tp.toFixed(2)}元` : "—"),
+                    (Number.isFinite(tp) ? formatDisplayMoneyCny(tp) : "—"),
                 );
               return `<div>
         <span>含税参考（一档·13%）</span>
@@ -1882,7 +1886,7 @@ function buildQuoteCardInnerHtml(quote, fileName, msgId, cardOpts = {}) {
                 : "";
             const note = [
               `相较物料合计多出：加工费 ${b.processing_fee_text ?? "-"}；`,
-              `杂费/管理费（${escapeHtml(String(b.system_overhead_rule || "规则"))}）${typeof b.system_overhead_per_pc === "number" ? `${b.system_overhead_per_pc.toFixed(2)}元/件` : "-"}；`,
+              `杂费/管理费（${escapeHtml(String(b.system_overhead_rule || "规则"))}）${typeof b.system_overhead_per_pc === "number" ? `${formatDisplayNumber(b.system_overhead_per_pc)}元/件` : "-"}；`,
               `${b.tier_quantity_ref ?? "?"}件档模具均摊 ${b.mold_share_text ?? "-"}。`,
               `附加合计（未计毛利前）≈ ${b.addons_sum_text ?? "-"}`,
               mbBridge,
@@ -1891,6 +1895,8 @@ function buildQuoteCardInnerHtml(quote, fileName, msgId, cardOpts = {}) {
           })()
         : ""
     }
+    ${buildStructureGapHintsHtml(quote.structure_gap_hints, { compact: true })}
+    ${buildAnomalyReviewHintsHtml(quote.anomaly_review_hints)}
     ${buildStructureChecklistPanelHtml(quote, detailRootKey, msgId)}
     <section class="table-section quote-detail-section" data-quote-detail-root="${escapeHtml(detailRootKey)}">
       <div class="quote-detail-toolbar">
@@ -1982,7 +1988,7 @@ function displayQuoteAmountText(row) {
   ) {
     return "-";
   }
-  return text || "-";
+  return formatNumbersInDisplayText(text || "-");
 }
 
 function mergedStructureConfirmationRow(rows, overrides, idx) {
@@ -2312,10 +2318,26 @@ function deleteStructurePreviewRow(token, rowIndex) {
   if (!pend.structureEditMode) {
     pend.structureEditMode = true;
   }
+  const rows = getPendingStructureRows(pend.data, pend);
+  const overridesBefore =
+    pend.structureRowOverrides && typeof pend.structureRowOverrides === "object"
+      ? pend.structureRowOverrides
+      : {};
+  const targetRow = mergedStructureConfirmationRow(rows, overridesBefore, idx);
+  const gapHintId = String(targetRow?.structure_gap_hint_id || "").trim();
+  if (gapHintId && targetRow?.from_structure_gap_hint) {
+    ensurePendingStructureGapState(pend);
+    delete pend.confirmedStructureGapIds[gapHintId];
+    if (Array.isArray(pend.structureAddedRows)) {
+      pend.structureAddedRows = pend.structureAddedRows.filter(
+        (r) => String(r?.structure_gap_hint_id || "").trim() !== gapHintId,
+      );
+    }
+  }
   const del = pend.structureDeletedRows && typeof pend.structureDeletedRows === "object" ? { ...pend.structureDeletedRows } : {};
   del[String(idx)] = true;
   pend.structureDeletedRows = del;
-  const overrides = pend.structureRowOverrides && typeof pend.structureRowOverrides === "object" ? { ...pend.structureRowOverrides } : {};
+  const overrides = { ...overridesBefore };
   overrides[String(idx)] = { ...(overrides[String(idx)] || {}), deleted: true };
   pend.structureRowOverrides = overrides;
   pend.structureSavedForQuote = false;
@@ -2434,6 +2456,28 @@ function buildStructureConfirmationItemsForQuote(pending) {
       calc_note: String(calcTxt || "").trim(),
       calc_method: String(calcTxt || "").trim(),
     };
+    if (merged.from_structure_gap_hint) {
+      patch.from_structure_gap_hint = true;
+      patch.confirmation_source = "structure_confirmed";
+      patch.source = "structure_confirmed";
+      const hid = String(merged.structure_gap_hint_id || "").trim();
+      if (hid) {
+        patch.structure_gap_hint_id = hid;
+      }
+      const readyForCost = structureGapRowHasPricing(merged);
+      const aiEstimated = structureGapRowHasAiEstimate(merged);
+      patch.exclude_from_cost = !readyForCost;
+      patch.amount_in_cost = readyForCost;
+      if (aiEstimated) {
+        patch.usage_ai = Boolean(merged.usage_ai);
+        patch.unit_price_ai = Boolean(merged.unit_price_ai);
+        patch.amount_ai = Boolean(merged.amount_ai);
+        patch.pricing_review_required = true;
+        patch.recognition_status = "candidate_review";
+        patch.recognition_reason = String(merged.recognition_reason || "AI估算用量/单价，待管理员复核").trim();
+        patch.source = "ai";
+      }
+    }
     if (merged.deleted === true) {
       patch.deleted = true;
     }
@@ -2442,7 +2486,425 @@ function buildStructureConfirmationItemsForQuote(pending) {
   });
 }
 
-function buildStructureChecklistConfirmPreviewHtml(data) {
+function ensurePendingStructureGapState(pend) {
+  if (!pend) {
+    return;
+  }
+  if (!pend.confirmedStructureGapIds || typeof pend.confirmedStructureGapIds !== "object") {
+    pend.confirmedStructureGapIds = {};
+  }
+}
+
+function isMissingStructureQuoteField(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  return !text || text === "-" || text === "—" || text === "无" || text === "空";
+}
+
+function structureGapRowHasPricing(row) {
+  if (!row || typeof row !== "object") {
+    return false;
+  }
+  const usage = String(row.usage ?? "").trim();
+  const unitPrice = String(row.unit_price ?? "").trim();
+  return !isMissingStructureQuoteField(usage) && !isMissingStructureQuoteField(unitPrice);
+}
+
+function structureGapRowHasAiEstimate(row) {
+  if (!row || typeof row !== "object") {
+    return false;
+  }
+  const hasAiFlag = Boolean(row.usage_ai || row.unit_price_ai || row.amount_ai || row.pricing_review_required);
+  return hasAiFlag && structureGapRowHasPricing(row);
+}
+
+function estimateStructureGapRowLocally(row) {
+  const out = { ...(row || {}) };
+  const blob = `${String(out.name || "")} ${String(out.calc_note || "")} ${String(out.role || "")}`.toLowerCase();
+  let usage = String(out.usage || "").trim();
+  if (isMissingStructureQuoteField(usage)) {
+    if (/丝印|烫印|热转|印刷|刺绣|logo/.test(blob)) {
+      out.usage = "1处";
+      out.usage_ai = true;
+    } else if (/车缝|缝纫|加工|工艺费/.test(blob)) {
+      out.usage = "1道工序";
+      out.usage_ai = true;
+    } else if (/织带|webbing|包边/.test(blob)) {
+      out.usage = "1条";
+      out.usage_ai = true;
+    } else {
+      out.usage = "1处";
+      out.usage_ai = true;
+    }
+  }
+  let unitPrice = String(out.unit_price || "").trim();
+  if (isMissingStructureQuoteField(unitPrice)) {
+    if (/丝印|烫印|热转|印刷|刺绣|logo/.test(blob)) {
+      out.unit_price = "4元/处";
+      out.unit_price_ai = true;
+    } else if (/车缝|缝纫|加工|工艺费/.test(blob)) {
+      out.unit_price = "3元/处";
+      out.unit_price_ai = true;
+    } else if (/织带|webbing/.test(blob)) {
+      out.unit_price = "1.5元/条";
+      out.unit_price_ai = true;
+    } else if (/插扣|d扣|扣具|buckle/.test(blob)) {
+      out.unit_price = "0.6元/个";
+      out.unit_price_ai = true;
+    }
+  }
+  if (structureGapRowHasPricing(out)) {
+    out.exclude_from_cost = false;
+    out.amount_in_cost = true;
+    out.structure_gap_pending_pricing = false;
+    out.needs_manual_confirm = true;
+    out.pricing_review_required = true;
+    out.recognition_reason = "AI估算用量/单价，待管理员复核";
+    const note = "AI估算价，待管理员复核";
+    const cn = String(out.calc_note || "").trim();
+    out.calc_note = cn && !cn.includes(note) ? `${cn}；${note}` : cn || note;
+    out.source = "ai";
+  }
+  return out;
+}
+
+function structureGapCategoryToRole(category) {
+  const text = String(category || "").trim();
+  const map = {
+    主料: "外料",
+    里料: "里料",
+    辅料: "辅料",
+    织带: "织带",
+    五金: "五金",
+    "工艺/人工": "工艺费",
+    海绵: "辅料",
+    网布: "辅料",
+    PE板: "辅料",
+    皮革: "辅料",
+    加固片: "辅料",
+    包边带: "织带",
+    车缝工艺: "工艺费",
+    贴合或车缝工艺: "工艺费",
+    "贴合/车缝工艺": "工艺费",
+  };
+  return map[text] || "辅料";
+}
+
+function buildStructureGapBomName(hint) {
+  const label = String(hint?.detected_text || hint?.name || "结构缺项").trim();
+  const candidates = Array.isArray(hint?.category_candidates)
+    ? hint.category_candidates.map((c) => String(c || "").trim()).filter(Boolean)
+    : [];
+  const confidence = Number(hint?.category_confidence || 0);
+  const processLabels = new Set([
+    "工艺/人工",
+    "车缝工艺",
+    "贴合或车缝工艺",
+    "贴合/车缝工艺",
+  ]);
+  const abstractLabels = new Set(["主料", "辅料", "五金", "工艺/人工"]);
+  if (confidence < 0.75 || !candidates.length) {
+    return label;
+  }
+  let materialHints = candidates.filter((c) => !processLabels.has(c) && !abstractLabels.has(c));
+  if (!materialHints.length) {
+    materialHints = candidates.filter((c) => !processLabels.has(c));
+  }
+  if (materialHints.length >= 2) {
+    return `${label}-${materialHints[0]}/${materialHints[1]}`;
+  }
+  if (materialHints.length === 1) {
+    return `${label}-${materialHints[0]}`;
+  }
+  return label;
+}
+
+function buildStructureGapBomCalcNote(hint) {
+  const direction = String(hint?.suggested_direction || "").trim();
+  const categoryDisplay = String(hint?.category_hint_display || "").trim();
+  const parts = ["结构确认缺项"];
+  if (categoryDisplay) {
+    parts.push(categoryDisplay);
+  }
+  if (direction) {
+    parts.push(`确认方向：${direction}`);
+  }
+  return parts.join("；");
+}
+
+function buildStructureGapRowFromHint(hint) {
+  const suggestedCategory = String(hint?.suggested_category || "").trim();
+  const hid = String(hint?.id || "").trim();
+  const calcNote = buildStructureGapBomCalcNote(hint);
+  return {
+    name: buildStructureGapBomName(hint),
+    role: structureGapCategoryToRole(suggestedCategory),
+    spec: "-",
+    usage: "-",
+    unit_price: "-",
+    amount: 0,
+    calc_note: calcNote,
+    calc_method: calcNote,
+    suggested_category: suggestedCategory,
+    category_candidates: Array.isArray(hint?.category_candidates) ? hint.category_candidates.slice() : [],
+    material_category_hint: String(hint?.material_category_hint || ""),
+    category_hint_display: String(hint?.category_hint_display || ""),
+    category_needs_confirmation: Boolean(hint?.category_needs_confirmation),
+    confirmation_source: "structure_confirmed",
+    from_structure_gap_hint: true,
+    structure_gap_hint_id: hid,
+    source: "structure_confirmed",
+    exclude_from_cost: true,
+    amount_in_cost: false,
+    needs_manual_confirm: true,
+    recognition_status: "candidate_review",
+    recognition_reason: "结构缺项，待补用量/单价，暂不参与金额",
+    added: true,
+    structure_gap_pending_pricing: true,
+  };
+}
+
+function syncStructureGapRowsFromSelection(pend) {
+  if (!pend) {
+    return { added: 0, removed: 0 };
+  }
+  ensurePendingStructureGapState(pend);
+  const hints = getUncoveredStructureGapHints(pend);
+  const hintById = Object.fromEntries(
+    hints.map((h) => [String(h.id || "").trim(), h]).filter(([id]) => Boolean(id)),
+  );
+  const confirmedIds = new Set(getConfirmedStructureGapIdList(pend));
+  const added = Array.isArray(pend.structureAddedRows) ? pend.structureAddedRows.slice() : [];
+  const manualRows = added.filter((r) => !r?.from_structure_gap_hint || !String(r.structure_gap_hint_id || "").trim());
+  const keptGapRows = added.filter((r) => {
+    const hid = String(r?.structure_gap_hint_id || "").trim();
+    return Boolean(r?.from_structure_gap_hint && hid && confirmedIds.has(hid));
+  });
+  const keptIds = new Set(keptGapRows.map((r) => String(r.structure_gap_hint_id || "").trim()));
+  const newGapRows = [];
+  for (const hid of confirmedIds) {
+    if (keptIds.has(hid)) {
+      continue;
+    }
+    const hint = hintById[hid];
+    if (!hint) {
+      continue;
+    }
+    newGapRows.push(estimateStructureGapRowLocally(buildStructureGapRowFromHint(hint)));
+  }
+  const removed = added.length - manualRows.length - keptGapRows.length;
+  pend.structureAddedRows = [...manualRows, ...keptGapRows, ...newGapRows];
+  return { added: newGapRows.length, removed: Math.max(0, removed) };
+}
+
+function getIncompleteStructureGapRows(pend) {
+  if (!pend) {
+    return [];
+  }
+  const rows = getPendingStructureRows(pend.data, pend);
+  const overrides =
+    pend.structureRowOverrides && typeof pend.structureRowOverrides === "object"
+      ? pend.structureRowOverrides
+      : {};
+  const incomplete = [];
+  rows.forEach((baseRow, idx) => {
+    const merged = mergedStructureConfirmationRow(rows, overrides, idx);
+    if (merged.deleted === true) {
+      return;
+    }
+    if (!merged.from_structure_gap_hint) {
+      return;
+    }
+    if (!structureGapRowHasPricing(merged) && !structureGapRowHasAiEstimate(merged)) {
+      incomplete.push({
+        index: idx,
+        name: String(merged.name || "").trim() || `第${idx + 1}行`,
+        hintId: String(merged.structure_gap_hint_id || "").trim(),
+      });
+    }
+  });
+  return incomplete;
+}
+
+function countStructureGapAiEstimateRows(pend) {
+  if (!pend) {
+    return 0;
+  }
+  const rows = getPendingStructureRows(pend.data, pend);
+  const overrides =
+    pend.structureRowOverrides && typeof pend.structureRowOverrides === "object"
+      ? pend.structureRowOverrides
+      : {};
+  let count = 0;
+  rows.forEach((_, idx) => {
+    const merged = mergedStructureConfirmationRow(rows, overrides, idx);
+    if (merged.deleted === true || !merged.from_structure_gap_hint) {
+      return;
+    }
+    if (structureGapRowHasAiEstimate(merged)) {
+      count += 1;
+    }
+  });
+  return count;
+}
+
+function buildStructureConfirmActionsHint(pend, { editing, savedOk, dirty }) {
+  if (editing || !savedOk) {
+    return dirty || editing ? "请先保存修改后再确认" : "请先「保存」后再确认。";
+  }
+  const incompleteGaps = getIncompleteStructureGapRows(pend);
+  if (incompleteGaps.length > 0) {
+    return "仍有缺项未能自动估算，请补充用量/单价或取消勾选后再报价。";
+  }
+  const aiEstimateCount = countStructureGapAiEstimateRows(pend);
+  const confirmedGapCount = getConfirmedStructureGapIdList(pend).length;
+  if (aiEstimateCount > 0) {
+    return `有 ${aiEstimateCount} 项缺项已用 AI 市场参考价估算，可继续报价；结果将标记「待管理员复核」。`;
+  }
+  if (confirmedGapCount > 0) {
+    return `已加入 ${confirmedGapCount} 项结构缺项到明细表，保存后可生成正式报价。`;
+  }
+  return "确认后将按当前表格内容进行正式计价；未勾选的缺项仅作风险提示。";
+}
+
+function getUncoveredStructureGapHints(pend) {
+  const hints = Array.isArray(pend?.data?.structure_gap_hints) ? pend.data.structure_gap_hints : [];
+  return hints.filter((h) => h && typeof h === "object" && h.bom_covered !== true);
+}
+
+function getConfirmedStructureGapIdList(pend) {
+  if (!pend) {
+    return [];
+  }
+  ensurePendingStructureGapState(pend);
+  const uncoveredIds = new Set(
+    getUncoveredStructureGapHints(pend)
+      .map((h) => String(h.id || "").trim())
+      .filter(Boolean),
+  );
+  return Object.entries(pend.confirmedStructureGapIds)
+    .filter(([id, on]) => Boolean(on) && uncoveredIds.has(String(id).trim()))
+    .map(([id]) => String(id).trim());
+}
+
+function toggleStructureGapConfirm(token, hintId, checked) {
+  const pend = state.pendingStructureConfirm;
+  const tok = String(token || "").trim();
+  const hid = String(hintId || "").trim();
+  if (!pend || pend.token !== tok || !hid) {
+    return;
+  }
+  ensurePendingStructureGapState(pend);
+  if (checked) {
+    pend.confirmedStructureGapIds[hid] = true;
+  } else {
+    delete pend.confirmedStructureGapIds[hid];
+  }
+  const syncMeta = syncStructureGapRowsFromSelection(pend);
+  if (checked && syncMeta.added > 0) {
+    pend.structureEditMode = true;
+    pend.structureSavedForQuote = false;
+    pend.structureDirty = true;
+    const rows = getPendingStructureRows(pend.data, pend);
+    const idx = rows.findIndex((r) => String(r?.structure_gap_hint_id || "").trim() === hid);
+    if (idx >= 0) {
+      pend.pendingScrollToNewRowIndex = idx;
+    }
+    setComposerStatusLine("缺项已加入明细表，系统已尝试 AI 估算；请核对后点击「保存」。", "ok");
+  } else if (!checked && syncMeta.removed > 0) {
+    if (!pend.structureEditMode) {
+      pend.structureSavedForQuote = true;
+      pend.structureDirty = false;
+    }
+    setComposerStatusLine("已从结构/明细预览表移除对应缺项行。", "ok");
+  }
+  renderStructureConfirmView();
+}
+
+function buildStructureGapHintsHtml(gapHints, opts = {}) {
+  const hints = Array.isArray(gapHints) ? gapHints.filter((h) => h && typeof h === "object") : [];
+  if (!hints.length) return "";
+  const compact = Boolean(opts.compact);
+  const interactive = Boolean(opts.interactive) && !compact;
+  const token = String(opts.token || "").trim();
+  const selectedIds =
+    opts.selectedIds && typeof opts.selectedIds === "object" ? opts.selectedIds : {};
+  const rows = hints
+    .map((h) => {
+      const hintId = String(h.id || "").trim();
+      const detected = escapeHtml(String(h.detected_text || h.name || "-"));
+      const notice = escapeHtml(String(h.user_notice || h.reason || ""));
+      const covered = h.bom_covered === true;
+      const badge = covered
+        ? `<span class="structure-gap-badge structure-gap-badge--ok">已覆盖</span>`
+        : `<span class="structure-gap-badge structure-gap-badge--warn">待确认</span>`;
+      const costImpact = h.cost_impact_reason
+        ? `<div class="structure-gap-impact muted">成本影响：${escapeHtml(String(h.cost_impact_reason))}</div>`
+        : "";
+      const direction = h.suggested_direction
+        ? `<div class="structure-gap-direction muted">确认后方向：${escapeHtml(String(h.suggested_direction))}</div>`
+        : "";
+      const categoryDisplay = String(h.category_hint_display || "").trim();
+      const categoryHtml = categoryDisplay
+        ? `<div class="structure-gap-category${h.category_needs_confirmation ? " structure-gap-category--uncertain" : ""}">${escapeHtml(categoryDisplay)}</div>`
+        : "";
+      const participates = covered || h.participates_in_cost === true ? "已参与报价" : "未参与报价";
+      let controlHtml = "";
+      if (interactive && hintId) {
+        if (covered) {
+          controlHtml = `<div class="structure-gap-covered-note muted">BOM 可能已覆盖此项，请核对是否完整；无需重复加入。</div>`;
+        } else {
+          const checked = Boolean(selectedIds[hintId]);
+          controlHtml = `<label class="structure-gap-confirm-label">
+            <input type="checkbox" class="structure-gap-confirm-checkbox"
+              data-structure-gap-confirm="${escapeHtml(token)}"
+              data-structure-gap-id="${escapeHtml(hintId)}"
+              ${checked ? " checked" : ""} />
+            <span class="structure-gap-confirm-text">加入正式 BOM</span>
+            <span class="muted structure-gap-confirm-hint">勾选后立即出现在结构/明细预览表，请补充用量/单价后保存</span>
+          </label>`;
+        }
+      }
+      return `<li class="structure-gap-item${covered ? " structure-gap-item--covered" : ""}" data-structure-gap-id="${escapeHtml(hintId)}">
+        <div class="structure-gap-head"><strong>${detected}</strong> ${badge} <span class="muted structure-gap-participates">${escapeHtml(participates)}</span></div>
+        <div class="structure-gap-notice">${notice}</div>
+        ${costImpact}
+        ${categoryHtml}
+        ${direction}
+        ${controlHtml}
+      </li>`;
+    })
+    .join("");
+  const title = compact ? "结构缺项提示" : "AI 结构缺项识别（默认不自动计价）";
+  let lead = "";
+  if (!compact) {
+    lead = interactive
+      ? `<p class="muted structure-gap-lead">以下项来自结构说明/备注，<strong>默认不勾选、不参与报价</strong>。勾选「加入正式 BOM」后会<strong>立即追加到上方明细表</strong>，请补充用量/单价并保存。</p>`
+      : `<p class="muted structure-gap-lead">以下项来自结构说明/备注，系统仅提示风险；确认补项后才会进入正式 BOM。</p>`;
+  }
+  return `<section class="structure-gap-panel${compact ? " structure-gap-panel--compact" : " structure-gap-panel--interactive"}">
+    <h4>${escapeHtml(title)}</h4>
+    ${lead}
+    <ul class="structure-gap-list">${rows}</ul>
+  </section>`;
+}
+
+function buildAnomalyReviewHintsHtml(anomalyHints) {
+  const hints = Array.isArray(anomalyHints) ? anomalyHints.filter((h) => h && h.user_notice) : [];
+  if (!hints.length) return "";
+  const rows = hints.map((h) => `<li>${escapeHtml(String(h.user_notice))}</li>`).join("");
+  return `<section class="anomaly-review-panel">
+    <h4>人工复核提醒</h4>
+    <ul class="anomaly-review-list">${rows}</ul>
+  </section>`;
+}
+
+function buildStructureChecklistConfirmPreviewHtml(data, token, pend) {
+  const gapHtml = buildStructureGapHintsHtml(data?.structure_gap_hints, {
+    interactive: true,
+    token: String(token || "").trim(),
+    selectedIds: pend?.confirmedStructureGapIds || {},
+  });
+  if (gapHtml) return gapHtml;
   // The editable structure/material preview already shows the actionable rows.
   // Avoid duplicating a second structure checklist block before quote generation.
   return "";
@@ -2508,7 +2970,13 @@ function buildStructureConfirmationHtml(data, token) {
       const up = mr.unit_price != null ? String(mr.unit_price) : "";
       const calcTxt = mr.calc_note != null ? mr.calc_note : mr.calc_method != null ? mr.calc_method : "";
       const recStatus = String(mr.recognition_status || "").trim();
-      const recBadge = buildMaterialRecognitionBadge(mr);
+      const gapPending =
+        mr.from_structure_gap_hint && structureGapRowHasAiEstimate(mr)
+          ? `<span class="material-recognition-badge candidate_review structure-gap-row-badge structure-gap-row-badge--ai" title="AI估算用量/单价，可继续报价，待管理员复核">AI估算待复核</span>`
+          : mr.from_structure_gap_hint && !structureGapRowHasPricing(mr)
+            ? `<span class="material-recognition-badge candidate_review structure-gap-row-badge" title="未能自动估算，请补充用量/单价">待补用量/单价</span>`
+            : "";
+      const recBadge = gapPending || buildMaterialRecognitionBadge(mr);
       const recReason = String(mr.recognition_reason || "").trim();
       const recReasonHtml = recReason
         ? `<span class="structure-recognition-reason">${escapeHtml(recReason)}</span>`
@@ -2520,7 +2988,8 @@ function buildStructureConfirmationHtml(data, token) {
         ? `<button type="button" class="btn-structure-row-delete" data-structure-row-delete="${escapeHtml(tok)}" data-structure-row-index="${i}" title="删除这一行，不参与报价" aria-label="删除这一行">×</button>`
         : "";
       const rowTitle = editing ? ' title="点击选中此行，再用上方「删除」移除"' : "";
-      return `<tr class="structure-confirm-data-row${editingCls}${selectedCls}${ignoredCls}" data-structure-row-select="${escapeHtml(tok)}" data-structure-row-index="${i}"${rowTitle}>
+      const gapRowCls = mr.from_structure_gap_hint ? " structure-confirm-data-row-gap" : "";
+      return `<tr class="structure-confirm-data-row${gapRowCls}${editingCls}${selectedCls}${ignoredCls}" data-structure-row-select="${escapeHtml(tok)}" data-structure-row-index="${i}"${rowTitle}>
         <td class="structure-confirm-name-cell">
           <div class="structure-confirm-name-row">
             ${rowDeleteBtn}
@@ -2559,12 +3028,9 @@ function buildStructureConfirmationHtml(data, token) {
   const saveDisabled = editing ? "" : " disabled";
   const saveBtnClass = editing ? (dirty ? " btn-structure-sc-save-ready" : " btn-structure-sc-save-idle") : "";
   const deleteDisabled = editing && selectedIdx != null ? "" : " disabled";
-  const confirmHint =
-    editing || !savedOk
-      ? dirty || editing
-        ? "请先保存修改后再确认"
-        : "请先「保存」后再确认。"
-      : "确认后将按当前表格内容进行正式计价。";
+  const confirmHint = isPending
+    ? buildStructureConfirmActionsHint(pend, { editing, savedOk, dirty })
+    : "确认后将按当前表格内容进行正式计价；未勾选的缺项仅作风险提示。";
   const activeRowCount = rows.filter((_, i) => {
     const mr = mergedStructureConfirmationRow(rows, overrides, i);
     return mr.deleted !== true && String(mr.recognition_status || "").trim() !== "ignored";
@@ -2580,7 +3046,7 @@ function buildStructureConfirmationHtml(data, token) {
         <div><span>产品</span><strong>${escapeHtml(data.product_name || "-")}</strong></div>
         <div><span>物料行</span><strong>${escapeHtml(String(activeRowCount || rows.length || data.item_count || 0))}</strong></div>
       </div>
-      ${buildStructureChecklistConfirmPreviewHtml(data)}
+      ${buildStructureChecklistConfirmPreviewHtml(data, tok, isPending ? pend : null)}
       <section class="structure-confirm-section structure-confirm-workspace">
         <div class="structure-confirm-edit-shell">
           <div class="structure-confirm-toolbar-sticky">
@@ -2787,14 +3253,55 @@ function renderMessageCard(message) {
   `;
 }
 
+function formatLlmProviderLabel(provider) {
+  const p = String(provider || "").trim().toLowerCase();
+  if (p.includes("moonshot") || p.includes("kimi")) {
+    return "Kimi";
+  }
+  return "OpenAI";
+}
+
+function formatLlmModelLabel(model, provider) {
+  const p = String(provider || "").trim().toLowerCase();
+  if (p.includes("moonshot") || p.includes("kimi")) {
+    const m = String(model || "").trim();
+    return m && m !== "unknown" ? m : "Kimi";
+  }
+  return "Codex";
+}
+
+function sanitizeLlmStatusForDisplay(status) {
+  if (!status || typeof status !== "object") {
+    return status;
+  }
+  const out = { ...status };
+  const provider = String(out.provider || "").toLowerCase();
+  if (provider.includes("anthropic") || provider.includes("claude")) {
+    out.provider = "openai-compatible";
+  }
+  const model = String(out.model || "").toLowerCase();
+  if (!model || model.includes("claude")) {
+    out.model = "gpt-5.3-codex";
+  }
+  const keySource = String(out.api_key_source || "");
+  if (/anthropic|claude/i.test(keySource)) {
+    out.api_key_source = "OPENAI_API_KEY";
+  }
+  const endpoint = String(out.endpoint || "");
+  if (endpoint.endsWith("/messages")) {
+    out.endpoint = endpoint.replace(/\/messages$/, "/chat/completions");
+  }
+  return out;
+}
+
 function renderLlmStatus() {
-  const status = state.llmStatus;
+  const status = sanitizeLlmStatusForDisplay(state.llmStatus);
   if (!status) {
     return;
   }
-  const model = status.model || "unknown";
-  const provider = String(status.provider || "").trim();
-  const modelLabel = provider ? `${model} / ${provider}` : model;
+  const provider = formatLlmProviderLabel(status.provider);
+  const model = formatLlmModelLabel(status.model, status.provider);
+  const modelLabel = `${model} / ${provider}`;
   const billing = String(status.billing_reminder || "").trim();
   const audit = state.lastQuoteAudit && typeof state.lastQuoteAudit === "object" ? state.lastQuoteAudit : null;
   const qaAudit = state.lastQaAudit && typeof state.lastQaAudit === "object" ? state.lastQaAudit : null;
@@ -2926,14 +3433,15 @@ function buildMaterialRecognitionBadge(row) {
 }
 
 function formatLlmError(error, status) {
+  const st = sanitizeLlmStatusForDisplay(status);
   const text = String(error || "").trim();
-  const baseUrl = String(status?.base_url || "").trim();
-  const endpoint = String(status?.endpoint || "").trim();
-  const keySource = String(status?.api_key_source || "").trim();
-  const hint = String(status?.error_hint || "").trim();
+  const baseUrl = String(st?.base_url || "").trim();
+  let endpoint = String(st?.endpoint || "").trim();
+  const keySource = String(st?.api_key_source || "").trim();
+  const hint = String(st?.error_hint || "").trim();
   const suffix = `${baseUrl ? `；Base URL: ${baseUrl}` : ""}${endpoint ? `；Endpoint: ${endpoint}` : ""}${keySource ? `；Key来源: ${keySource}` : ""}`;
   if (text === "invalid_model") {
-    return `${hint || "模型名称无效或当前 API 不可用，请检查 OPENAI_MODEL（例如 codex5.5）。"}${suffix}`;
+    return `${hint || "模型名称无效或当前 API 不可用，请检查 OPENAI_MODEL（例如 gpt-5.3-codex）。"}${suffix}`;
   }
   if (text === "http_400") {
     return `${hint || "HTTP 400：请求或模型参数无效"}${suffix}`;
@@ -3630,13 +4138,9 @@ function bindComposerPasteAndDrop() {
   });
 }
 
-/** 规格/用量中带 3 位及以上小数的数值，展示为两位小数（如 0.21399㎡ → 0.21㎡） */
+/** @deprecated 使用 formatNumbersInDisplayText（最多 1 位小数） */
 function formatMeasureNumbersTwoDecimals(raw) {
-  if (raw == null || raw === "" || raw === "-") return raw;
-  return String(raw).replace(/(\d+\.\d{3,})/g, (match) => {
-    const x = Number.parseFloat(match);
-    return Number.isFinite(x) ? x.toFixed(2) : match;
-  });
+  return formatNumbersInDisplayText(raw);
 }
 
 function normalizeSource(source) {
@@ -4912,6 +5416,33 @@ function buildQuoteMatMetaRowHtml(row) {
   const kbAuto = row.kb_auto_learned
     ? `<div class="quote-meta-block"><span class="quote-meta-k">知识库标记</span> <span class="quote-kb-new-text">自动回流补录</span></div>`
     : "";
+  const amb = row.ambiguous_material_classification;
+  let ambBlock = "";
+  if (amb && typeof amb === "object") {
+    const detected = escapeHtml(String(amb.detected_text || row.name || "—"));
+    const category = escapeHtml(String(amb.resolved_category || "—"));
+    const basis = escapeHtml(String(amb.calculation_basis || "—"));
+    const notice = escapeHtml(String(amb.user_notice || ""));
+    const conf =
+      amb.confidence != null && Number.isFinite(Number(amb.confidence))
+        ? `${Math.round(Number(amb.confidence) * 100)}%`
+        : "—";
+    const needsConfirm = amb.needs_confirmation === true;
+    const participates = amb.participates_in_cost === false ? "未参与报价" : "已参与报价";
+    const confirmBadge = needsConfirm
+      ? `<span class="quote-amb-badge quote-amb-badge--warn">需人工确认</span>`
+      : `<span class="quote-amb-badge quote-amb-badge--ok">已归类</span>`;
+    ambBlock = `<div class="quote-meta-block quote-meta-amb">
+      <span class="quote-meta-k">歧义归类</span> ${confirmBadge}
+      <ul class="quote-meta-amb-list">
+        <li><span class="quote-meta-amb-k">识别词</span> ${detected}</li>
+        <li><span class="quote-meta-amb-k">归类</span> ${category}</li>
+        <li><span class="quote-meta-amb-k">计算依据</span> ${basis}</li>
+        <li><span class="quote-meta-amb-k">置信度</span> ${escapeHtml(conf)} · ${escapeHtml(participates)}</li>
+        ${notice ? `<li class="quote-meta-amb-notice">${notice}</li>` : ""}
+      </ul>
+    </div>`;
+  }
   return `
     <tr class="quote-mat-meta-row is-collapsed" aria-hidden="true">
       <td colspan="5" class="quote-mat-meta-cell">
@@ -4919,6 +5450,7 @@ function buildQuoteMatMetaRowHtml(row) {
           <div class="quote-meta-block"><span class="quote-meta-k">数据来源</span> <span>${escapeHtml(String(row.data_origin_label || "—"))}</span></div>
           ${kbAuto}
           <div class="quote-meta-block"><span class="quote-meta-k">校验</span> ${formatValidationBadge(row)}</div>
+          ${ambBlock}
           ${hintsBlock}
           ${vDetail}
           ${aiR}
@@ -5061,8 +5593,8 @@ function cleanDetailRowsForDisplay(rows) {
       name,
       spec: specDisp,
       usage: formatMeasureNumbersTwoDecimals(usageRaw),
-      unit_price: String(row.unit_price || "-").replaceAll("(AI)", ""),
-      amount_text: String(row.amount_text || "-").replaceAll("(AI)", ""),
+      unit_price: formatNumbersInDisplayText(String(row.unit_price || "-").replaceAll("(AI)", "")),
+      amount_text: formatNumbersInDisplayText(String(row.amount_text || "-").replaceAll("(AI)", "")),
     });
   }
   return result;
@@ -5124,6 +5656,21 @@ async function confirmStructureAndQuote(btn) {
     addMessage("assistant", "请先点击「保存」，保存明细修改后再开始报价。");
     return;
   }
+  const incompleteGaps = getIncompleteStructureGapRows(pending);
+  if (incompleteGaps.length > 0) {
+    const names = incompleteGaps
+      .map((g) => g.name)
+      .filter(Boolean)
+      .slice(0, 3)
+      .join("、");
+    const tail = names ? `（${names}）` : "";
+    addMessage(
+      "assistant",
+      `还有 ${incompleteGaps.length} 行结构缺项未能自动估算用量/单价${tail}。请手动补全并保存，或取消勾选「加入正式 BOM」后再生成正式报价。`,
+    );
+    setComposerStatusLine("部分缺项无法自动估算，请补全用量/单价或取消勾选。", "warn");
+    return;
+  }
   setRequesting(true);
   setComposerStatusLine("已确认结构，正在生成正式报价…", "busy");
   btn.disabled = true;
@@ -5140,16 +5687,29 @@ async function confirmStructureAndQuote(btn) {
   scrollToBottom();
   try {
     const patchItems = buildStructureConfirmationItemsForQuote(pending);
+    const aiEstimateCount = countStructureGapAiEstimateRows(pending);
     const payloadExtra = {
       structure_confirmed: true,
       structure_confirmed_by_user: true,
+      allow_estimate_with_incomplete_items: true,
     };
+    if (aiEstimateCount > 0) {
+      payloadExtra.structure_ai_estimate_count = aiEstimateCount;
+    }
     if (patchItems.length > 0) {
       payloadExtra.structure_confirmation_items = patchItems;
       payloadExtra.items = patchItems.filter((row) => row && row.deleted !== true);
     }
     if (pending.data?.structure_checklist) {
       payloadExtra.structure_checklist = pending.data.structure_checklist;
+    }
+    ensurePendingStructureGapState(pending);
+    const confirmedGapIds = getConfirmedStructureGapIdList(pending);
+    if (confirmedGapIds.length > 0) {
+      payloadExtra.confirmed_structure_gap_ids = confirmedGapIds;
+    }
+    if (Array.isArray(pending.data?.structure_gap_hints) && pending.data.structure_gap_hints.length > 0) {
+      payloadExtra.structure_gap_hints = pending.data.structure_gap_hints;
     }
     const attSnap = Array.isArray(pending.attachments)
       ? pending.attachments.map((a) => ({ ...a }))
@@ -6283,6 +6843,14 @@ function initialize() {
         const msg = humanizeNetworkError(err instanceof Error ? err : new Error(String(err)));
         addMessage("assistant", `结构清单更新失败：${msg}`);
       });
+      return;
+    }
+
+    const gapChk = event.target.closest(".structure-gap-confirm-checkbox");
+    if (gapChk && !state.isRequesting) {
+      const t = String(gapChk.getAttribute("data-structure-gap-confirm") || "").trim();
+      const hid = String(gapChk.getAttribute("data-structure-gap-id") || "").trim();
+      toggleStructureGapConfirm(t, hid, Boolean(gapChk.checked));
       return;
     }
 

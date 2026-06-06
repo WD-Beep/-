@@ -478,7 +478,7 @@ def build_readonly_quote_context(
     payload: dict[str, Any],
     result: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """将会话中的 payload / quote_result 整理为 Claude 只读业务上下文。"""
+    """将会话中的 payload / quote_result 整理为 LLM 只读业务上下文。"""
     payload = payload if isinstance(payload, dict) else {}
     result = result if isinstance(result, dict) else {}
 
@@ -721,7 +721,6 @@ def _answer_with_backpack_consultant(
     try:
         from kimi_client import (
             _http_error_body,
-            _is_anthropic_config,
             _maybe_thinking_field,
             _send_chat_request_moonshot_with_400_relax,
             billing_reminder_from_http,
@@ -790,7 +789,6 @@ def _answer_with_backpack_consultant(
                 body=req_body,
                 timeout_s=config.timeout_s,
                 disable_proxy=False,
-                use_anthropic_native=_is_anthropic_config(config),
             )
         except error.HTTPError as exc:
             body = _http_error_body(exc)
@@ -812,7 +810,6 @@ def _answer_with_backpack_consultant(
                     body=req_body,
                     timeout_s=config.timeout_s,
                     disable_proxy=True,
-                    use_anthropic_native=_is_anthropic_config(config),
                 )
             except Exception:
                 continue
@@ -1439,7 +1436,9 @@ def _filter_internal_jargon(text: str) -> str:
         "price_kb_sync": "标价库匹配记录",
         "quote_engine": "报价引擎",
         "pricing_gate": "风控提示",
-        "Claude": "",
+        "Claude": "OpenAI",
+        "ClaudeCode": "OpenAI",
+        "Anthropic": "OpenAI",
         "Kimi": "",
         "payload": "数据",
         "calculate_quote": "核算流程",

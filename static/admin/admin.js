@@ -951,8 +951,12 @@ async function guardAdminRoleOrRedirect() {
 
 function formatMoney(n) {
   const x = Number(n);
-  if (Number.isFinite(x)) return x.toFixed(2);
+  if (Number.isFinite(x)) return formatDisplayNumber(x);
   return String(n ?? "-");
+}
+
+function formatBomDisplayNumberText(raw) {
+  return formatNumbersInDisplayText(String(raw ?? ""));
 }
 
 function formatPct(ratio) {
@@ -1006,6 +1010,18 @@ function csvBlankLine() {
 function csvSectionBanner(title, width = 8) {
   const cells = [`【${title}】`, ...Array(Math.max(0, width - 1)).fill("")];
   return csvRow(cells);
+}
+
+function bomRowHasAiEstimate(row, db) {
+  const r = row && typeof row === "object" ? row : {};
+  const d = db && typeof db === "object" ? db : {};
+  const hasAiFlag = Boolean(r.usage_ai || r.unit_price_ai || r.amount_ai || r.pricing_review_required);
+  const dbAiFlag = Boolean(d.usage_ai || d.unit_price_ai || d.amount_ai || d.pricing_review_required);
+  return hasAiFlag || dbAiFlag;
+}
+
+function bomAiEstimateBadgeHtml() {
+  return `<span class="bom-ai-estimate-badge" title="AI估算用量/单价，待管理员复核">AI估算待复核</span>`;
 }
 
 function bomPairSource(pair) {
@@ -1422,7 +1438,18 @@ function pairDetailRows(quote, items) {
         fillIfEmpty("unit_price");
         fillIfEmpty("amount_text");
         fillIfEmpty("source");
+        fillIfEmpty("recognition_reason");
         if ((rowObj.amount == null || rowObj.amount === "") && db.amount != null) rowObj.amount = db.amount;
+        for (const key of [
+          "usage_ai",
+          "unit_price_ai",
+          "amount_ai",
+          "pricing_review_required",
+          "from_structure_gap_hint",
+          "structure_gap_hint_id",
+        ]) {
+          if (rowObj[key] == null && db[key] != null) rowObj[key] = db[key];
+        }
       }
     } else if (db && typeof db === "object") {
       rowObj = {
@@ -1435,6 +1462,12 @@ function pairDetailRows(quote, items) {
         source: db.source || "",
         calc_note: db.calc_note || "",
         accuracy_hints: [],
+        usage_ai: Boolean(db.usage_ai),
+        unit_price_ai: Boolean(db.unit_price_ai),
+        amount_ai: Boolean(db.amount_ai),
+        pricing_review_required: Boolean(db.pricing_review_required),
+        from_structure_gap_hint: Boolean(db.from_structure_gap_hint),
+        recognition_reason: String(db.recognition_reason || "").trim(),
       };
     } else {
       rowObj = {
@@ -1478,6 +1511,10 @@ function classifyAnomalies(pair) {
 
   const cn = String(pair.mergedCalcNote || "").trim();
   if (!cn) push("badge-warn", "计算方式缺失");
+
+  if (bomRowHasAiEstimate(r, pair.db)) {
+    push("badge-risk", "AI估算待复核");
+  }
 
   const usage = String(r.usage || "");
   const up = String(r.unit_price || "");
@@ -2145,9 +2182,11 @@ function firstBomValue(...values) {
 }
 
 function bomAmountText(row) {
-  if (row?.amount_text != null && String(row.amount_text).trim() !== "") return String(row.amount_text);
+  if (row?.amount_text != null && String(row.amount_text).trim() !== "") {
+    return formatBomDisplayNumberText(row.amount_text);
+  }
   const n = parseAmountNum(row);
-  return Number.isFinite(n) ? `${formatMoney(n)}元` : "-";
+  return Number.isFinite(n) ? formatDisplayMoneyCny(n) : "-";
 }
 
 function formatBomSize(size) {
@@ -2616,7 +2655,9 @@ function renderBomRowsTable(columns, rows, options = {}) {
                 if (options.numCols?.includes(ix)) classes.push("bom-num-cell");
                 if (options.clampCols?.includes(ix)) classes.push("bom-clamp-cell");
                 const cls = classes.length ? ` class="${classes.join(" ")}"` : "";
-                const inner = escapeHtml(cleanBomText(cell));
+                const inner = options.rawHtmlCols?.includes(ix)
+                  ? String(cell ?? "")
+                  : escapeHtml(cleanBomText(cell));
                 if (options.clampCols?.includes(ix)) {
                   return `<td${cls}><div class="bom-clamp-text">${inner}</div></td>`;
                 }
@@ -2740,6 +2781,13 @@ function buildBomEditRowsDraft(pairs) {
       unit_price: split.price || String(r.unit_price || "").trim(),
       calc_note: String(pair.mergedCalcNote || r.calc_note || r.calc_method || "").trim(),
       source: String(r.source || "").trim(),
+      usage_ai: Boolean(r.usage_ai || pair.db?.usage_ai),
+      unit_price_ai: Boolean(r.unit_price_ai || pair.db?.unit_price_ai),
+      amount_ai: Boolean(r.amount_ai || pair.db?.amount_ai),
+      pricing_review_required: Boolean(r.pricing_review_required || pair.db?.pricing_review_required),
+      from_structure_gap_hint: Boolean(r.from_structure_gap_hint || pair.db?.from_structure_gap_hint),
+      recognition_reason: String(r.recognition_reason || pair.db?.recognition_reason || "").trim(),
+      _orig_unit_price: String(r.unit_price || "").trim(),
     };
   });
 }
@@ -2931,8 +2979,11 @@ function renderBomEditMaterialTable(rows) {
           const fkName = `items.${i}.name`;
           const fkUp = `items.${i}.unit_price`;
           const fkUsage = `items.${i}.usage`;
-          return `<tr data-bom-row-index="${i}">
-            <td><div class="bom-edit-cell"><input type="text" class="bom-edit-input" data-bom-row-field="name" data-bom-row-index="${i}" value="${escapeHtml(row.name || "")}"${bomEditFieldErrorAttr(fkName)} />${bomEditInlineErrorHtml(fkName)}</div></td>
+          const aiBadge = bomRowHasAiEstimate(row, row)
+            ? `<div class="bom-edit-ai-flag">${bomAiEstimateBadgeHtml()}</div>`
+            : "";
+          return `<tr data-bom-row-index="${i}"${row.pricing_review_required ? ' class="bom-edit-row-ai"' : ""}>
+            <td><div class="bom-edit-cell"><input type="text" class="bom-edit-input" data-bom-row-field="name" data-bom-row-index="${i}" value="${escapeHtml(row.name || "")}"${bomEditFieldErrorAttr(fkName)} />${bomEditInlineErrorHtml(fkName)}${aiBadge}</div></td>
             <td><input type="text" class="bom-edit-input" data-bom-row-field="spec" data-bom-row-index="${i}" value="${escapeHtml(row.spec || "")}" autocomplete="off" /></td>
             <td><div class="bom-edit-cell"><input type="text" class="bom-edit-input bom-edit-input-num" data-bom-row-field="usage" data-bom-row-index="${i}" value="${escapeHtml(row.usage || "")}"${bomEditFieldErrorAttr(fkUsage)} />${bomEditInlineErrorHtml(fkUsage)}</div></td>
             <td><input type="text" class="bom-edit-input" data-bom-row-field="unit" data-bom-row-index="${i}" value="${escapeHtml(row.unit || "")}" placeholder="元/码" autocomplete="off" /></td>
@@ -3074,7 +3125,7 @@ function draftToSavePayload(draft) {
       if (isCountBasedUnit(unit, price) && isEmptyBomUsage(usage)) {
         usage = defaultCountUsage(unit, price);
       }
-      return {
+      const out = {
         name,
         spec: String(row?.spec || "").trim() || "-",
         usage,
@@ -3082,6 +3133,17 @@ function draftToSavePayload(draft) {
         calc_note: String(row?.calc_note || "").trim(),
         source: String(row?.source || "").trim(),
       };
+      const hadAi = Boolean(row?.unit_price_ai || row?.pricing_review_required);
+      const priceChanged = hadAi && String(row?._orig_unit_price || "").trim() !== joinUnitPrice(price, unit);
+      if (priceChanged) {
+        out.admin_confirm_ai_price = true;
+        out.source = "admin";
+      } else if (hadAi) {
+        out.pricing_review_required = true;
+        out.unit_price_ai = Boolean(row?.unit_price_ai);
+        out.usage_ai = Boolean(row?.usage_ai);
+      }
+      return out;
     })
     .filter(Boolean);
   const includeTax = p.include_tax === "yes" ? true : p.include_tax === "no" ? false : null;
@@ -3226,26 +3288,60 @@ function buildMultiSizeBomHtml(quote, meta) {
   return `<div class="multi-size-bom-wrap"><p class="multi-size-bom-lead muted">本报价含 ${variants.length} 个尺寸变体；管理员 BOM 编辑仍针对默认第一档。</p>${blocks}</div>`;
 }
 
+function buildBomAiEstimateSectionHtml(pairs) {
+  const list = sortedPairs([...(pairs || [])]).filter((pair) => bomRowHasAiEstimate(pair.row, pair.db));
+  if (!list.length) return "";
+  const rows = list.map((pair) => {
+    const r = pair.row || {};
+    const reason = String(r.recognition_reason || pair.db?.recognition_reason || "AI估算用量/单价").trim();
+    return [
+      `${r.name || "-"}${bomAiEstimateBadgeHtml()}`,
+      formatBomDisplayNumberText(r.usage || "-"),
+      formatBomDisplayNumberText(r.unit_price || "-"),
+      bomAmountText(r),
+      reason,
+    ];
+  });
+  return `<section class="bom-section bom-section-ai-estimate">
+    <h3>AI 估算项（待管理员复核）</h3>
+    <p class="muted bom-ai-estimate-lead">以下物料由系统自动估算用量/单价，可参与报价但需复核。修改后保存 BOM 将视为管理员确认。</p>
+    ${renderBomRowsTable(["物料", "用量", "单价", "成本（元）", "说明"], rows, {
+      numCols: [3],
+      clampCols: [4],
+      rawHtmlCols: [0],
+      tableClass: "bom-ai-estimate-table",
+    })}
+  </section>`;
+}
+
 function buildBomHtml(pairs, quote, meta) {
   const list = sortedPairs([...(pairs || [])]);
   const unitPriceRows = list.map((pair) => {
     const r = pair.row || {};
-    return [r.name || "-", r.unit_price || "-"];
+    const nameCell = bomRowHasAiEstimate(r, pair.db) ? `${r.name || "-"} ${bomAiEstimateBadgeHtml()}` : r.name || "-";
+    return [nameCell, formatBomDisplayNumberText(r.unit_price || "-")];
   });
   const usageRows = list.filter(likelyFabricPair).map((pair) => {
     const r = pair.row || {};
     return [
       r.name || "-",
-      r.spec || "-",
-      r.usage || "-",
+      formatBomDisplayNumberText(r.spec || "-"),
+      formatBomDisplayNumberText(r.usage || "-"),
       cleanBomText(pair.mergedCalcNote || r.calc_method || r.calc_note, "-"),
       bomAmountText(r),
     ];
   });
   const costRows = list.map((pair) => {
     const r = pair.row || {};
-    return [r.name || "-", r.unit_price || "-", r.usage || "-", bomAmountText(r)];
+    const nameCell = bomRowHasAiEstimate(r, pair.db) ? `${r.name || "-"} ${bomAiEstimateBadgeHtml()}` : r.name || "-";
+    return [
+      nameCell,
+      formatBomDisplayNumberText(r.unit_price || "-"),
+      formatBomDisplayNumberText(r.usage || "-"),
+      bomAmountText(r),
+    ];
   });
+  const aiEstimateSection = buildBomAiEstimateSectionHtml(list);
   const materialTotal = Number(quote?.material_total);
   if (Number.isFinite(materialTotal)) {
     costRows.push(["物料小计", "", "", `${formatMoney(materialTotal)}元`]);
@@ -3260,7 +3356,7 @@ function buildBomHtml(pairs, quote, meta) {
       </section>
       <section class="bom-section">
         <h3>二、物料单价确认</h3>
-        ${renderBomRowsTable(["物料名称", "单价"], unitPriceRows)}
+        ${renderBomRowsTable(["物料名称", "单价"], unitPriceRows, { rawHtmlCols: [0] })}
       </section>
       ${pieceAreaHtml}
       <section class="bom-section">
@@ -3272,10 +3368,12 @@ function buildBomHtml(pairs, quote, meta) {
           emptyText: "当前归档未识别到面料用量表",
         })}
       </section>
+      ${aiEstimateSection}
       <section class="bom-section">
         <h3>五、各物料成本计算（单个）</h3>
         ${renderBomRowsTable(["物料", "单价", "用量", "成本（元）"], costRows, {
           numCols: [3],
+          rawHtmlCols: [0],
           tableClass: "bom-cost-table",
         })}
       </section>
@@ -3315,7 +3413,9 @@ function renderOverviewEmbeddedDetailLegacy(pairs) {
         .map((b) => `<span class="badge ${b.cls}">${escapeHtml(b.text)}</span>`)
         .join("");
       const amtText =
-        r.amount_text != null ? String(r.amount_text) : formatMoney(parseAmountNum(r));
+        r.amount_text != null
+          ? formatBomDisplayNumberText(r.amount_text)
+          : formatMoney(parseAmountNum(r));
       const noteTrim = String(note || "").trim();
       const needToggle = noteTrim.length > 32 || /\r|\n/.test(note);
       const isOpen = expSet.has(pair.lineNo);
@@ -3327,14 +3427,14 @@ function renderOverviewEmbeddedDetailLegacy(pairs) {
           <td class="col-ov-val">${badgeHtml}</td>
           <td class="ov-mat-name">${escapeHtml(String(r.name || "-"))}</td>
           <td class="ov-piece-cell">${escapeHtml(formatDetailPiecePart(r.piece_part, lastBundle?.quote, r.name))}</td>
-          <td class="ov-spec-cell">${escapeHtml(String(r.spec || "-"))}</td>
-          <td class="ov-usage-cell">${escapeHtml(String(r.usage || "-"))}</td>
+          <td class="ov-spec-cell">${escapeHtml(formatBomDisplayNumberText(r.spec || "-"))}</td>
+          <td class="ov-usage-cell">${escapeHtml(formatBomDisplayNumberText(r.usage || "-"))}</td>
           <td class="ov-calc-cell">
             <div class="ov-calc-text ${needToggle && !isOpen ? "is-clamped" : ""}">${escapeHtml(noteTrim || "-")}</div>
             ${toggleBtn}
           </td>
           <td class="col-num ov-num-stack">
-            <div class="ov-stack-line ov-price-line">${escapeHtml(String(r.unit_price || "-"))}</div>
+            <div class="ov-stack-line ov-price-line">${escapeHtml(formatBomDisplayNumberText(r.unit_price || "-"))}</div>
             <div class="ov-stack-line ov-stack-gap" aria-hidden="true">&nbsp;</div>
           </td>
           <td class="col-num ov-num-stack">
@@ -3440,17 +3540,17 @@ function renderMarkerRoomTable(quote) {
           <td class="mr-num">${escapeHtml(String(r.roll_width || ""))}</td>
           <td class="mr-num">${escapeHtml(String(r.marker_width || ""))}</td>
           <td class="mr-piece-name">${escapeHtml(String(r.piece_name || ""))}</td>
-          <td class="mr-num">${escapeHtml(String(r.length || ""))}</td>
-          <td class="mr-num">${escapeHtml(String(r.width || ""))}</td>
-          <td class="mr-num">${escapeHtml(String(r.occupied_length || ""))}</td>
-          <td class="mr-num">${escapeHtml(String(r.occupied_width || ""))}</td>
-          <td class="mr-num">${escapeHtml(String(r.qty || ""))}</td>
-          <td class="mr-num">${escapeHtml(String(r.single_marker_usage || ""))}</td>
-          <td class="mr-num">${escapeHtml(String(r.loss_pct || ""))}</td>
-          <td class="mr-num">${escapeHtml(String(r.total_marker_usage || ""))}</td>
+          <td class="mr-num">${escapeHtml(formatBomDisplayNumberText(r.length || ""))}</td>
+          <td class="mr-num">${escapeHtml(formatBomDisplayNumberText(r.width || ""))}</td>
+          <td class="mr-num">${escapeHtml(formatBomDisplayNumberText(r.occupied_length || ""))}</td>
+          <td class="mr-num">${escapeHtml(formatBomDisplayNumberText(r.occupied_width || ""))}</td>
+          <td class="mr-num">${escapeHtml(formatBomDisplayNumberText(r.qty || ""))}</td>
+          <td class="mr-num">${escapeHtml(formatBomDisplayNumberText(r.single_marker_usage || ""))}</td>
+          <td class="mr-num">${escapeHtml(formatBomDisplayNumberText(r.loss_pct || ""))}</td>
+          <td class="mr-num">${escapeHtml(formatBomDisplayNumberText(r.total_marker_usage || ""))}</td>
           <td>${escapeHtml(String(r.unit || ""))}</td>
-          <td class="mr-num">${escapeHtml(String(r.unit_price || ""))}</td>
-          <td class="mr-num">${escapeHtml(String(r.amount || ""))}</td>
+          <td class="mr-num">${escapeHtml(formatBomDisplayNumberText(r.unit_price || ""))}</td>
+          <td class="mr-num">${escapeHtml(formatBomDisplayNumberText(r.amount || ""))}</td>
           <td class="badges-cell col-anomaly">${badgeHtml}</td>
         </tr>`;
     })
@@ -3478,7 +3578,9 @@ function renderDetailTable(pairs) {
         .map((b) => `<span class="badge ${b.cls}">${escapeHtml(b.text)}</span>`)
         .join("");
       const amtText =
-        r.amount_text != null ? String(r.amount_text) : formatMoney(parseAmountNum(r));
+        r.amount_text != null
+          ? formatBomDisplayNumberText(r.amount_text)
+          : formatMoney(parseAmountNum(r));
       const note = String(pair.mergedCalcNote || "").trim();
       const noteHtml = note
         ? `<div class="detail-calc-text">${escapeHtml(note)}</div>`
@@ -3491,11 +3593,11 @@ function renderDetailTable(pairs) {
             <div class="detail-name-line">${escapeHtml(String(r.name || "-"))}</div>
           </td>
           <td class="detail-piece-cell">${escapeHtml(piecePart)}</td>
-          <td class="detail-spec-cell">${escapeHtml(String(r.spec || "-"))}</td>
-          <td class="detail-usage-cell">${escapeHtml(String(r.usage || "-"))}</td>
+          <td class="detail-spec-cell">${escapeHtml(formatBomDisplayNumberText(r.spec || "-"))}</td>
+          <td class="detail-usage-cell">${escapeHtml(formatBomDisplayNumberText(r.usage || "-"))}</td>
           <td>${noteHtml}</td>
           <td class="col-num ov-num-stack">
-            <div class="ov-stack-line ov-price-line">${escapeHtml(String(r.unit_price || "-"))}</div>
+            <div class="ov-stack-line ov-price-line">${escapeHtml(formatBomDisplayNumberText(r.unit_price || "-"))}</div>
             <div class="ov-stack-line ov-stack-gap" aria-hidden="true">&nbsp;</div>
           </td>
           <td class="col-num ov-num-stack">

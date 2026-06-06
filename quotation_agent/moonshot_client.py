@@ -18,29 +18,23 @@ logger = logging.getLogger(__name__)
 
 def moonshot_base_url() -> str:
     raw = (
-        os.environ.get("ANTHROPIC_BASE_URL")
+        os.environ.get("OPENAI_BASE_URL")
         or os.environ.get("KIMI_BASE_URL")
         or os.environ.get("MOONSHOT_BASE_URL")
         or os.environ.get("OPENCLAW_BASE_URL")
         or os.environ.get("DEEPSEEK_BASE_URL")
-        or os.environ.get("OPENAI_BASE_URL")
-        or (
-            "https://api.anthropic.com/v1"
-            if os.environ.get("ANTHROPIC_API_KEY", "").strip()
-            else "https://api.moonshot.ai/v1"
-        )
+        or "https://api.moonshot.ai/v1"
     ).rstrip("/")
     return raw
 
 
 def moonshot_api_key() -> str:
     return (
-        os.environ.get("ANTHROPIC_API_KEY")
+        os.environ.get("OPENAI_API_KEY")
         or os.environ.get("KIMI_API_KEY")
         or os.environ.get("MOONSHOT_API_KEY")
         or os.environ.get("OPENCLAW_API_KEY")
         or os.environ.get("DEEPSEEK_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
         or ""
     ).strip()
 
@@ -48,16 +42,11 @@ def moonshot_api_key() -> str:
 def default_text_model() -> str:
     return (
         os.environ.get("QUOTATION_AGENT_TEXT_MODEL")
-        or os.environ.get("KIMI_MODEL")
-        or os.environ.get("ANTHROPIC_MODEL")
         or os.environ.get("OPENAI_MODEL")
+        or os.environ.get("KIMI_MODEL")
         or os.environ.get("OPENCLAW_MODEL")
         or os.environ.get("DEEPSEEK_MODEL")
-        or (
-            "claude-opus-4-7"
-            if os.environ.get("ANTHROPIC_API_KEY", "").strip()
-            else "kimi-k2.6"
-        )
+        or "gpt-5.3-codex"
     )
 
 

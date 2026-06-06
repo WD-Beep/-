@@ -98,9 +98,9 @@ class QuoteEngineTest(unittest.TestCase):
         result = calculate_quote({})
 
         self.assertEqual([tier["quantity"] for tier in result["tiers"]], [300, 500, 1000])
-        self.assertEqual(result["tiers"][0]["total_cost_text"], "147.24元")
-        self.assertEqual(result["tiers"][0]["exw_price_text"], "226.52元")
-        self.assertEqual(result["tiers"][0]["fob_price_text"], "230.52元")
+        self.assertEqual(result["tiers"][0]["total_cost_text"], "147.2元")
+        self.assertEqual(result["tiers"][0]["exw_price_text"], "226.5元")
+        self.assertEqual(result["tiers"][0]["fob_price_text"], "230.5元")
         self.assertEqual(result["tiers"][0]["margin_rate_text"], "35%")
         cb = result.get("cost_bridge")
         assert isinstance(cb, dict)
@@ -349,7 +349,9 @@ class QuoteEngineTest(unittest.TestCase):
             self.assertEqual(tier["tax_rate_text"], "13%")
             self.assertIsNotNone(tier["taxed_price"])
             self.assertAlmostEqual(float(tier["taxed_price"]), exp, places=2)
-            self.assertEqual(tier["taxed_price_text"], f"{exp:.2f}元")
+            from display_number_format import format_display_money_cny
+
+            self.assertEqual(tier["taxed_price_text"], format_display_money_cny(exp))
         md = result["markdown"]
         self.assertIn("含税(13%，元/件)", md)
 
@@ -421,7 +423,7 @@ class QuoteEngineTest(unittest.TestCase):
             },
         )
         row = result["detail_rows"][0]
-        self.assertEqual(row["unit_price"], "21.5278元/㎡")
+        self.assertEqual(row["unit_price"], "21.5元/㎡")
         self.assertAlmostEqual(float(row["amount"]), 25.83, places=2)
         self.assertIn("单位换算", row["calc_note"])
         self.assertEqual(row.get("raw_usage"), "1.2㎡")
@@ -444,12 +446,13 @@ class QuoteEngineTest(unittest.TestCase):
             },
         )
         row = result["detail_rows"][0]
-        self.assertEqual(row["unit_price"], "0.035元/cm")
+        self.assertEqual(row["unit_price"], "0元/cm")
+        self.assertEqual(row.get("raw_unit_price"), "3.5元/米")
         self.assertAlmostEqual(float(row["amount"]), 1.05, places=2)
         hints = row.get("accuracy_hints") or []
         rough = any("粗略验算" in str(h) for h in hints)
         self.assertFalse(rough)
-        self.assertIn("0.035元/cm", result["markdown"])
+        self.assertIn("0元/cm", result["markdown"])
 
     def test_square_meter_usage_with_yard_price_is_converted_and_marked(self) -> None:
         result = calculate_quote(
@@ -466,10 +469,10 @@ class QuoteEngineTest(unittest.TestCase):
             },
         )
         row = result["detail_rows"][0]
-        self.assertEqual(row["unit_price"], "17.9399元/㎡")
+        self.assertEqual(row["unit_price"], "17.9元/㎡")
         self.assertAlmostEqual(float(row["amount"]), 2.51, places=2)
         self.assertIn("单位换算", row["calc_note"])
-        self.assertIn("17.9399元/㎡", result["markdown"])
+        self.assertIn("17.9元/㎡", result["markdown"])
 
     def test_recalculates_stale_amount_when_usage_and_price_are_checkable(self) -> None:
         result = calculate_quote(
@@ -488,7 +491,7 @@ class QuoteEngineTest(unittest.TestCase):
 
         row = result["detail_rows"][0]
         self.assertAlmostEqual(float(row["amount"]), 20.5, places=2)
-        self.assertEqual(row["amount_text"], "20.50元")
+        self.assertEqual(row["amount_text"], "20.5元")
         self.assertAlmostEqual(float(result["material_total"]), 20.5, places=2)
 
 

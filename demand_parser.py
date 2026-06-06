@@ -163,6 +163,10 @@ class DemandParseResult:
     sections: dict[str, dict[str, str]] = field(default_factory=dict)
     materials: list[Material] = field(default_factory=list)
     structure_text: str = ""
+    # 仅显式结构字段可驱动推断；标准需求表模板下为空（结构说明/备注不生成 BOM）
+    structure_inference_text: str = ""
+    field_sources: dict[str, dict[str, str]] = field(default_factory=dict)
+    is_demand_template: bool = True
     inline_prices: list[dict[str, str]] = field(default_factory=list)
     quantities: tuple[int, ...] = ()
     quote_settings: dict[str, Any] = field(default_factory=dict)
@@ -184,6 +188,9 @@ class DemandParseResult:
             "sections": self.sections,
             "materials": [vars(m) for m in self.materials],
             "structure_text": self.structure_text,
+            "structure_inference_text": self.structure_inference_text,
+            "field_sources": self.field_sources,
+            "is_demand_template": self.is_demand_template,
             "inline_prices": self.inline_prices,
             "quantities": list(self.quantities),
             "quote_settings": self.quote_settings,
@@ -221,17 +228,28 @@ def parse_demand_from_rows(
     *,
     file_name: str = "",
     sheet_name: str = "",
+    is_demand_template: bool = True,
 ) -> DemandParseResult:
     sections = _extract_sections(rows)
+    from demand_field_sources import build_field_source_map, build_structure_inference_text
+
+    field_sources = build_field_source_map(sections)
     structure_text = sections.get("B", {}).get("结构说明", "")
-    section_materials = _extract_materials_from_section_c(sections.get("C", {}))
-    inline_prices, _structure_inline_materials = _extract_inline_prices(structure_text)
-    materials = list(section_materials)
-    materials = _add_missing_outer_material_from_structure_inline(
-        materials,
-        _structure_inline_materials,
-        sections.get("C", {}),
+    structure_inference_text = build_structure_inference_text(
+        sections,
+        is_demand_template=is_demand_template,
     )
+    section_materials = _extract_materials_from_section_c(sections.get("C", {}))
+    materials = list(section_materials)
+    inline_prices: list[dict[str, str]] = []
+    # 标准需求表：结构说明/备注不得解析为正式 BOM 物料（仅 C/D 等显式字段）
+    if not is_demand_template:
+        inline_prices, structure_inline_materials = _extract_inline_prices(structure_text)
+        materials = _add_missing_outer_material_from_structure_inline(
+            materials,
+            structure_inline_materials,
+            sections.get("C", {}),
+        )
     quantities = _extract_quantities(sections.get("F", {}))
     reference_prices = _extract_reference_prices(rows) + _extract_sheet_material_subtotal_anchors(
         rows
@@ -285,6 +303,9 @@ def parse_demand_from_rows(
         sections=sections,
         materials=materials,
         structure_text=structure_text,
+        structure_inference_text=structure_inference_text,
+        field_sources=field_sources,
+        is_demand_template=is_demand_template,
         inline_prices=inline_prices,
         quantities=quantities,
         quote_settings=quote_settings,

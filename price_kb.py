@@ -455,10 +455,9 @@ def _score_entry(query_tokens: set[str], entry: KBEntry, overlap: int, spec: str
 
 
 def _fmt_price_number(value: float) -> str:
-    if abs(value - round(value)) < 1e-6:
-        return str(int(round(value)))
-    text = f"{value:.4f}".rstrip("0").rstrip(".")
-    return text or "0"
+    from display_number_format import format_display_number
+
+    return format_display_number(value) or "0"
 
 
 def _infer_material_price_unit(
@@ -521,7 +520,9 @@ def format_material_unit_price_text(
     if not text or text in {"-", "—", "/"}:
         return text
     if "元" in text and _PRICE_UNIT_PATTERN.search(text):
-        return text
+        from display_number_format import format_numbers_in_display_text
+
+        return format_numbers_in_display_text(text)
 
     slash_m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*/\s*([A-Za-z?]+)\s*", text)
     if slash_m:

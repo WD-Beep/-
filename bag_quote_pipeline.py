@@ -78,11 +78,17 @@ def _rows_match_structure(rows: list[dict[str, Any]], synonyms: tuple[str, ...])
 def build_structure_cost_candidates(
     checklist: dict[str, Any],
     items: list[dict[str, Any]],
+    *,
+    demand_template: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """为结构清单中尚无成本行的结构件生成待核候选行（供确认/LLM 补全）。"""
+    from demand_field_sources import should_add_guarded_structure_component
+
     rows = [r for r in items if isinstance(r, dict)]
     new_rows: list[dict[str, Any]] = []
     meta: list[dict[str, Any]] = []
+    if demand_template:
+        return new_rows, meta
     for item in checklist.get("items") or []:
         if not isinstance(item, dict):
             continue
@@ -96,6 +102,15 @@ def build_structure_cost_candidates(
             continue
         sid = str(item.get("structure_id") or "")
         source = str(item.get("source_text") or "")[:120]
+        name = str(item.get("name") or "")
+        confidence = float(item.get("extracted_confidence") or 0.0)
+        if not should_add_guarded_structure_component(
+            name,
+            confidence=confidence,
+            source_snippet=source,
+            demand_template=demand_template,
+        ):
+            continue
         row = build_inferred_candidate_row(
             component_name=str(item.get("name") or ""),
             source_type=SOURCE_STRUCTURE,
@@ -150,11 +165,21 @@ def apply_bag_quote_preparse(
     payload: dict[str, Any],
     *,
     structure_text: str,
+    structure_inference_text: str | None = None,
+    demand_template: bool = False,
     product_type: str = "",
     product_name: str = "",
     user_prompt: str = "",
 ) -> dict[str, Any]:
     """需求解析/结构确认前：识别包类 → 提取结构清单 → 补成本候选行。"""
+    from demand_field_sources import resolve_inference_structure_text
+    from structure_gap_hints import build_structure_gap_hints
+
+    inference_text = resolve_inference_structure_text(
+        structure_text=structure_text,
+        structure_inference_text=structure_inference_text,
+        demand_template=demand_template,
+    )
     ctx = detect_bag_product(
         product_type=product_type,
         product_name=product_name,
@@ -170,15 +195,39 @@ def apply_bag_quote_preparse(
 
     checklist = build_bag_structure_checklist(
         ctx=ctx,
-        structure_text=structure_text,
+        structure_text=inference_text,
         detail_rows=items,
         existing_items=existing_items if isinstance(existing_items, list) else None,
     )
-    leaks = find_structure_extraction_leaks(structure_text, checklist)
+    leaks = find_structure_extraction_leaks(inference_text, checklist) if inference_text else []
     checklist["extraction_leaks"] = leaks
     checklist["extraction_complete"] = not leaks and bool(checklist.get("items"))
 
-    candidates, candidate_meta = build_structure_cost_candidates(checklist, items)
+    gap_hints = build_structure_gap_hints(
+        structure_text,
+        items,
+        demand_template=demand_template,
+    )
+    if gap_hints:
+        payload["structure_gap_hints"] = gap_hints
+        payload["structure_inference_hints"] = [
+            {
+                "name": str(h.get("name") or h.get("detected_text") or ""),
+                "snippet": str(h.get("snippet") or "")[:120],
+                "reason": str(h.get("user_notice") or h.get("reason") or ""),
+                "source": str(h.get("source") or "structure_note_field"),
+            }
+            for h in gap_hints
+            if isinstance(h, dict)
+        ]
+        checklist["note_inference_hints"] = payload["structure_inference_hints"]
+        checklist["structure_gap_hints"] = gap_hints
+
+    candidates, candidate_meta = build_structure_cost_candidates(
+        checklist,
+        items,
+        demand_template=demand_template,
+    )
     if not payload.get("bag_structure_candidates_merged") and candidates:
         payload["items"] = list(items) + candidates
         payload["bag_structure_candidates_merged"] = True
@@ -197,9 +246,10 @@ def apply_bag_quote_preparse(
     )
     inference_report = merge_material_inference_candidates(
         payload,
-        structure_text=structure_text,
+        structure_text=inference_text,
         vision_text=vision_text,
         image_present=bool(image_present),
+        demand_template=demand_template,
     )
 
     payload["structure_checklist"] = checklist

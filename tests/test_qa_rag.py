@@ -139,7 +139,7 @@ class QaRagTest(unittest.TestCase):
         self.assertFalse((resp.get("qa_audit") or {}).get("used"))
 
     @patch("kimi_client._send_chat_request_moonshot_with_400_relax")
-    def test_backpack_consulting_uses_anthropic_when_enabled(self, mock_send: MagicMock) -> None:
+    def test_backpack_consulting_uses_openai_when_enabled(self, mock_send: MagicMock) -> None:
         mock_send.return_value = json.dumps(
             {"choices": [{"message": {"content": "结论：建议优先升级包底和主面料。\n1. 600D/900D 牛津布适合常规旅行。\n2. 高频户外可提高到高强尼龙。\n3. 肩带连接位要做补强。"}}]},
             ensure_ascii=False,
@@ -148,29 +148,29 @@ class QaRagTest(unittest.TestCase):
             "os.environ",
             {
                 "QUOTE_QA_LLM_ENABLED": "1",
-                "ANTHROPIC_API_KEY": "sk-ant-test",
-                "ANTHROPIC_BASE_URL": "https://api.anthropic.com/v1",
-                "ANTHROPIC_MODEL": "claude-opus-4-7",
+                "OPENAI_API_KEY": "sk-openai-test",
+                "OPENAI_BASE_URL": "https://code.codingplay.top/redeem",
+                "OPENAI_MODEL": "gpt-5.5",
                 "KIMI_MODEL": "kimi-k2.6",
             },
         ):
             resp = answer_qa("旅行背包面料怎么选更耐磨")
         self.assertEqual(resp.get("source_type"), "llm")
         self.assertTrue((resp.get("llm_status") or {}).get("used"))
-        self.assertEqual((resp.get("llm_status") or {}).get("provider"), "anthropic")
-        self.assertEqual((resp.get("llm_status") or {}).get("model"), "claude-opus-4-7")
+        self.assertEqual((resp.get("llm_status") or {}).get("provider"), "openai-compatible")
+        self.assertEqual((resp.get("llm_status") or {}).get("model"), "gpt-5.5")
         self.assertEqual((resp.get("qa_audit") or {}).get("route"), "llm")
         self.assertTrue((resp.get("qa_audit") or {}).get("used"))
 
     @patch("kimi_client._send_chat_request_moonshot_with_400_relax", side_effect=RuntimeError("boom"))
-    def test_backpack_consulting_anthropic_failure_returns_natural_fallback(self, _mock_send: MagicMock) -> None:
+    def test_backpack_consulting_openai_failure_returns_natural_fallback(self, _mock_send: MagicMock) -> None:
         with patch.dict(
             "os.environ",
             {
                 "QUOTE_QA_LLM_ENABLED": "1",
-                "ANTHROPIC_API_KEY": "sk-ant-test",
-                "ANTHROPIC_BASE_URL": "https://api.anthropic.com/v1",
-                "ANTHROPIC_MODEL": "claude-opus-4-7",
+                "OPENAI_API_KEY": "sk-openai-test",
+                "OPENAI_BASE_URL": "https://code.codingplay.top/redeem",
+                "OPENAI_MODEL": "gpt-5.5",
             },
         ):
             resp = answer_qa("客户觉得报价贵怎么解释")
@@ -225,9 +225,9 @@ class QaRagTest(unittest.TestCase):
             "os.environ",
             {
                 "QUOTE_QA_LLM_ENABLED": "1",
-                "ANTHROPIC_API_KEY": "sk-ant-test",
-                "ANTHROPIC_BASE_URL": "https://api.anthropic.com/v1",
-                "ANTHROPIC_MODEL": "claude-opus-4-7",
+                "OPENAI_API_KEY": "sk-openai-test",
+                "OPENAI_BASE_URL": "https://code.codingplay.top/redeem",
+                "OPENAI_MODEL": "gpt-5.5",
             },
         ):
             resp = answer_qa("600D塔丝隆多少钱")
@@ -345,7 +345,7 @@ class QaRagTest(unittest.TestCase):
 
     @patch("kimi_client._send_chat_request_moonshot_with_400_relax")
     @patch("qa_rag.load_readonly_quote_context")
-    def test_active_quote_context_passed_to_claude(
+    def test_active_quote_context_passed_to_openai(
         self,
         mock_ctx: MagicMock,
         mock_send: MagicMock,
@@ -359,9 +359,9 @@ class QaRagTest(unittest.TestCase):
             "os.environ",
             {
                 "QUOTE_QA_LLM_ENABLED": "1",
-                "ANTHROPIC_API_KEY": "sk-ant-test",
-                "ANTHROPIC_BASE_URL": "https://api.anthropic.com/v1",
-                "ANTHROPIC_MODEL": "claude-opus-4-7",
+                "OPENAI_API_KEY": "sk-openai-test",
+                "OPENAI_BASE_URL": "https://code.codingplay.top/redeem",
+                "OPENAI_MODEL": "gpt-5.5",
             },
         ):
             resp = answer_qa("业务员下一步该补什么信息", sid="sess-abc")
@@ -392,9 +392,9 @@ class QaRagTest(unittest.TestCase):
             "os.environ",
             {
                 "QUOTE_QA_LLM_ENABLED": "1",
-                "ANTHROPIC_API_KEY": "sk-ant-test",
-                "ANTHROPIC_BASE_URL": "https://api.anthropic.com/v1",
-                "ANTHROPIC_MODEL": "claude-opus-4-7",
+                "OPENAI_API_KEY": "sk-openai-test",
+                "OPENAI_BASE_URL": "https://code.codingplay.top/redeem",
+                "OPENAI_MODEL": "gpt-5.5",
             },
         ):
             resp = answer_qa("旅行背包面料怎么选更耐磨", sid="sess-empty")
@@ -407,7 +407,7 @@ class QaRagTest(unittest.TestCase):
     @patch("kimi_client._send_chat_request_moonshot_with_400_relax")
     @patch("price_kb.get_price_kb")
     @patch("qa_rag._search_quote_history", return_value=[])
-    def test_price_lookup_with_sid_still_skips_claude(
+    def test_price_lookup_with_sid_still_skips_llm(
         self,
         _mock_hist: object,
         mock_get_kb: MagicMock,
@@ -429,7 +429,7 @@ class QaRagTest(unittest.TestCase):
             "os.environ",
             {
                 "QUOTE_QA_LLM_ENABLED": "1",
-                "ANTHROPIC_API_KEY": "sk-ant-test",
+                "OPENAI_API_KEY": "sk-openai-test",
             },
         ):
             resp = answer_qa("600D塔丝隆多少钱", sid="sess-abc")
@@ -494,9 +494,9 @@ class QaRagTest(unittest.TestCase):
                 "os.environ",
                 {
                     "QUOTE_QA_LLM_ENABLED": "1",
-                    "ANTHROPIC_API_KEY": "sk-ant-test",
-                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com/v1",
-                    "ANTHROPIC_MODEL": "claude-opus-4-7",
+                    "OPENAI_API_KEY": "sk-openai-test",
+                    "OPENAI_BASE_URL": "https://code.codingplay.top/redeem",
+                    "OPENAI_MODEL": "gpt-5.5",
                 },
             ):
                 answer_qa("审批驳回后怎么跟客户说清楚", sid="sess-abc")

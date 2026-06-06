@@ -3897,3 +3897,37 @@ tr.row-new-incoming td {
   margin: 0;
   font-size: 0.85rem;
 }
+
+.bom-ai-estimate-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #9a3412;
+  background: #ffedd5;
+  border: 1px solid #fdba74;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.bom-section-ai-estimate {
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fffaf5;
+}
+
+.bom-ai-estimate-lead {
+  margin: 0 0 10px;
+  font-size: 0.88rem;
+}
+
+.bom-edit-ai-flag {
+  margin-top: 4px;
+}
+
+.bom-edit-row-ai td {
+  background: #fffaf5;
+}

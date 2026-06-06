@@ -9,17 +9,16 @@ from kimi_client import (
     _openai_messages_have_vision,
     _parse_compound_piece_set_price,
     _sanitize_row_amount_for_price_usage_mismatch,
-    anthropic_raw_to_openai_compat,
-    build_anthropic_request_body,
     build_endpoint_candidates,
     get_kimi_config,
     get_kimi_status,
-    split_openai_messages_for_anthropic,
 )
+from material_inference import PENDING_INFERENCE_USAGE_FALLBACK
 from llm_audit import LlmAuditCollector, _collect_llm_amount_rejections, diff_merge_fields
 
 _API_KEY_ENVS = (
     "ANTHROPIC_API_KEY",
+    "CLAUDE_API_KEY",
     "KIMI_API_KEY",
     "MOONSHOT_API_KEY",
     "OPENAI_API_KEY",
@@ -30,12 +29,13 @@ _API_KEY_ENVS = (
 
 
 class KimiClientTest(unittest.TestCase):
-    def test_build_endpoint_candidates_anthropic_uses_messages(self):
+    def test_build_endpoint_candidates_never_uses_messages_path(self):
         eps = build_endpoint_candidates(
-            "https://api.anthropic.com/v1",
-            api_key_source="ANTHROPIC_API_KEY",
+            "https://example.com/v1",
+            api_key_source="OPENAI_API_KEY",
         )
-        self.assertEqual(eps, ["https://api.anthropic.com/v1/messages"])
+        self.assertEqual(eps, ["https://example.com/v1/chat/completions"])
+        self.assertTrue(all("/messages" not in ep for ep in eps))
 
     def test_build_endpoint_candidates_moonshot_dual_region(self):
         eps = build_endpoint_candidates("https://api.moonshot.ai/v1")
@@ -56,35 +56,6 @@ class KimiClientTest(unittest.TestCase):
                 if val is not None:
                     os.environ[name] = val
 
-    def test_split_openai_messages_for_anthropic(self):
-        system, messages = split_openai_messages_for_anthropic(
-            [
-                {"role": "system", "content": "You are helpful."},
-                {"role": "user", "content": "Hello"},
-            ]
-        )
-        self.assertEqual(system, "You are helpful.")
-        self.assertEqual(messages[0]["role"], "user")
-        self.assertEqual(messages[0]["content"][0]["text"], "Hello")
-
-    def test_build_anthropic_request_body_maps_max_tokens(self):
-        body = build_anthropic_request_body(
-            {
-                "model": "claude-opus-4-7",
-                "max_completion_tokens": 128,
-                "messages": [{"role": "user", "content": "hi"}],
-                "response_format": {"type": "json_object"},
-            }
-        )
-        self.assertEqual(body["model"], "claude-opus-4-7")
-        self.assertEqual(body["max_tokens"], 128)
-        self.assertIn("JSON", body.get("system", ""))
-
-    def test_anthropic_raw_to_openai_compat(self):
-        raw = json.dumps({"content": [{"type": "text", "text": "{\"items\":[]}"}]})
-        openai = json.loads(anthropic_raw_to_openai_compat(raw))
-        self.assertEqual(openai["choices"][0]["message"]["content"], "{\"items\":[]}")
-
     def test_openai_messages_have_vision_detects_image(self):
         self.assertTrue(
             _openai_messages_have_vision(
@@ -101,7 +72,7 @@ class KimiClientTest(unittest.TestCase):
 
     def test_llm_audit_collector_builds_payload(self):
         col = LlmAuditCollector()
-        col.seed_from_status({"provider": "anthropic", "model": "claude-opus-4-7", "enabled": True})
+        col.seed_from_status({"provider": "openai-compatible", "model": "gpt-5.5", "enabled": True})
         col.record_stage("demand_completion", {"used": True, "error": "", "duration_ms": 50}, input_rows=2, output_rows=2)
         audit = col.to_dict()
         self.assertEqual(audit["final_truth_source"], "local_formula_calculate_quote")
@@ -155,28 +126,30 @@ class KimiClientTest(unittest.TestCase):
         )
         self.assertAlmostEqual(float(result["material_total"]), 10.0, places=2)
 
-    def test_base_llm_status_anthropic_provider(self):
+    def test_base_llm_status_openai_compatible_provider(self):
         from kimi_client import KimiConfig, _base_llm_status
 
         cfg = KimiConfig(
-            api_key="sk-ant-test",
-            api_key_source="ANTHROPIC_API_KEY",
-            base_url="https://api.anthropic.com/v1",
-            model="claude-opus-4-7",
+            api_key="sk-openai-test",
+            api_key_source="OPENAI_API_KEY",
+            base_url="https://code.codingplay.top/redeem/v1",
+            model="gpt-5.5",
             timeout_s=25,
             temperature=1.0,
         )
         st = _base_llm_status(cfg)
-        self.assertEqual(st["provider"], "anthropic")
-        self.assertEqual(st["model"], "claude-opus-4-7")
+        self.assertEqual(st["provider"], "openai-compatible")
+        self.assertEqual(st["model"], "gpt-5.5")
+        self.assertEqual(st["endpoint"], "https://code.codingplay.top/redeem/v1/chat/completions")
 
-    def test_anthropic_model_not_overridden_by_kimi_model(self):
+    def test_anthropic_not_auto_selected_without_llm_provider(self):
         saved = {name: os.environ.pop(name, None) for name in _API_KEY_ENVS}
         extra = {
             "ANTHROPIC_BASE_URL": os.environ.pop("ANTHROPIC_BASE_URL", None),
             "ANTHROPIC_MODEL": os.environ.pop("ANTHROPIC_MODEL", None),
             "KIMI_MODEL": os.environ.pop("KIMI_MODEL", None),
             "MOONSHOT_MODEL": os.environ.pop("MOONSHOT_MODEL", None),
+            "LLM_PROVIDER": os.environ.pop("LLM_PROVIDER", None),
         }
         try:
             os.environ.update(
@@ -188,11 +161,7 @@ class KimiClientTest(unittest.TestCase):
                 }
             )
             cfg = get_kimi_config()
-            status = get_kimi_status()
-            self.assertEqual(cfg.api_key_source, "ANTHROPIC_API_KEY")
-            self.assertEqual(cfg.model, "claude-opus-4-7")
-            self.assertEqual(status["provider"], "anthropic")
-            self.assertEqual(status["model"], "claude-opus-4-7")
+            self.assertNotEqual(cfg.api_key_source, "ANTHROPIC_API_KEY")
         finally:
             for name in list(_API_KEY_ENVS) + list(extra):
                 os.environ.pop(name, None)
@@ -215,54 +184,6 @@ class KimiClientTest(unittest.TestCase):
         if key:
             self.assertNotIn("sk-ant-api", key)
             self.assertIn("…", key)
-
-    def test_send_anthropic_messages_request_mock(self):
-        from kimi_client import send_anthropic_messages_request
-
-        captured: dict = {}
-
-        def fake_open(req, timeout=30):
-            captured["headers"] = dict(req.header_items())
-            captured["url"] = req.full_url
-            body = req.data.decode("utf-8")
-            captured["body"] = json.loads(body)
-
-            class Resp:
-                def read(self):
-                    return json.dumps(
-                        {"content": [{"type": "text", "text": "OK"}]}
-                    ).encode("utf-8")
-
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, *args):
-                    return False
-
-            return Resp()
-
-        with patch("kimi_client.request.urlopen", side_effect=fake_open):
-            raw = send_anthropic_messages_request(
-                endpoint="https://api.anthropic.com/v1/messages",
-                api_key="sk-ant-test",
-                body={
-                    "model": "claude-opus-4-7",
-                    "messages": [{"role": "user", "content": "ping"}],
-                    "max_completion_tokens": 8,
-                },
-                timeout_s=5,
-                disable_proxy=False,
-            )
-        payload = json.loads(raw)
-        self.assertEqual(payload["choices"][0]["message"]["content"], "OK")
-        raw_headers = captured.get("headers") or {}
-        if isinstance(raw_headers, dict):
-            headers = {str(k).lower(): v for k, v in raw_headers.items()}
-        else:
-            headers = {str(k).lower(): v for k, v in raw_headers}
-        self.assertIn("x-api-key", headers)
-        self.assertEqual(headers.get("anthropic-version"), "2023-06-01")
-        self.assertEqual(captured["body"]["model"], "claude-opus-4-7")
 
     def test_compound_piece_set_price_not_quantity_ladder(self):
         txt = "1.3/0.5/SET"
@@ -544,12 +465,14 @@ class KimiClientTest(unittest.TestCase):
                 }
             ]
         )
-        self.assertEqual(rows[0].get("usage"), "\u0031\u5957")
-        self.assertTrue(rows[0].get("usage_ai"))
-        self.assertTrue(rows[0].get("unit_price_ai"))
-        self.assertTrue(rows[0].get("amount_ai"))
-        self.assertGreater(float(rows[0].get("amount") or 0), 0)
-        self.assertIn(MARKET_ESTIMATE_NOTE, str(rows[0].get("calc_note") or ""))
+        row = rows[0]
+        self.assertEqual(row.get("usage"), PENDING_INFERENCE_USAGE_FALLBACK)
+        self.assertTrue(row.get("usage_ai"))
+        self.assertTrue(row.get("unit_price_ai"))
+        self.assertIn("元/", str(row.get("unit_price") or ""))
+        self.assertEqual(float(row.get("amount") or 0), 0.0)
+        self.assertTrue(row.get("exclude_from_cost"))
+        self.assertIn(MARKET_ESTIMATE_NOTE, str(row.get("calc_note") or ""))
 
     def test_openai_api_key_priority_over_anthropic(self) -> None:
         saved = {name: os.environ.pop(name, None) for name in _API_KEY_ENVS}
@@ -563,7 +486,7 @@ class KimiClientTest(unittest.TestCase):
             os.environ.update(
                 {
                     "OPENAI_API_KEY": "sk-openai-test",
-                    "OPENAI_MODEL": "codex5.5",
+                    "OPENAI_MODEL": "gpt-5.5",
                     "ANTHROPIC_API_KEY": "sk-ant-test",
                     "ANTHROPIC_MODEL": "claude-opus-4-7",
                 }
@@ -571,8 +494,8 @@ class KimiClientTest(unittest.TestCase):
             cfg = get_kimi_config()
             status = get_kimi_status()
             self.assertEqual(cfg.api_key_source, "OPENAI_API_KEY")
-            self.assertEqual(cfg.model, "codex5.5")
-            self.assertEqual(status["provider"], "openai-codex")
+            self.assertEqual(cfg.model, "gpt-5.5")
+            self.assertEqual(status["provider"], "openai")
             self.assertEqual(status["api_key_source"], "OPENAI_API_KEY")
         finally:
             for name in list(_API_KEY_ENVS) + list(extra):
@@ -584,7 +507,7 @@ class KimiClientTest(unittest.TestCase):
                 if val is not None:
                     os.environ[name] = val
 
-    def test_llm_provider_forces_anthropic_over_openai(self) -> None:
+    def test_llm_provider_anthropic_does_not_switch_provider(self) -> None:
         saved = {name: os.environ.pop(name, None) for name in _API_KEY_ENVS}
         extra = {
             "LLM_PROVIDER": os.environ.pop("LLM_PROVIDER", None),
@@ -599,17 +522,77 @@ class KimiClientTest(unittest.TestCase):
                 {
                     "LLM_PROVIDER": "anthropic",
                     "OPENAI_API_KEY": "sk-openai-test",
-                    "OPENAI_MODEL": "codex5.5",
+                    "OPENAI_MODEL": "gpt-5.5",
                     "ANTHROPIC_API_KEY": "sk-ant-test",
-                    "ANTHROPIC_BASE_URL": "https://code.codingplay.top",
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com/v1",
                     "ANTHROPIC_MODEL": "claude-opus-4-7",
                 }
             )
             cfg = get_kimi_config()
             status = get_kimi_status()
-            self.assertEqual(cfg.api_key_source, "ANTHROPIC_API_KEY")
-            self.assertEqual(cfg.model, "claude-opus-4-7")
-            self.assertEqual(status["provider"], "anthropic")
+            self.assertEqual(cfg.api_key_source, "OPENAI_API_KEY")
+            self.assertEqual(cfg.model, "gpt-5.5")
+            self.assertEqual(status["provider"], "openai")
+        finally:
+            for name in list(_API_KEY_ENVS) + list(extra):
+                os.environ.pop(name, None)
+            for name, val in saved.items():
+                if val is not None:
+                    os.environ[name] = val
+            for name, val in extra.items():
+                if val is not None:
+                    os.environ[name] = val
+
+    def test_llm_provider_claude_does_not_read_claude_api_key(self) -> None:
+        saved = {name: os.environ.pop(name, None) for name in _API_KEY_ENVS}
+        extra = {
+            "LLM_PROVIDER": os.environ.pop("LLM_PROVIDER", None),
+            "OPENAI_MODEL": os.environ.pop("OPENAI_MODEL", None),
+        }
+        try:
+            os.environ.update(
+                {
+                    "LLM_PROVIDER": "claude",
+                    "CLAUDE_API_KEY": "sk-claude-test",
+                    "ANTHROPIC_API_KEY": "sk-ant-test",
+                }
+            )
+            cfg = get_kimi_config()
+            self.assertEqual(cfg.api_key, "")
+            self.assertEqual(cfg.api_key_source, "")
+            self.assertEqual(cfg.model, "gpt-5.3-codex")
+        finally:
+            for name in list(_API_KEY_ENVS) + list(extra):
+                os.environ.pop(name, None)
+            for name, val in saved.items():
+                if val is not None:
+                    os.environ[name] = val
+            for name, val in extra.items():
+                if val is not None:
+                    os.environ[name] = val
+
+    def test_only_openai_api_key_is_read(self) -> None:
+        saved = {name: os.environ.pop(name, None) for name in _API_KEY_ENVS}
+        extra = {
+            "OPENAI_MODEL": os.environ.pop("OPENAI_MODEL", None),
+            "OPENAI_BASE_URL": os.environ.pop("OPENAI_BASE_URL", None),
+        }
+        try:
+            os.environ.update(
+                {
+                    "KIMI_API_KEY": "sk-kimi-test",
+                    "MOONSHOT_API_KEY": "sk-moonshot-test",
+                    "DEEPSEEK_API_KEY": "sk-deepseek-test",
+                    "OPENCLAW_API_KEY": "sk-openclaw-test",
+                    "API_KEY": "sk-generic-test",
+                    "ANTHROPIC_API_KEY": "sk-ant-test",
+                    "CLAUDE_API_KEY": "sk-claude-test",
+                }
+            )
+            cfg = get_kimi_config()
+            self.assertEqual(cfg.api_key, "")
+            self.assertEqual(cfg.api_key_source, "")
+            self.assertEqual(cfg.model, "gpt-5.3-codex")
         finally:
             for name in list(_API_KEY_ENVS) + list(extra):
                 os.environ.pop(name, None)
@@ -630,7 +613,7 @@ class KimiClientTest(unittest.TestCase):
     def test_classify_http_error_invalid_model(self) -> None:
         from kimi_client import _classify_http_error, _openai_model_error_hint
 
-        code = _classify_http_error(400, '{"error":{"message":"The model `codex5.5` does not exist"}}')
+        code = _classify_http_error(400, '{"error":{"message":"The model `gpt-5.5` does not exist"}}')
         self.assertEqual(code, "invalid_model")
         self.assertIn("OPENAI_MODEL", _openai_model_error_hint(code))
 
@@ -663,20 +646,19 @@ class KimiClientTest(unittest.TestCase):
                 endpoint="https://api.openai.com/v1/chat/completions",
                 api_key="sk-openai-test",
                 body={
-                    "model": "codex5.5",
+                    "model": "gpt-5.5",
                     "messages": [{"role": "user", "content": "ping"}],
                     "max_completion_tokens": 8,
                 },
                 timeout_s=5,
                 disable_proxy=False,
-                use_anthropic_native=False,
             )
         payload = json.loads(raw)
         self.assertEqual(payload["choices"][0]["message"]["content"], "OK")
         self.assertIn("authorization", captured["headers"])
         self.assertNotIn("x-api-key", captured["headers"])
         self.assertNotIn("anthropic-version", captured["headers"])
-        self.assertEqual(captured["body"]["model"], "codex5.5")
+        self.assertEqual(captured["body"]["model"], "gpt-5.5")
 
     def test_build_llm_health_report_invalid_model(self) -> None:
         from kimi_client import build_llm_health_report
@@ -688,7 +670,7 @@ class KimiClientTest(unittest.TestCase):
         }
         try:
             os.environ["OPENAI_API_KEY"] = "sk-openai-test"
-            os.environ["OPENAI_MODEL"] = "codex5.5"
+            os.environ["OPENAI_MODEL"] = "gpt-5.5"
 
             def fake_open(req, timeout=30):
                 import urllib.error
@@ -703,7 +685,7 @@ class KimiClientTest(unittest.TestCase):
                         (),
                         {
                             "read": lambda self: json.dumps(
-                                {"error": {"message": "invalid model codex5.5"}}
+                                {"error": {"message": "invalid model gpt-5.5"}}
                             ).encode("utf-8")
                         },
                     )(),
@@ -711,8 +693,8 @@ class KimiClientTest(unittest.TestCase):
 
             with patch("kimi_client.request.urlopen", side_effect=fake_open):
                 report = build_llm_health_report(live_probe=True)
-            self.assertEqual(report["provider"], "openai-codex")
-            self.assertEqual(report["model"], "codex5.5")
+            self.assertEqual(report["provider"], "openai")
+            self.assertEqual(report["model"], "gpt-5.5")
             self.assertEqual(report["api_key_source"], "OPENAI_API_KEY")
             self.assertEqual(report["status"], "error")
             self.assertEqual(report["error"], "invalid_model")
@@ -727,13 +709,64 @@ class KimiClientTest(unittest.TestCase):
                 if val is not None:
                     os.environ[name] = val
 
-    def test_redeploy_script_allows_openai_api_key(self) -> None:
+    def test_redeploy_script_requires_openai_api_key(self) -> None:
         from pathlib import Path
 
         text = Path(__file__).resolve().parents[1].joinpath("scripts/redeploy_server.sh").read_text(
             encoding="utf-8"
         )
-        self.assertIn('OPENAI_API_KEY:-}" && -z "${ANTHROPIC_API_KEY', text.replace("\r\n", "\n"))
+        norm = text.replace("\r\n", "\n")
+        self.assertIn('OPENAI_API_KEY:-}" && -z "${MOONSHOT_API_KEY', norm)
+        self.assertNotIn("ANTHROPIC_API_KEY", norm)
+
+    def test_openai_relay_base_url_builds_chat_completions(self) -> None:
+        saved = {name: os.environ.pop(name, None) for name in _API_KEY_ENVS}
+        extra = {
+            "OPENAI_BASE_URL": os.environ.pop("OPENAI_BASE_URL", None),
+            "OPENAI_MODEL": os.environ.pop("OPENAI_MODEL", None),
+        }
+        try:
+            os.environ.update(
+                {
+                    "OPENAI_API_KEY": "sk-openai-test",
+                    "OPENAI_BASE_URL": "https://code.codingplay.top/redeem",
+                    "OPENAI_MODEL": "gpt-5.5",
+                }
+            )
+            cfg = get_kimi_config()
+            eps = build_endpoint_candidates(cfg.base_url, api_key_source=cfg.api_key_source)
+            self.assertEqual(cfg.model, "gpt-5.5")
+            self.assertEqual(eps[0], "https://code.codingplay.top/redeem/v1/chat/completions")
+            self.assertEqual(get_kimi_status()["provider"], "openai-compatible")
+        finally:
+            for name in list(_API_KEY_ENVS) + list(extra):
+                os.environ.pop(name, None)
+            for name, val in saved.items():
+                if val is not None:
+                    os.environ[name] = val
+            for name, val in extra.items():
+                if val is not None:
+                    os.environ[name] = val
+
+    def test_default_openai_model_is_gpt_53_codex_without_env(self) -> None:
+        saved = {name: os.environ.pop(name, None) for name in _API_KEY_ENVS}
+        extra = {
+            "OPENAI_MODEL": os.environ.pop("OPENAI_MODEL", None),
+            "OPENAI_BASE_URL": os.environ.pop("OPENAI_BASE_URL", None),
+        }
+        try:
+            os.environ["OPENAI_API_KEY"] = "sk-openai-test"
+            cfg = get_kimi_config()
+            self.assertEqual(cfg.model, "gpt-5.3-codex")
+        finally:
+            for name in list(_API_KEY_ENVS) + list(extra):
+                os.environ.pop(name, None)
+            for name, val in saved.items():
+                if val is not None:
+                    os.environ[name] = val
+            for name, val in extra.items():
+                if val is not None:
+                    os.environ[name] = val
 
 
 if __name__ == "__main__":
