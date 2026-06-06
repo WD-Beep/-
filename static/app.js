@@ -1314,15 +1314,15 @@ function buildSalesSheetCheckpointsHtml(quote) {
   function gapLabel(gapPc) {
     const g = Number(gapPc);
     if (!Number.isFinite(g) || Math.abs(g) <= 0.02) return "基本持平";
-    if (g > 0) return `Agent 较人工高 ${g.toFixed(2)}`;
-    return `Agent 较人工低 ${Math.abs(g).toFixed(2)}`;
+    if (g > 0) return `Agent 较人工高 ${formatDisplayNumber(g)}`;
+    return `Agent 较人工低 ${formatDisplayNumber(Math.abs(g))}`;
   }
 
   function gapQuoteLabel(qgNum) {
     const g = Number(qgNum);
     if (!Number.isFinite(g) || Math.abs(g) <= 0.02) return "基本持平";
-    if (g > 0) return `Agent 较人工高 ${g.toFixed(2)}`;
-    return `Agent 较人工低 ${Math.abs(g).toFixed(2)}`;
+    if (g > 0) return `Agent 较人工高 ${formatDisplayNumber(g)}`;
+    return `Agent 较人工低 ${formatDisplayNumber(Math.abs(g))}`;
   }
 
   const explainSet = new Set();

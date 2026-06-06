@@ -9,6 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 APP_JS = ROOT / "static" / "app.js"
 ADMIN_JS = ROOT / "static" / "admin" / "admin.js"
 QUOTE_SHEET_JS = ROOT / "static" / "quote_sheet.js"
+PROJECT_WORDING_PATHS = (
+    ROOT / "README.md",
+    ROOT / "static" / "index.html",
+    ROOT / "static" / "admin" / "index.html",
+    ROOT / "static" / "admin" / "login.html",
+    ROOT / "docs" / "wecom_server_test_deploy.md",
+    ROOT / "docs" / "ai_quote_assistant_requirements.md",
+)
 
 
 def _read(path: Path) -> str:
@@ -61,6 +69,36 @@ class AppJsDisplayFormatTest(unittest.TestCase):
         self.assertIn("formatNumbersInDisplayText(String(mt.unit_price", body)
         self.assertIn("formatNumbersInDisplayText(String(mt.formula_short", body)
         self.assertIn("formatNumbersInDisplayText(String(mt.subtotal", body)
+
+    def test_app_js_no_business_to_fixed_two(self) -> None:
+        self.assertNotRegex(self.js, r"toFixed\(2\)")
+
+    def test_sales_sheet_checkpoints_gap_labels_use_display_format(self) -> None:
+        body = _extract_function_body("buildSalesSheetCheckpointsHtml", self.js)
+        self.assertIn("formatDisplayNumber(g)", body)
+        self.assertIn("formatDisplayNumber(Math.abs(g))", body)
+        self.assertNotIn("toFixed(2)", body)
+
+    def test_gap_label_display_number_examples(self) -> None:
+        from display_number_format import format_display_number
+
+        self.assertEqual(format_display_number(1.234), "1.2")
+        self.assertEqual(format_display_number(1.0), "1")
+        self.assertEqual(format_display_number(abs(-1.0)), "1")
+
+
+class ProjectWordingTest(unittest.TestCase):
+    def test_no_car_quote_wording_in_docs_and_pages(self) -> None:
+        banned = ("汽车报价", "车辆报价", "车价系统")
+        for path in PROJECT_WORDING_PATHS:
+            text = path.read_text(encoding="utf-8")
+            for word in banned:
+                self.assertNotIn(word, text, msg=f"{path.name} contains {word}")
+
+    def test_readme_uses_auto_quote_system_title(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("# 自动报价系统", readme)
+        self.assertNotIn("汽车报价", readme)
 
 
 class AdminJsDisplayFormatTest(unittest.TestCase):
