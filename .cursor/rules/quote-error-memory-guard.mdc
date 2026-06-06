@@ -1,0 +1,40 @@
+---
+description: 报价系统任务必须先读 quote-error-memory-guard Skill，修复后必须沉淀新错误模式
+alwaysApply: true
+---
+
+# 报价错误防复发（强制）
+
+## 任务开始前（必须）
+
+凡涉及以下任一主题，**第一步**必须读取 Skill：`quote-error-memory-guard`（路径：`.cursor/skills/quote-error-memory-guard/SKILL.md` 或 `~/.cursor/skills/quote-error-memory-guard/SKILL.md`）：
+
+- 报价计算、BOM / 物料明细、规格 / 尺寸 / 用量
+- 裁片 / 部位 / 片数、报价客服工作台、后台报价详情
+- 管理员修正、报价记录、客户报价单 / PDF
+- 产品图 / 款式图、包装字段、前后端字段映射
+- Cursor 修复后的验收
+
+未读 Skill 不得开始改代码。
+
+## 修复与验收时（必须）
+
+1. 对照 Skill 中「历史错误模式」与 10 条工作原则，优先套用已有防复发规则。
+2. **展示与计价分离**：UI/PDF/后台展示不得改变单价、用量、小计、总价（除非明确改计算并加测试）。
+3. **客户报价单/PDF**：尺寸仅成品尺寸；包装无「系统估算/AI估算/推断」；无裁片名、无内部调试文案。
+4. **后台材料明细**：裁片禁「组」，用片数 + 尺寸；可与客户单展示策略不同。
+
+## 任务结束后（必须）
+
+若发现**新**错误模式或验收新问题：
+
+- 按 Skill 内模板追加到「历史错误模式」
+- 同步更新项目 Skill 与个人 Skill（两处 `SKILL.md` 保持一致）
+- 写清：发生场景、表现、根因、正确/禁止做法、必测项、相关文件
+
+## 快速验收（自报项目根目录）
+
+```powershell
+$env:PYTHONPATH='.'
+pytest tests/test_material_spec_usage_enricher.py tests/test_material_detail_display.py tests/test_quote_sheet_prefill.py tests/test_quote_validation_gate.py -q
+```

@@ -1,0 +1,16 @@
+# PostgreSQL 报价归档（可选；QUOTE_DB_BACKEND=postgres 时需安装）
+psycopg[binary]>=3.1.0
+# 语义检索 smart_lookup（BGE-M3）可选依赖；未安装时不影响既有 PriceKB.lookup / calculate_quote。
+numpy>=1.24.0
+sentence-transformers>=3.0.0
+torch>=2.1.0
+# 知识闭环写入 price_kb.xlsx
+openpyxl>=3.1.0
+# 读取 Excel 97-2003 .xls（上传）
+xlrd>=2.0.1
+
+# --- LangGraph 报价智能体编排（quotation_agent/）---
+langgraph>=0.2.0
+langchain-core>=0.3.0
+# 可选：仅在 QUOTATION_AGENT_USE_LLM_ROUTER / EXTRACTOR=1 时用于模型路由/抽参
+# langchain-openai>=0.2.0

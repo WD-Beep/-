@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>报价客服工作台</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="chat-layout">
+      <aside class="sidebar">
+        <header class="sidebar-brand">
+          <div class="brand-logo">报</div>
+          <div class="brand-copy">
+            <h1>报价客服工作台</h1>
+          </div>
+        </header>
+
+        <div class="session-search">
+          <input type="search" placeholder="搜索会话" />
+        </div>
+
+        <section class="session-list" aria-label="会话列表">
+          <button class="session-item active" type="button" data-route="chat">
+            <span class="session-name">智能报价客服</span>
+            <span class="session-preview">可上传表格并自动生成三档报价</span>
+          </button>
+          <button class="session-item session-item-nav" type="button" id="navMyQuotes" data-route="my-quotes">
+            <span class="session-name">📋 我的报价记录</span>
+            <span class="session-preview" id="myQuotesPreview">查看历史报价与审批状态</span>
+          </button>
+          <button class="session-item session-item-nav" type="button" id="navAdminUpdates" data-route="admin-updates">
+            <span class="session-name">🔔 管理员修正 <span id="adminUpdatesBadge" class="nav-unread-badge" hidden>0</span></span>
+            <span class="session-preview" id="adminUpdatesPreview">查看管理员 BOM 修正与附件</span>
+          </button>
+          <button class="session-item session-item-nav" type="button" data-route="quote-sheet" id="navQuoteSheet">
+            <span class="session-name">📄 生成报价单</span>
+            <span class="session-preview">填写信息并导出标准报价单 PDF</span>
+          </button>
+        </section>
+
+      </aside>
+
+      <div class="workspace-column">
+        <div id="workspaceChat" class="workspace-pane workspace-pane-visible">
+          <section class="chat-window">
+            <header class="chat-header">
+              <div class="agent-meta">
+                <div class="agent-avatar">栢博</div>
+                <div>
+                  <h2>报价客服</h2>
+                  <p>在线 · 自动报价引擎</p>
+                </div>
+              </div>
+              <div id="llmStatus" class="model-status">AI 模型状态：未连接</div>
+            </header>
+
+            <div id="adminUpdatesBanner" class="admin-updates-banner" hidden>
+              <button type="button" id="btnAdminUpdatesBanner" class="admin-updates-banner-btn"></button>
+            </div>
+
+            <section id="messageList" class="message-list" aria-live="polite">
+              <div id="adminCorrectionResultPanel" class="admin-correction-result-panel" hidden aria-live="polite"></div>
+              <div id="chatMessages"></div>
+            </section>
+
+            <footer id="composerDock" class="composer composer-chat-capsule-wrap composer-dock">
+              <div class="composer-stack">
+                <div id="attachmentStrip" class="composer-att-chips" hidden aria-live="polite"></div>
+                <div id="composerStatusSlot" class="composer-status-slot">
+                  <div id="composerStatusLine" class="composer-status-toast" hidden role="status"></div>
+                </div>
+                <div class="composer-capsule" role="group" aria-label="消息输入">
+                  <div class="composer-capsule-row">
+                    <div class="composer-plus-wrap">
+                      <button
+                        type="button"
+                        id="composerAttachBtn"
+                        class="composer-icon-btn composer-plus-btn"
+                        aria-label="添加附件"
+                        aria-haspopup="menu"
+                        aria-expanded="false"
+                        aria-controls="composerAttachMenu"
+                      >
+                        <span class="composer-plus-glyph" aria-hidden="true">+</span>
+                      </button>
+                      <div id="composerAttachMenu" class="composer-attach-menu" hidden role="menu" aria-labelledby="composerAttachBtn">
+                        <button type="button" class="composer-attach-menu-item" role="menuitem" data-pick="sheet">
+                          上传表格
+                        </button>
+                        <button type="button" class="composer-attach-menu-item" role="menuitem" data-pick="image">
+                          上传图片
+                        </button>
+                      </div>
+                    </div>
+                    <textarea
+                      id="userPrompt"
+                      class="composer-capsule-text"
+                      rows="1"
+                      maxlength="8000"
+                      autocomplete="off"
+                      placeholder=""
+                    ></textarea>
+                    <button type="button" id="sendBtn" class="composer-icon-btn composer-send-round" aria-label="发送">
+                      <svg class="composer-send-svg" aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" focusable="false">
+                        <path
+                          fill="currentColor"
+                          d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div class="composer-file-inputs" aria-hidden="true">
+                <input
+                  id="sheetInput"
+                  type="file"
+                  class="composer-file-hidden"
+                  accept=".xlsx,.xls,.csv,.tsv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
+                  tabindex="-1"
+                />
+                <input
+                  id="imageInput"
+                  type="file"
+                  class="composer-file-hidden"
+                  accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
+                  multiple
+                  tabindex="-1"
+                />
+              </div>
+            </footer>
+          </section>
+        </div>
+
+        <div id="workspaceMyQuotes" class="workspace-pane" hidden>
+          <section id="myQuotesPanel" class="my-quotes-panel my-quotes-page" aria-label="我的报价记录">
+            <header class="my-quotes-page-head">
+              <div class="my-quotes-title-block">
+                <h2>我的报价记录</h2>
+                <p id="myQuotesStats" class="my-quotes-stats" aria-live="polite">加载统计中…</p>
+              </div>
+              <div class="my-quotes-toolbar">
+                <input
+                  type="search"
+                  id="myQuotesSearch"
+                  class="my-quotes-search"
+                  placeholder="搜索文件名 / 产品名 / 报价编号"
+                  autocomplete="off"
+                />
+                <div class="my-quotes-segment" role="tablist" aria-label="审批状态筛选">
+                  <button type="button" class="my-quotes-filter active" data-status="">全部</button>
+                  <button type="button" class="my-quotes-filter" data-status="pending">待审批</button>
+                  <button type="button" class="my-quotes-filter" data-status="approved">已通过</button>
+                  <button type="button" class="my-quotes-filter" data-status="rejected">已驳回</button>
+                </div>
+                <button type="button" id="btnMyQuotesManage" class="my-quotes-manage-btn">管理</button>
+              </div>
+              <div id="myQuotesBatchBar" class="my-quotes-batch-bar" hidden>
+                <span id="myQuotesBatchCount" class="my-quotes-batch-count">已选择 0 条</span>
+                <div class="my-quotes-batch-actions">
+                  <button type="button" id="btnMyQuotesBatchCancel" class="my-quotes-batch-cancel">取消</button>
+                  <button type="button" id="btnMyQuotesBatchDelete" class="my-quotes-batch-delete" disabled>删除所选</button>
+                </div>
+              </div>
+            </header>
+            <div id="myQuotesList" class="my-quotes-list" role="list"></div>
+          </section>
+        </div>
+
+        <div id="workspaceAdminUpdates" class="workspace-pane" hidden>
+          <section class="admin-updates-page" aria-label="管理员修正">
+            <header class="admin-updates-page-head">
+              <div class="admin-updates-head-row">
+                <div class="admin-updates-title-block">
+                  <h2>管理员修正</h2>
+                  <p id="adminUpdatesStats" class="admin-updates-stats" aria-live="polite">加载中…</p>
+                </div>
+                <label class="admin-updates-filter-wrap">
+                  <span class="sr-only">阅读状态筛选</span>
+                  <select id="adminUpdatesReadFilter" class="admin-updates-filter" aria-label="阅读状态筛选">
+                    <option value="">全部</option>
+                    <option value="unread">未读</option>
+                    <option value="read">已读</option>
+                  </select>
+                </label>
+              </div>
+              <div id="adminUpdatesBatchBar" class="admin-updates-batch-bar" hidden>
+                <label class="admin-updates-batch-select-all">
+                  <input type="checkbox" id="adminUpdatesSelectAll" />
+                  <span>全选</span>
+                </label>
+                <span id="adminUpdatesBatchCount" class="admin-updates-batch-count">已选择 0 条</span>
+                <div class="admin-updates-batch-actions">
+                  <button type="button" id="btnAdminUpdatesBatchMarkRead" class="admin-updates-batch-mark-read" disabled>标记已读</button>
+                  <button type="button" id="btnAdminUpdatesBatchDelete" class="admin-updates-batch-delete" disabled>批量删除</button>
+                  <button type="button" id="btnAdminUpdatesBatchCancel" class="admin-updates-batch-cancel">取消</button>
+                </div>
+              </div>
+            </header>
+            <div id="adminUpdatesListView" class="admin-updates-list-view">
+              <div id="adminUpdatesList" class="admin-updates-list" role="list"></div>
+            </div>
+            <div id="adminUpdatesDetailView" class="admin-updates-detail-view" hidden>
+              <div class="admin-updates-detail-toolbar">
+                <button type="button" id="btnAdminUpdatesBack" class="admin-updates-back-btn">← 返回列表</button>
+              </div>
+              <div id="adminUpdatesDetail" class="admin-updates-detail"></div>
+            </div>
+          </section>
+        </div>
+
+        <div id="workspaceQuote" class="workspace-pane" hidden>
+          <section class="quote-sheet-page" aria-label="生成报价单">
+            <header class="qs-page-head">
+              <h2>报价单填写</h2>
+              <p class="qs-page-sub">
+                客户资料填写后会自动保存到当前报价；再次打开或导出 PDF 时将自动带出，无需重复输入。
+              </p>
+              <p id="qsMetaSaveStatus" class="qs-meta-save-status" aria-live="polite"></p>
+            </header>
+            <div class="qs-split">
+              <div class="qs-form-side">
+                <fieldset class="qs-fieldset">
+                  <legend>公司固定信息</legend>
+                  <label class="qs-label"
+                    >公司名称 <input type="text" id="qsCoName" class="qs-input" autocomplete="organization"
+                  /></label>
+                  <label class="qs-label"
+                    >公司电话 <input type="text" id="qsCoPhone" class="qs-input" autocomplete="tel"
+                  /></label>
+                  <label class="qs-label qs-label-block"
+                    >公司地址
+                    <textarea id="qsCoAddr" class="qs-textarea qs-textarea-sm" rows="2"></textarea>
+                  </label>
+                </fieldset>
+                <fieldset class="qs-fieldset">
+                  <legend>收款信息</legend>
+                  <div class="qs-payee-wrap">
+                    <label class="qs-label qs-payee-label"
+                      >收款公司
+                      <div class="qs-payee-combobox">
+                        <input
+                          type="text"
+                          id="qsPayeeCompany"
+                          class="qs-input qs-payee-combobox-input"
+                          autocomplete="off"
+                          role="combobox"
+                          aria-expanded="false"
+                          aria-controls="qsPayeeCandidates"
+                          aria-autocomplete="list"
+                          placeholder="搜索或选择收款公司"
+                        />
+                        <button
+                          type="button"
+                          id="qsPayeeToggle"
+                          class="qs-payee-combobox-toggle"
+                          aria-label="展开收款公司列表"
+                          tabindex="-1"
+                        >
+                          <span class="qs-payee-combobox-chevron" aria-hidden="true"></span>
+                        </button>
+                      </div>
+                    </label>
+                    <ul
+                      id="qsPayeeCandidates"
+                      class="qs-payee-candidates"
+                      hidden
+                      role="listbox"
+                      aria-label="收款公司候选"
+                    ></ul>
+                    <p id="qsPayeeStatus" class="qs-payee-status" aria-live="polite"></p>
+                    <div id="qsPayeePreview" class="qs-payee-preview" hidden>
+                      <div class="qs-payee-preview-row">
+                        <span class="qs-payee-preview-label">公司名称：</span><span id="qsPayeePreviewName"></span>
+                      </div>
+                      <div class="qs-payee-preview-row">
+                        <span class="qs-payee-preview-label">对公开户行：</span><span id="qsPayeePreviewBankName"></span>
+                      </div>
+                      <div class="qs-payee-preview-row">
+                        <span class="qs-payee-preview-label">对公银行账号：</span><span id="qsPayeePreviewBankAccount"></span>
+                      </div>
+                      <div class="qs-payee-preview-row">
+                        <span class="qs-payee-preview-label">企业支付宝：</span><span id="qsPayeePreviewAlipay"></span>
+                      </div>
+                    </div>
+                  </div>
+                </fieldset>
+                <fieldset class="qs-fieldset">
+                  <legend>本次报价</legend>
+                  <label class="qs-label">报价编号 <input type="text" id="qsQuoteNo" class="qs-input" /></label>
+                  <label class="qs-label">联系人 <input type="text" id="qsSellerContact" class="qs-input" /></label>
+                  <label class="qs-label">E-mail <input type="email" id="qsSellerEmail" class="qs-input" /></label>
+                  <label class="qs-label">客户名称 <input type="text" id="qsCustName" class="qs-input" /></label>
+                  <label class="qs-label">客户联系人 <input type="text" id="qsCustContact" class="qs-input" /></label>
+                  <label class="qs-label">客户联系电话 <input type="text" id="qsCustPhone" class="qs-input" /></label>
+                  <label class="qs-label qs-label-block"
+                    >客户公司地址
+                    <textarea id="qsCustAddr" class="qs-textarea qs-textarea-sm" rows="2"></textarea>
+                  </label>
+                  <label class="qs-label"
+                    >报价时间 <input type="date" id="qsQuoteDate" class="qs-input"
+                  /></label>
+                  <div id="qsSampleDetailFields" class="qs-sample-detail-fields">
+                    <label class="qs-label"
+                      >打样费 <input type="text" id="qsSampleFee" class="qs-input" placeholder="如 300元、免费、USD 50"
+                    /></label>
+                    <label class="qs-label"
+                      >打样时间 <input type="text" id="qsSampleLeadTime" class="qs-input" placeholder="如 5-7天、收到打样费后7天"
+                    /></label>
+                  </div>
+                </fieldset>
+                <fieldset class="qs-fieldset">
+                  <legend>产品明细</legend>
+                  <div class="qs-form-product-wrap">
+                    <table class="qs-form-table" id="qsFormProductTable">
+                      <thead>
+                        <tr>
+                          <th>图</th>
+                          <th>名称</th>
+                          <th>尺寸</th>
+                          <th>描述</th>
+                          <th>包装</th>
+                          <th>数量</th>
+                          <th>单价</th>
+                          <th>总价</th>
+                          <th>备注</th>
+                          <th></th>
+                        </tr>
+                      </thead>
+                      <tbody id="qsFormProductBody"></tbody>
+                    </table>
+                    <button type="button" class="qs-add-row-btn" id="qsAddProductRow">+ 添加产品行</button>
+                  </div>
+                </fieldset>
+                <fieldset class="qs-fieldset">
+                  <legend>底部信息</legend>
+                  <p class="qs-fixed-line" data-quote-foot-cn>*以上报价20天内有效，具体价格以实际打样核算为准</p>
+                  <p class="qs-fixed-line qs-foot-default-note">
+                    请在上方「收款信息」中选择收款公司；导出 PDF 时将自动写入对应银行与支付宝信息。
+                  </p>
+                </fieldset>
+                <div class="qs-download-actions qs-export-controls">
+                  <div class="qs-export-lang-row" role="group" aria-label="导出语言">
+                    <span class="qs-export-lang-caption">导出范围：</span>
+                    <label class="qs-radio-label"
+                      ><input type="radio" name="qsExportLangScope" value="cn" checked /> 仅中文版</label
+                    >
+                    <label class="qs-radio-label"
+                      ><input type="radio" name="qsExportLangScope" value="en" /> 仅英文版</label
+                    >
+                    <label class="qs-radio-label"
+                      ><input type="radio" name="qsExportLangScope" value="both" /> 中英文各一份</label
+                    >
+                  </div>
+                  <div class="qs-translate-actions">
+                    <button type="button" class="qs-translate-en-btn" id="qsTranslateEnBtn">翻译成英文版</button>
+                    <span id="qsTranslateStatus" class="qs-translate-status" aria-live="polite"></span>
+                  </div>
+                  <input type="hidden" id="qsUsdCnyRate" value="7.15" />
+                  <input type="hidden" id="qsFobYuanPerPc" value="4" />
+                  <button type="button" class="qs-export-pdf-btn" id="qsExportPdfBtn">下载 PDF（人民币）</button>
+                  <button type="button" class="qs-export-pdf-btn qs-export-usd-btn" id="qsExportPdfFobUsdBtn">
+                    导出 PDF（FOB·美金）
+                  </button>
+                  <span class="qs-download-hint"
+                    >人民币版按表单出厂价导出。FOB美金版按系统报价单里的汇率与 FOB 加价/件自动折算（单价列仍为人民币出厂价，不在此页填写）。</span
+                  >
+                </div>
+              </div>
+            </div>
+            <div class="qs-pdf-offscreen" aria-hidden="true">
+              <div id="quotePdfRoot" class="qs-pdf-root" aria-label="报价单版面">
+                    <div id="pvCoTitle" class="qs-pdf-company qs-pdf-cn">深圳市栢博旅游用品有限公司</div>
+                    <div id="pvPdfDocTitle" class="qs-pdf-doc-title qs-pdf-cn" data-pdf-lbl="pvPdfDocTitle">报价单</div>
+                    <div class="qs-pdf-meta">
+                      <table class="qs-pdf-meta-table" role="presentation">
+                        <colgroup>
+                          <col class="col-img" />
+                          <col class="col-name" />
+                          <col class="col-size" />
+                          <col class="col-desc" />
+                          <col class="col-pack" />
+                          <col class="col-qty" />
+                          <col class="col-price" />
+                          <col class="col-total" />
+                          <col class="col-note" />
+                        </colgroup>
+                        <tbody>
+                          <tr>
+                            <td colspan="4" class="qs-pdf-meta-left">
+                              <span data-pdf-lbl="lbl_meta_phone" class="qs-pdf-cn">电话：</span><span id="pvCoPhone" class="qs-pdf-arial"></span>
+                            </td>
+                            <td colspan="3" class="qs-pdf-meta-right qs-pdf-meta-right-shifted">
+                              <span data-pdf-lbl="lbl_meta_quote_no" class="qs-pdf-cn">报价编号：</span><span id="pvQuoteNo" class="qs-pdf-arial qs-pdf-meta-value qs-pdf-meta-value-quote-no"></span>
+                            </td>
+                            <td colspan="2" class="qs-pdf-meta-note-gap" aria-hidden="true"></td>
+                          </tr>
+                          <tr>
+                            <td colspan="4" class="qs-pdf-meta-left">
+                              <span data-pdf-lbl="lbl_meta_contact_seller" class="qs-pdf-cn">联系人：</span><span id="pvSellerContact" class="qs-pdf-cn"></span>
+                            </td>
+                            <td colspan="3" class="qs-pdf-meta-right qs-pdf-meta-right-shifted">
+                              <span data-pdf-lbl="lbl_meta_email" class="qs-pdf-cn">邮箱：</span><span id="pvSellerEmail" class="qs-pdf-arial qs-pdf-meta-value"></span>
+                            </td>
+                            <td colspan="2" class="qs-pdf-meta-note-gap" aria-hidden="true"></td>
+                          </tr>
+                          <tr>
+                            <td colspan="9" class="qs-pdf-meta-full">
+                              <span data-pdf-lbl="lbl_meta_address" class="qs-pdf-cn">地址：</span><span id="pvCoAddr" class="qs-pdf-cn"></span>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td colspan="9" class="qs-pdf-meta-full">
+                              <span data-pdf-lbl="lbl_meta_customer" class="qs-pdf-cn">客户：</span><span id="pvCustName" class="qs-pdf-cn"></span>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td colspan="4" class="qs-pdf-meta-left">
+                              <span data-pdf-lbl="lbl_meta_cust_contact" class="qs-pdf-cn">联系人：</span><span id="pvCustContact" class="qs-pdf-cn"></span>
+                            </td>
+                            <td colspan="3" class="qs-pdf-meta-right qs-pdf-meta-right-shifted">
+                              <span data-pdf-lbl="lbl_meta_cust_phone" class="qs-pdf-cn">联系电话：</span><span id="pvCustPhone" class="qs-pdf-arial qs-pdf-meta-value"></span>
+                            </td>
+                            <td colspan="2" class="qs-pdf-meta-note-gap" aria-hidden="true"></td>
+                          </tr>
+                          <tr>
+                            <td colspan="9" class="qs-pdf-meta-full">
+                              <span data-pdf-lbl="lbl_meta_cust_company_addr" class="qs-pdf-cn">公司地址：</span><span id="pvCustAddr" class="qs-pdf-cn"></span>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td colspan="9" class="qs-pdf-meta-full">
+                              <span data-pdf-lbl="lbl_meta_quote_date" class="qs-pdf-cn">报价时间：</span><span id="pvQuoteDate" class="qs-pdf-arial"></span>
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <table class="qs-pdf-table" role="table">
+                      <colgroup>
+                        <col class="col-img" />
+                        <col class="col-name" />
+                        <col class="col-size" />
+                        <col class="col-desc" />
+                        <col class="col-pack" />
+                        <col class="col-qty" />
+                        <col class="col-price" />
+                        <col class="col-total" />
+                        <col class="col-note" />
+                      </colgroup>
+                      <thead>
+                        <tr>
+                          <th data-pdf-lbl="th_style_image" class="col-img qs-pdf-cn">款式图片</th>
+                          <th data-pdf-lbl="th_item_name" class="col-name qs-pdf-cn">名称</th>
+                          <th data-pdf-lbl="th_size" class="col-size qs-pdf-cn">尺寸</th>
+                          <th data-pdf-lbl="th_description" class="col-desc qs-pdf-cn">描述</th>
+                          <th data-pdf-lbl="th_packing" class="col-pack qs-pdf-cn">包装</th>
+                          <th data-pdf-lbl="th_qty_pcs" class="col-qty qs-pdf-cn">报价数量<br />(PCS)</th>
+                          <th class="col-price qs-pdf-cn" id="pvThUnitPrice">单价</th>
+                          <th class="col-total qs-pdf-cn" id="pvThLineTotal">出厂总价<br />RMB</th>
+                          <th data-pdf-lbl="th_tax_inclusive_price" class="col-note qs-pdf-cn" id="pvThNoteColumn">含税价</th>
+                        </tr>
+                      </thead>
+                      <tbody id="quotePdfProducts">                      </tbody>
+                      <tfoot id="pvValidityYellowFoot">
+                        <tr id="pvValidityYellowRow">
+                          <td colspan="9" data-pdf-lbl="foot_validity" class="qs-pdf-yellow-cell qs-pdf-yellow-text">
+                            *以上报价20天内有效，具体价格以实际打样核算为准
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                    <div class="qs-pdf-sample-meta qs-pdf-cn">
+                      <div class="qs-pdf-sample-line" id="pvPdfRemarkLine">
+                        <span data-pdf-lbl="lbl_meta_pdf_remark" class="qs-pdf-cn">备注：</span><span id="pvPdfRemark" class="qs-pdf-cn qs-pdf-meta-text-value"></span>
+                      </div>
+                      <div class="qs-pdf-sample-line" id="pvSampleStatusLine" hidden>
+                        <span data-pdf-lbl="lbl_meta_sample_status" class="qs-pdf-cn">打样：</span><span id="pvSampleStatus" class="qs-pdf-cn qs-pdf-meta-text-value"></span>
+                      </div>
+                      <div class="qs-pdf-sample-line" id="pvSampleFeeLine" hidden>
+                        <span data-pdf-lbl="lbl_meta_sample_fee" class="qs-pdf-cn">打样费：</span><span id="pvSampleFee" class="qs-pdf-cn qs-pdf-meta-text-value"></span>
+                      </div>
+                      <div class="qs-pdf-sample-line" id="pvSampleLeadTimeLine" hidden>
+                        <span data-pdf-lbl="lbl_meta_sample_lead_time" class="qs-pdf-cn">打样时间：</span><span id="pvSampleLeadTime" class="qs-pdf-cn qs-pdf-meta-text-value"></span>
+                      </div>
+                      <div class="qs-pdf-sample-line" id="pvAuthorizedPayeeLine" hidden>
+                        <span data-pdf-lbl="lbl_meta_authorized_payee" class="qs-pdf-cn">授权收款账户：</span><span id="pvAuthorizedPayee" class="qs-pdf-cn qs-pdf-meta-text-value"></span>
+                      </div>
+                    </div>
+                    <div class="qs-pdf-pay-wrap">
+                      <div class="qs-pdf-stamp-side qs-pdf-cn">
+                        <div class="qs-pdf-stamp-slot" aria-hidden="true"></div>
+                        <div class="qs-pdf-sig-line" aria-hidden="true"></div>
+                        <div id="pvFooterCo" class="qs-pdf-footer-co"></div>
+                      </div>
+                      <div class="qs-pdf-pay-inner qs-pdf-cn">
+                        <div class="qs-pdf-bank qs-pdf-bank-name-line">
+                          <span data-pdf-lbl="foot_bank_prefix">银行信息：</span><span id="pvBank"></span>
+                        </div>
+                        <div class="qs-pdf-bank qs-pdf-bank-account-line" id="pvBankAccountLine" hidden>
+                          <span data-pdf-lbl="foot_bank_account_prefix">银行账户：</span><span id="pvBankAccount"></span>
+                        </div>
+                        <div class="qs-pdf-bank qs-pdf-bank-alipay-line">
+                          <span data-pdf-lbl="foot_alipay_prefix">支付宝信息：</span><span id="pvAlipay"></span>
+                        </div>
+                      </div>
+                      <div class="qs-pdf-cust-sign-side qs-pdf-cn">
+                        <span data-pdf-lbl="lbl_customer_signature">客户签名：</span>
+                      </div>
+                    </div>
+                  </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </main>
+    <script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
+    <script src="/static/app.js"></script>
+    <div id="qsExportPreflightModal" class="qs-export-preflight" hidden aria-hidden="true">
+      <div class="qs-export-preflight-backdrop" data-export-preflight-dismiss="1"></div>
+      <div
+        class="qs-export-preflight-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="qsExportPreflightTitle"
+      >
+        <h3 id="qsExportPreflightTitle" class="qs-export-preflight-title">导出前请确认</h3>
+        <p class="qs-export-preflight-intro">
+          导出前请确认以下信息：收款公司、打样费、打样时间。客户会在报价单中看到这些内容。
+        </p>
+        <ul id="qsExportPreflightList" class="qs-export-preflight-list"></ul>
+        <div class="qs-export-preflight-actions">
+          <button type="button" id="qsExportPreflightFill" class="btn btn-primary btn-sm">返回填写</button>
+          <button type="button" id="qsExportPreflightProceed" class="btn btn-ghost btn-sm">仍然导出</button>
+        </div>
+      </div>
+    </div>
+    <div id="qsSampleExportGate" class="qs-sample-gate" hidden aria-hidden="true">
+      <div class="qs-sample-gate-backdrop" data-sample-gate-dismiss="1"></div>
+      <div class="qs-sample-gate-panel" role="dialog" aria-modal="true" aria-labelledby="qsSampleGateTitle">
+        <h3 id="qsSampleGateTitle" class="qs-sample-gate-title">打样信息</h3>
+        <p id="qsSampleGateMessage" class="qs-sample-gate-message"></p>
+        <div id="qsSampleGateChooseActions" class="qs-sample-gate-choose" hidden>
+          <button type="button" class="btn btn-secondary btn-sm" data-sample-choice="yes">需要打样</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-sample-choice="no">不需要打样</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-sample-choice="pending">待确认</button>
+        </div>
+        <div id="qsSampleGateFillFields" class="qs-sample-gate-fill" hidden>
+          <label class="qs-label"
+            >打样费 <input type="text" id="qsSampleGateFee" class="qs-input" placeholder="如 300元"
+          /></label>
+          <label class="qs-label"
+            >打样时间 <input type="text" id="qsSampleGateLeadTime" class="qs-input" placeholder="如 5-7天"
+          /></label>
+        </div>
+        <div class="qs-sample-gate-actions">
+          <button type="button" id="qsSampleGateConfirm" class="btn btn-primary btn-sm">保存并导出</button>
+          <button type="button" id="qsSampleGateCancel" class="btn btn-ghost btn-sm">取消</button>
+        </div>
+      </div>
+    </div>
+    <script src="/static/quote_sheet.js?v=quote-pdf-remark-empty"></script>
+  </body>
+</html>

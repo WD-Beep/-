@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>后台管理 · 定制旅行背包报价中台</title>
+    <link rel="stylesheet" href="/static/admin/admin.css" />
+  </head>
+  <body>
+    <div id="viewApp" class="admin-shell">
+      <header class="dash-bar">
+        <div class="dash-bar-intro">
+          <h1 class="dash-bar-title">报价归档工作台</h1>
+          <p class="dash-bar-desc muted">数据汇总 · 列表筛选 · 明细工作台（不改变核算逻辑）</p>
+        </div>
+        <nav class="admin-module-nav" aria-label="后台模块导航">
+          <a href="/admin/quotes" class="admin-module-link admin-module-link-active">
+            <span class="admin-module-kicker">Archive</span>
+            <strong>报价归档</strong>
+          </a>
+          <a href="/admin/prices" class="admin-module-link">
+            <span class="admin-module-kicker">Price KB</span>
+            <strong>价格库</strong>
+          </a>
+        </nav>
+        <div class="dash-metrics" id="dashMetrics" aria-live="polite">
+          <article class="metric-card">
+            <span class="metric-label">总报价数</span>
+            <strong class="metric-value" id="statTotal">—</strong>
+          </article>
+          <article class="metric-card metric-accent">
+            <span class="metric-label">今日新增</span>
+            <strong class="metric-value" id="statToday">—</strong>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">最近保存时间</span>
+            <strong class="metric-value metric-value-sm" id="statLatest">—</strong>
+          </article>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside class="pane pane-list" aria-label="报价列表">
+          <div class="pane-head">
+            <h2 class="pane-title">归档列表</h2>
+            <button type="button" id="btnLogout" class="btn btn-ghost btn-sm">退出登录</button>
+          </div>
+
+          <div class="filter-panel">
+            <label class="field-compact">
+              <span class="field-label">搜索</span>
+              <input type="search" id="filterSearch" placeholder="文件名 / 产品名 / 报价 UID" autocomplete="off" />
+            </label>
+            <label class="field-compact">
+              <span class="field-label">业务员</span>
+              <input type="search" id="filterSalesUser" placeholder="姓名 / 企微 ID" autocomplete="off" />
+            </label>
+            <div class="filter-row">
+              <label class="field-compact">
+                <span class="field-label">保存日期（起）</span>
+                <input type="date" id="filterDateFrom" />
+              </label>
+              <label class="field-compact">
+                <span class="field-label">保存日期（止）</span>
+                <input type="date" id="filterDateTo" />
+              </label>
+            </div>
+            <div class="filter-row">
+              <label class="field-compact">
+                <span class="field-label">最低版本号</span>
+                <input type="number" id="filterVerMin" min="1" step="1" placeholder="不限" />
+              </label>
+              <label class="field-compact">
+                <span class="field-label">状态</span>
+                <select id="filterStatus">
+                  <option value="">全部</option>
+                  <option value="normal">正常</option>
+                  <option value="warn">警告（缺计算说明等）</option>
+                  <option value="risk">风险（汇总异常）</option>
+                </select>
+              </label>
+            </div>
+            <div class="filter-actions">
+              <button type="button" id="btnApplyFilters" class="btn btn-primary btn-sm">应用筛选</button>
+              <button type="button" id="btnClearFilters" class="btn btn-secondary btn-sm">重置</button>
+            </div>
+          </div>
+
+          <div id="newQuotesAlert" class="new-quotes-alert" hidden role="status" aria-live="polite">
+            <button type="button" id="btnNewQuotesAlert" class="new-quotes-alert-btn">
+              <span class="new-quotes-alert-dot" aria-hidden="true"></span>
+              <span id="newQuotesAlertText">有新报价</span>
+            </button>
+          </div>
+
+          <section id="pendingWatchPanel" class="pending-watch-panel" hidden aria-label="待查看新报价">
+            <header class="pending-watch-head">
+              <button
+                type="button"
+                id="btnTogglePendingWatch"
+                class="pending-watch-toggle"
+                aria-expanded="true"
+                aria-controls="pendingWatchBody"
+                title="展开/收起"
+              >
+                <span class="pending-watch-chevron" aria-hidden="true">▾</span>
+              </button>
+              <h3 class="pending-watch-title">待查看</h3>
+              <span id="pendingWatchBadge" class="pending-watch-badge" hidden>0</span>
+              <div class="pending-watch-actions">
+                <button type="button" id="btnWatchUnseenOnly" class="btn btn-ghost btn-xs">只看待查看</button>
+                <button type="button" id="btnWatchMarkAllSeen" class="btn btn-ghost btn-xs">全部标记已查看</button>
+                <button type="button" id="btnWatchClearSeen" class="btn btn-ghost btn-xs">清空已查看</button>
+              </div>
+            </header>
+            <div id="pendingWatchBody" class="pending-watch-body">
+              <div class="table-scroll pending-watch-scroll">
+                <table class="data-table data-table-compact pending-watch-table">
+                  <thead>
+                    <tr>
+                      <th>保存时间</th>
+                      <th>产品</th>
+                      <th>表格</th>
+                      <th class="col-num">物料合计</th>
+                      <th class="col-num">版本</th>
+                      <th>审批</th>
+                      <th>查看</th>
+                    </tr>
+                  </thead>
+                  <tbody id="pendingWatchListBody"></tbody>
+                </table>
+                <div id="pendingWatchEmpty" class="empty-state muted pending-watch-empty" hidden>
+                  暂无待查看记录
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <div class="list-toolbar list-toolbar-row">
+            <button type="button" id="btnRefresh" class="btn btn-secondary btn-sm">刷新列表</button>
+            <button type="button" id="btnBatchDelete" class="btn btn-danger-ghost btn-sm" disabled>
+              删除选中
+            </button>
+            <button type="button" id="btnDeleteFilteredAll" class="btn btn-danger-ghost btn-sm">
+              删除当前筛选全部
+            </button>
+            <span id="batchSelectHint" class="muted list-toolbar-hint"></span>
+          </div>
+
+          <div class="table-scroll table-scroll-list">
+            <table class="data-table data-table-compact">
+              <thead>
+                <tr>
+                  <th class="col-check" scope="col">
+                    <input type="checkbox" id="chkSelectPage" title="全选本页" aria-label="全选本页" />
+                  </th>
+                  <th>保存时间</th>
+                  <th>业务员</th>
+                  <th>产品</th>
+                  <th>表格</th>
+                  <th class="col-num">物料合计</th>
+                  <th class="col-num">一档成本</th>
+                  <th class="col-num">版本</th>
+                  <th>审批</th>
+                </tr>
+              </thead>
+              <tbody id="listBody"></tbody>
+            </table>
+            <div id="listEmpty" class="empty-state muted" hidden>暂无归档记录；前台完成报价后将自动入库。</div>
+          </div>
+
+          <footer class="pager">
+            <button type="button" id="btnPrev" class="btn btn-ghost btn-sm">上一页</button>
+            <span id="pageLabel" class="muted pager-label"></span>
+            <button type="button" id="btnNext" class="btn btn-ghost btn-sm">下一页</button>
+          </footer>
+        </aside>
+
+        <main class="pane pane-detail">
+          <div id="detailPlaceholder" class="empty-state empty-state-lg muted">
+            <p class="empty-title">请选择左侧一条报价</p>
+            <p class="empty-sub">支持搜索与筛选后快速定位；选中后右侧工作台平滑切换。</p>
+          </div>
+
+          <div id="detailWorkspace" class="detail-workspace" hidden>
+            <header class="detail-top">
+              <div class="detail-head-row detail-head-primary">
+                <div class="detail-head-lead">
+                  <h2 id="detailTitle" class="detail-title"></h2>
+                  <p id="detailSubtitle" class="detail-subtitle"></p>
+                </div>
+                <div class="detail-head-actions">
+                  <label class="simple-mode-label">
+                    <input type="checkbox" id="chkSimpleMode" />
+                    <span>简洁模式</span>
+                  </label>
+                  <div class="action-cluster action-cluster-secondary">
+                    <button type="button" id="btnCopyUid" class="btn btn-ghost btn-sm">复制 UID</button>
+                    <button type="button" id="btnExportJson" class="btn btn-ghost btn-sm">导出材料BOM</button>
+                  </div>
+                  <button type="button" id="btnOpenVersionsFiles" class="btn btn-ghost btn-sm">版本与文件</button>
+                  <button type="button" id="btnOpenSheet" class="btn btn-primary btn-sm">原始表格</button>
+                  <button type="button" id="btnDeleteQuote" class="btn btn-danger-ghost btn-sm">删除归档</button>
+                </div>
+              </div>
+              <div id="detailTechRow" class="detail-head-row detail-tech-row">
+                <button
+                  type="button"
+                  id="btnToggleTech"
+                  class="detail-tech-toggle"
+                  aria-expanded="false"
+                  aria-controls="detailTechPanel"
+                >
+                  查看技术信息
+                </button>
+                <div id="detailTechPanel" class="detail-tech-panel" hidden>
+                  <dl class="meta-grid meta-grid-soft" id="detailMetaDl"></dl>
+                </div>
+              </div>
+            </header>
+
+            <section id="quoteApprovalPanel" class="quote-approval-panel" aria-labelledby="quoteApprovalHeading" hidden>
+              <div class="quote-approval-head">
+                <h3 id="quoteApprovalHeading" class="quote-approval-title">报价表核实 / 审批</h3>
+                <span id="quoteApprovalStatusBadge" class="approval-status-badge approval-pill-pending">待核实</span>
+              </div>
+              <div class="quote-approval-grid">
+                <label class="field-compact quote-approval-field">
+                  <span class="field-label">审核人</span>
+                  <input
+                    type="text"
+                    id="approvalReviewerInput"
+                    class="quote-approval-reviewer"
+                    placeholder="请输入审核人姓名"
+                    autocomplete="name"
+                  />
+                </label>
+                <label class="field-compact quote-approval-field">
+                  <span class="field-label">审批状态</span>
+                  <select id="approvalStatusSelect" class="quote-approval-select">
+                    <option value="pending">待核实</option>
+                    <option value="approved">合格</option>
+                    <option value="rejected">不合格</option>
+                  </select>
+                </label>
+                <label class="field-compact quote-approval-field quote-approval-field-note">
+                  <span class="field-label">审批备注</span>
+                  <textarea
+                    id="approvalNoteInput"
+                    class="quote-approval-note"
+                    rows="2"
+                    placeholder="例如：已核对 BOM 与单价，可对外使用"
+                  ></textarea>
+                </label>
+              </div>
+              <div id="quoteApprovalMeta" class="quote-approval-meta muted"></div>
+              <div class="quote-approval-actions">
+                <button type="button" id="btnSaveQuoteApproval" class="btn btn-primary btn-sm">保存审批结果</button>
+                <span id="quoteApprovalSaveHint" class="muted quote-approval-hint">保存后写入当前查看版本</span>
+              </div>
+            </section>
+
+            <div class="tabs" role="tablist">
+              <button type="button" class="tab tab-active" role="tab" aria-selected="true" data-tab="overview">
+                概述
+              </button>
+              <button type="button" class="tab" role="tab" aria-selected="false" data-tab="detail">明细</button>
+              <button type="button" class="tab" role="tab" aria-selected="false" data-tab="calc">计算方式</button>
+            </div>
+
+            <div class="tab-panels">
+              <section id="panelOverview" class="tab-panel tab-panel-active" role="tabpanel">
+                <div id="overviewHealth" class="overview-conclusion" aria-live="polite"></div>
+
+                <div id="overviewHeroMount" class="ov-hero-mount"></div>
+
+                <section id="bomCorrectionWorkspace" class="bom-correction-workspace overview-section">
+                  <header class="bcw-header">
+                    <h3 class="section-heading ov-section-heading-inline">
+                      BOM 修正工作区
+                      <span class="section-sub muted">少量错误可在线改 BOM；错误较多可直接上传自算表格/附件给业务员</span>
+                    </h3>
+                  </header>
+
+                  <div id="adminSavedCorrectionStatus" class="bcw-saved-status" hidden aria-live="polite"></div>
+
+                  <div id="overviewEmbedWrap" class="overview-section ov-embed-detail-wrap bcw-bom-block">
+                    <div class="ov-embed-toolbar">
+                      <h3 class="section-heading ov-section-heading-inline">
+                        管理员修正区 · 可视化编辑 BOM
+                        <span class="section-sub muted">编辑物料与成本后保存管理员修正版，业务员将看到修正后的报价结果</span>
+                      </h3>
+                      <div class="bom-toolbar-actions">
+                        <div class="bom-edit-actions" id="bomEditActions">
+                          <button type="button" id="btnBomEdit" class="btn btn-secondary btn-sm">编辑 BOM</button>
+                          <button type="button" id="btnBomAdd" class="btn btn-secondary btn-sm" hidden>新增物料</button>
+                          <button type="button" id="btnBomSave" class="btn btn-primary btn-sm" hidden>保存管理员修正版</button>
+                          <button type="button" id="btnBomCancel" class="btn btn-ghost btn-sm" hidden>取消</button>
+                        </div>
+                        <div class="bcw-calculated-toolbar" id="bcwCalculatedToolbar">
+                          <input type="file" id="bcwCalculatedSheetInput" accept=".xlsx,.xls,.csv,.pdf,.doc,.docx,.png,.jpg,.jpeg,.zip,.rar,application/pdf,application/zip,application/x-rar-compressed,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" hidden />
+                          <button type="button" id="btnUploadCalculatedSheet" class="btn btn-secondary btn-sm">上传管理员自算表格/附件</button>
+                          <div id="bcwAdminCalculatedFile" class="bcw-calculated-file-inline chip-row bcw-file-chips"></div>
+                          <span id="bcwCalculatedUploadHint" class="muted bcw-upload-hint"></span>
+                        </div>
+                        <label class="ov-validation-label">
+                          <input type="checkbox" id="chkOverviewDetailValidation" />
+                          <span>查看详细校验</span>
+                        </label>
+                      </div>
+                    </div>
+                    <div class="table-scroll ov-embed-scroll">
+                      <table class="data-table ov-embed-table" id="overviewEmbedTable">
+                        <thead>
+                          <tr>
+                            <th class="col-ov-val">校验</th>
+                            <th>物料名称</th>
+                            <th>裁片/部位</th>
+                            <th>规格</th>
+                            <th>用量</th>
+                            <th>计算方式</th>
+                            <th class="col-num ov-num-head">
+                              <div class="ov-head-line">单价参考</div>
+                              <div class="ov-head-line ov-head-gap" aria-hidden="true">&nbsp;</div>
+                            </th>
+                            <th class="col-num ov-num-head">
+                              <div class="ov-head-line ov-head-gap" aria-hidden="true">&nbsp;</div>
+                              <div class="ov-head-line">小计</div>
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody id="overviewEmbeddedDetailBody"></tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div class="bcw-panel bcw-panel-feedback">
+                    <h4 class="bcw-panel-title">修正说明与业务员提醒</h4>
+                    <label class="field-compact bcw-note-field">
+                      <span class="field-label">管理员修正说明</span>
+                      <textarea
+                        id="adminCorrectionNoteInput"
+                        class="bcw-note-input"
+                        rows="4"
+                        placeholder="请说明本次修改了哪些 BOM / 成本项，方便业务员理解。"
+                      ></textarea>
+                    </label>
+                    <fieldset class="bcw-problem-types" id="adminCorrectionProblemTypes">
+                      <legend class="field-label">问题类型（可选，可多选）</legend>
+                      <div class="bcw-problem-type-grid">
+                        <label><input type="checkbox" data-problem-type="missing_fields" />业务员原表缺字段</label>
+                        <label><input type="checkbox" data-problem-type="unclear_usage" />用量不清楚</label>
+                        <label><input type="checkbox" data-problem-type="bad_unit_price" />单价不合理</label>
+                        <label><input type="checkbox" data-problem-type="bad_material_name" />材料名称不规范</label>
+                        <label><input type="checkbox" data-problem-type="unclear_tier_qty" />数量/阶梯价不明确</label>
+                        <label><input type="checkbox" data-problem-type="incomplete_structure" />结构描述不完整</label>
+                        <label><input type="checkbox" data-problem-type="agent_recognition_error" />agent 识别错误</label>
+                        <label><input type="checkbox" data-problem-type="agent_cost_bias" />agent 成本计算偏差</label>
+                        <label><input type="checkbox" data-problem-type="other" />其他</label>
+                      </div>
+                    </fieldset>
+                    <div id="adminFeedbackMeta" class="bcw-feedback-meta muted"></div>
+                    <div id="adminSalesViewStatus" class="bcw-sales-view-status muted"></div>
+                    <div class="bcw-actions">
+                      <button type="button" id="btnSaveAdminFeedback" class="btn btn-secondary btn-sm">仅更新修正说明</button>
+                      <span id="adminFeedbackSaveHint" class="muted bcw-save-hint">保存管理员修正版时会一并通知业务员；此处仅更新说明文案</span>
+                    </div>
+                  </div>
+
+                  <details class="bcw-attachments" id="bcwAttachments">
+                    <summary class="bcw-attachments-summary">参考与可选附件</summary>
+                    <div class="bcw-attachments-body">
+                      <div class="bcw-file-row bcw-file-row-ref">
+                        <span class="bcw-file-label">业务员原始表格（参考）</span>
+                        <div id="bcwSalesFiles" class="chip-row bcw-file-chips"></div>
+                      </div>
+                      <div class="bcw-file-row bcw-file-row-optional">
+                        <span class="bcw-file-label">管理员修正版表格（可选附件）</span>
+                        <div id="bcwAdminCorrectionFile" class="chip-row bcw-file-chips"></div>
+                        <div class="bcw-upload-actions">
+                          <input type="file" id="bcwCorrectionSheetInput" accept=".xlsx,.xls,.csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" hidden />
+                          <button type="button" id="btnUploadCorrectionSheet" class="btn btn-secondary btn-sm">上传修正版表格</button>
+                          <span id="bcwUploadHint" class="muted bcw-upload-hint"></span>
+                        </div>
+                      </div>
+                    </div>
+                  </details>
+                </section>
+
+                <div class="overview-section">
+                  <h3 class="section-heading ov-section-heading-tight">
+                    <span id="tierSummaryTitle">三档报价对比</span>
+                    <span class="section-sub muted">较上一档：绿色箭头表示对买家更有利（成本下降）。</span>
+                  </h3>
+                  <div class="table-scroll tier-compare-scroll">
+                    <div id="tierCompareMount"></div>
+                  </div>
+                </div>
+
+                <div class="overview-section">
+                  <h3 class="section-heading ov-section-heading-tight">
+                    风险与建议
+                    <span class="section-sub muted">最多 3 条；可逐项展开阅读。</span>
+                  </h3>
+                  <ul id="overviewSuggestions" class="overview-suggestions ov-suggestions"></ul>
+                </div>
+
+                <details class="ov-details-muted">
+                  <summary class="ov-details-summary">数据来源与可信度（展开）</summary>
+                  <div id="overviewCredibility" class="credibility-strip"></div>
+                </details>
+
+                <div class="overview-expand-bar">
+                  <button type="button" id="btnOverviewExpand" class="btn btn-secondary btn-sm">展开成本拆解</button>
+                  <span class="muted ov-expand-hint">展开后将显示四项限拆解与数据提醒全文。</span>
+                </div>
+
+                <div class="overview-section ov-cost-breakdown overview-section-muted">
+                  <h3 class="section-heading ov-section-heading-tight">
+                    成本拆解（四象限）
+                    <span class="section-sub muted">与主口径一致；「展开详情」后显示更多信息。</span>
+                  </h3>
+                  <div id="overviewCostMix" class="ratio-cards"></div>
+                </div>
+
+                <div id="overviewNoticeWrap" class="notice-collapsed" hidden>
+                  <button type="button" id="overviewNoticeToggle" class="notice-toggle" aria-expanded="false">
+                  </button>
+                  <div id="overviewNoticeFull" class="notice-full callout callout-warn" hidden></div>
+                </div>
+              </section>
+
+              <section id="panelDetail" class="tab-panel" role="tabpanel" hidden>
+                <h3 class="section-heading">
+                  板房用量明细
+                  <span class="section-sub muted">按裁片排刀展示面料/里布用量；辅料见分组或切换简明表。</span>
+                </h3>
+                <div class="detail-view-toolbar" role="group" aria-label="明细视图">
+                  <button type="button" id="btnDetailViewMarker" class="btn btn-secondary btn-sm detail-view-btn is-active" data-detail-view="marker">
+                    板房用量明细
+                  </button>
+                  <button type="button" id="btnDetailViewSimple" class="btn btn-ghost btn-sm detail-view-btn" data-detail-view="simple">
+                    简明物料表
+                  </button>
+                </div>
+                <div id="detailMarkerWrap" class="table-scroll table-scroll-detail table-scroll-marker">
+                  <table class="data-table data-table-striped marker-room-table" id="markerRoomTable">
+                    <thead>
+                      <tr>
+                        <th>物料名称</th>
+                        <th class="mr-num">幅宽</th>
+                        <th class="mr-num">排刀幅宽</th>
+                        <th>部位名称</th>
+                        <th class="mr-num">长度</th>
+                        <th class="mr-num">宽度</th>
+                        <th class="mr-num">占用长度</th>
+                        <th class="mr-num">占用宽度</th>
+                        <th class="mr-num">件数</th>
+                        <th class="mr-num">单件排刀用量</th>
+                        <th class="mr-num">损耗%</th>
+                        <th class="mr-num">物料排刀总用量</th>
+                        <th>单位</th>
+                        <th class="mr-num">物料单价</th>
+                        <th class="mr-num">物料金额</th>
+                        <th class="col-anomaly">异常/待核</th>
+                      </tr>
+                    </thead>
+                    <tbody id="markerRoomBody"></tbody>
+                  </table>
+                </div>
+                <div id="detailSimpleWrap" class="detail-simple-wrap" hidden>
+                <div class="table-scroll table-scroll-detail">
+                  <table class="data-table data-table-striped" id="detailTable">
+                    <thead>
+                      <tr>
+                        <th class="col-anomaly">异常提示</th>
+                        <th>物料名称</th>
+                        <th>裁片/部位</th>
+                        <th>规格</th>
+                        <th>用量</th>
+                        <th>计算方式</th>
+                        <th class="col-num ov-num-head">
+                          <div class="ov-head-line">单价参考</div>
+                          <div class="ov-head-line ov-head-gap" aria-hidden="true">&nbsp;</div>
+                        </th>
+                        <th class="col-num ov-num-head sortable" data-sort="amount_num">
+                          <div class="ov-head-line ov-head-gap" aria-hidden="true">&nbsp;</div>
+                          <div class="ov-head-line">小计</div>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody id="detailRowsBody"></tbody>
+                  </table>
+                </div>
+                </div>
+              </section>
+
+              <section id="panelCalc" class="tab-panel" role="tabpanel" hidden>
+                <div id="calcAccordion" class="accordion"></div>
+              </section>
+
+              <section id="panelFiles" class="tab-panel" role="tabpanel" hidden>
+                <div class="subsection">
+                  <h3 class="section-heading">版本切换</h3>
+                  <div id="versionBar" class="inline-field" hidden>
+                    <label class="muted" for="versionSelect">当前查看版本</label>
+                    <select id="versionSelect" aria-label="选择报价版本"></select>
+                  </div>
+                </div>
+                <div class="subsection">
+                  <h3 class="section-heading">上传文件</h3>
+                  <div id="detailFiles" class="chip-row"></div>
+                </div>
+                <div class="subsection">
+                  <h3 class="section-heading">版本与操作记录</h3>
+                  <div class="table-scroll">
+                    <table class="data-table data-table-striped">
+                      <thead>
+                        <tr>
+                          <th>版本</th>
+                          <th>保存时间</th>
+                          <th>核算 ID</th>
+                          <th>备注 / intent</th>
+                        </tr>
+                      </thead>
+                      <tbody id="versionsTableBody"></tbody>
+                    </table>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <footer id="diffSection" class="diff-strip" hidden>
+              <h3 class="diff-heading">版本差异（当前 vs 上一版本）</h3>
+              <div id="diffBody" class="diff-body muted"></div>
+            </footer>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <div id="adminToast" class="admin-toast" role="status" aria-live="polite" hidden></div>
+    <script src="/static/admin/admin.js?v=pending-watch-20260530" defer></script>
+  </body>
+</html>

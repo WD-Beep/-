@@ -1,0 +1,9 @@
+﻿python :   File "D:\自动报价旅行包\acquireKnowledge\自报项目\tools\_inspect_b260169.py", line 113
+所在位置 C:\Users\Administrator\AppData\Local\Temp\ps-script-59112c85-a254-4ca6-83eb-cfeb597919f3.ps1:111 字符: 50
++ ... acquireKnowledge\自报项目"; python tools/_inspect_b260169.py 2>&1 | Out-F ...
++                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (  File "D:\自动报价...9.py", line 113:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    print("\n--- after enrich_items_calc_note_from_structure ---")
+IndentationError: unexpected indent

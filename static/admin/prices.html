@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>价格库后台 · 定制旅行背包报价中台</title>
+    <link rel="stylesheet" href="/static/admin/admin.css" />
+  </head>
+  <body>
+    <div class="admin-shell">
+      <header class="dash-bar">
+        <div class="dash-bar-intro">
+          <h1 class="dash-bar-title">价格库后台</h1>
+          <p class="dash-bar-desc muted" id="priceKbSourceDesc">
+            正式价格库展示真实 Excel；可信新材料自动入库，可疑项进入待审核整理台。
+          </p>
+          <p class="price-kb-source-banner muted" id="priceKbSourceBanner" hidden></p>
+        </div>
+        <nav class="admin-module-nav" aria-label="后台模块导航">
+          <a href="/admin/quotes" class="admin-module-link">
+            <span class="admin-module-kicker">Archive</span>
+            <strong>报价归档</strong>
+          </a>
+          <a href="/admin/prices" class="admin-module-link admin-module-link-active">
+            <span class="admin-module-kicker">Price KB</span>
+            <strong>价格库</strong>
+          </a>
+        </nav>
+        <div class="dash-metrics" aria-live="polite">
+          <article class="metric-card">
+            <span class="metric-label">总材料数</span>
+            <strong class="metric-value" id="priceStatTotal">—</strong>
+          </article>
+          <article class="metric-card metric-accent">
+            <span class="metric-label">启用中</span>
+            <strong class="metric-value" id="priceStatActive">—</strong>
+          </article>
+          <article class="metric-card metric-pending-stat">
+            <span class="metric-label">待补充</span>
+            <strong class="metric-value" id="priceStatPending">—</strong>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">最近改价</span>
+            <strong class="metric-value metric-value-sm" id="priceStatLatest">—</strong>
+          </article>
+        </div>
+      </header>
+
+      <main class="price-admin-shell">
+        <section class="pane price-pane-list" aria-label="价格条目列表">
+          <div class="pane-head">
+            <h2 class="pane-title">材料价格</h2>
+            <button type="button" id="btnPriceLogout" class="btn btn-ghost btn-sm">退出登录</button>
+          </div>
+
+          <div class="filter-panel price-filter-panel">
+            <label class="field-compact">
+              <span class="field-label">搜索</span>
+              <input type="search" id="priceSearch" placeholder="材料名 / 规格 / 备注 / 更新人" autocomplete="off" />
+            </label>
+            <div class="filter-row">
+              <label class="field-compact">
+                <span class="field-label">状态</span>
+                <select id="priceStatus">
+                  <option value="">全部</option>
+                  <option value="active">启用</option>
+                  <option value="inactive">停用</option>
+                  <option value="pending">待补充</option>
+                </select>
+              </label>
+            </div>
+            <div class="filter-actions">
+              <button type="button" id="btnPriceApply" class="btn btn-primary btn-sm">应用筛选</button>
+              <button type="button" id="btnPriceReset" class="btn btn-secondary btn-sm">重置</button>
+              <button type="button" id="btnPriceRefresh" class="btn btn-secondary btn-sm">刷新</button>
+              <button type="button" id="btnPriceBatchDelete" class="btn btn-danger btn-sm">删除</button>
+            </div>
+            <div class="filter-actions price-import-row">
+              <div class="price-import-main">
+                <input type="file" id="priceImportFile" accept=".xlsx" />
+                <button type="button" id="btnPriceImport" class="btn btn-secondary btn-sm">导入知识库Excel</button>
+                <button type="button" id="btnPriceExport" class="btn btn-secondary btn-sm">导出知识库Excel</button>
+              </div>
+              <div class="price-import-secondary">
+                <div id="priceExceptionEntry" class="price-exception-entry" aria-live="polite">
+                  <span class="price-exception-entry-label">待审核建议（本地队列）</span>
+                  <strong id="priceExceptionCount" class="price-exception-entry-count">0</strong>
+                  <button type="button" id="btnHandleExceptions" class="btn btn-secondary btn-sm">打开整理台</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="priceExceptionWorkbench" class="price-exception-workbench" hidden aria-label="异常数据整理台">
+            <div class="pew-head">
+              <div class="pew-head-text">
+                <h3 class="pew-title">异常数据整理台</h3>
+                <p class="pew-desc muted">本地待审核队列（非正式 Excel）：修正后可入库正式库，测试污染项已自动隐藏</p>
+              </div>
+              <div class="pew-head-actions">
+                <button type="button" id="btnLeaveExceptions" class="btn btn-ghost btn-sm">返回价格库</button>
+              </div>
+            </div>
+            <div class="pew-stats" aria-live="polite">
+              <article class="pew-stat-card">
+                <span class="pew-stat-label">待人工确认</span>
+                <strong id="excStatOpen" class="pew-stat-value">0</strong>
+              </article>
+              <article class="pew-stat-card pew-stat-fixable">
+                <span class="pew-stat-label">建议修正入库</span>
+                <strong id="excStatFixable" class="pew-stat-value">0</strong>
+              </article>
+              <article class="pew-stat-card pew-stat-exclude">
+                <span class="pew-stat-label">建议排除</span>
+                <strong id="excStatExcludeSuggest" class="pew-stat-value">0</strong>
+              </article>
+              <article class="pew-stat-card pew-stat-muted">
+                <span class="pew-stat-label">自动排除（日志）</span>
+                <strong id="excStatAutoDropped" class="pew-stat-value pew-stat-value-sm">0</strong>
+              </article>
+            </div>
+          </div>
+
+          <div class="table-scroll table-scroll-list">
+            <table class="data-table data-table-compact">
+              <thead>
+                <tr id="priceTableHeadRow">
+                  <th class="col-select">
+                    <input type="checkbox" id="priceSelectAll" title="全选本页" aria-label="全选本页" />
+                  </th>
+                  <th>材料名称</th>
+                  <th>规格</th>
+                  <th>单价</th>
+                  <th>标记</th>
+                  <th>状态</th>
+                  <th>更新时间</th>
+                </tr>
+              </thead>
+              <tbody id="priceListBody"></tbody>
+            </table>
+            <div id="priceListEmpty" class="empty-state muted" hidden>当前没有价格条目。</div>
+          </div>
+
+          <footer class="pager">
+            <button type="button" id="btnPricePrev" class="btn btn-ghost btn-sm">上一页</button>
+            <span id="pricePageLabel" class="muted pager-label"></span>
+            <button type="button" id="btnPriceNext" class="btn btn-ghost btn-sm">下一页</button>
+          </footer>
+        </section>
+
+        <section class="pane price-pane-editor" aria-label="价格编辑器">
+          <div class="price-editor-card">
+            <div class="pane-head">
+              <h2 class="pane-title" id="priceEditorTitle">新增价格条目</h2>
+              <button type="button" id="btnPriceNew" class="btn btn-secondary btn-sm">新建</button>
+            </div>
+            <form id="priceForm" class="price-form">
+              <input type="hidden" id="priceRowId" />
+              <label class="field">
+                <span class="field-label">材料名称</span>
+                <input type="text" id="priceName" maxlength="120" required />
+              </label>
+              <label class="field">
+                <span class="field-label">规格 / 大小</span>
+                <input type="text" id="priceSpec" maxlength="120" placeholder="没有可填 -" />
+              </label>
+              <label class="field">
+                <span class="field-label">单价</span>
+                <input type="text" id="priceValue" maxlength="80" placeholder="例如 12元/码 或 0.35/PCS" />
+              </label>
+              <label class="field">
+                <span class="field-label">标记</span>
+                <input type="text" id="priceMarker" maxlength="80" placeholder="自动同步标记，可留空" />
+              </label>
+              <div class="filter-row">
+                <label class="field">
+                  <span class="field-label">状态</span>
+                  <select id="priceFormStatus">
+                    <option value="active">启用</option>
+                    <option value="inactive">停用</option>
+                    <option value="pending">待补充</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field-label">更新人</span>
+                  <input type="text" id="priceUpdatedBy" maxlength="40" placeholder="admin" />
+                </label>
+              </div>
+              <label class="field">
+                <span class="field-label">备注</span>
+                <textarea id="priceNote" rows="4" placeholder="例如：2026-05 临时涨价，供应商调价"></textarea>
+              </label>
+              <div class="filter-actions">
+                <button type="submit" id="btnPriceSave" class="btn btn-primary btn-sm">保存价格</button>
+                <button type="button" id="btnPriceApprove" class="btn btn-primary btn-sm" disabled hidden>修正后入库</button>
+                <button type="button" id="btnPriceExclude" class="btn btn-secondary btn-sm" disabled hidden>标记排除</button>
+                <button type="button" id="btnPriceClear" class="btn btn-secondary btn-sm">清空</button>
+              </div>
+            </form>
+            <p id="priceSaveHint" class="muted price-save-hint">保存后会自动重载价格库，新报价立即使用最新价格。</p>
+          </div>
+
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/admin/prices.js"></script>
+  </body>
+</html>

@@ -1,0 +1,410 @@
+"""物料候选有效性校验：拆分组合配件、过滤说明句、标记识别状态。"""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+from sheet_parser import (
+    MATERIAL_QTY_PHRASE_PATTERN,
+    contains_any,
+    looks_like_material_description_sentence,
+    looks_like_valid_unit_price_text,
+    normalize_text,
+    quantity_phrase_count,
+    should_drop_upload_name,
+    split_concatenated_material_name,
+)
+
+RECOGNITION_MATCHED = "matched"
+RECOGNITION_CANDIDATE = "candidate_review"
+RECOGNITION_IGNORED = "ignored"
+RECOGNITION_SPLIT = "split"
+
+MATERIAL_DESC_FORBIDDEN_PREFIXES = (
+    "外侧使用",
+    "内侧为",
+    "内侧使用",
+    "加宽肩带",
+    "大容量单主仓",
+    "用于",
+    "说明",
+    "结构",
+)
+MATERIAL_DESC_WEAK_KEYWORDS = (
+    "使用",
+    "外侧",
+    "内侧",
+    "主面料",
+    "结构",
+    "加宽",
+    "固定",
+    "调节",
+    "下方",
+    "上有",
+    "口袋",
+    "容量",
+)
+PART_ROLE_PREFIXES = ("肩带", "织带", "背板", "里布", "外料", "里料", "袋口", "主仓", "胸带")
+STRONG_MATERIAL_HINTS = (
+    "插扣",
+    "拉链",
+    "拉头",
+    "织带",
+    "网布",
+    "尼龙",
+    "涤纶",
+    "d扣",
+    "梯扣",
+    "猪鼻扣",
+    "扣具",
+    "牛津",
+    "帆布",
+    "dcf",
+    "tpu",
+    "pvc",
+    "ripstop",
+    "面料",
+    "外料",
+    "里料",
+)
+
+_PAREN_CLUE_RE = re.compile(r"[（(]([^）)]+)")
+
+
+def _starts_with_forbidden_prefix(text: str) -> bool:
+    normalized = normalize_text(text)
+    for prefix in MATERIAL_DESC_FORBIDDEN_PREFIXES:
+        if text.startswith(prefix) or normalized.startswith(normalize_text(prefix)):
+            return True
+    return False
+
+
+def extract_material_clue_from_parenthetical(text: str) -> str:
+    match = _PAREN_CLUE_RE.search(str(text or ""))
+    if not match:
+        return ""
+    clue = str(match.group(1) or "").strip(" ，,")
+    if not clue or len(clue) < 2:
+        return ""
+    if contains_any(normalize_text(clue), STRONG_MATERIAL_HINTS + ("网布", "织带", "面料", "尼龙")):
+        return clue
+    return ""
+
+
+def _is_inferred_or_structure_pending_row(row: dict[str, Any], name: str) -> bool:
+    """包类结构提取/推理待核成本行，不得当作说明文字忽略。"""
+    from material_inference import is_inferred_cost_row
+
+    if is_inferred_cost_row(row):
+        return True
+    if bool(row.get("from_bag_structure_extraction")):
+        return True
+    if str(row.get("structure_id") or "").strip():
+        return True
+    text = str(name or "").strip()
+    return "结构待核" in text
+
+
+_PIECE_OR_STRUCTURE_NAMES = frozenset(
+    {
+        "前片",
+        "后片",
+        "底片",
+        "侧片",
+        "侧片（2片）",
+        "拉链弧形盖",
+        "前袋",
+        "网袋",
+        "隔层",
+    }
+)
+
+
+def is_ignored_material_text(name: str) -> tuple[bool, str]:
+    text = str(name or "").strip()
+    if "结构待核" in text:
+        return False, ""
+    if text in _PIECE_OR_STRUCTURE_NAMES:
+        return True, "裁片/部位名称，不作为材料计价"
+    if not text or should_drop_upload_name(text):
+        return True, "空行或表头噪声"
+    if _starts_with_forbidden_prefix(text):
+        return True, "疑似结构/部位说明，不作为物料计价"
+    if looks_like_material_description_sentence(text):
+        return True, "疑似结构/工艺说明，不作为物料计价"
+    normalized = normalize_text(text)
+    if (text.endswith(")") or text.endswith("）")) and contains_any(normalized, MATERIAL_DESC_WEAK_KEYWORDS):
+        return True, "疑似不完整说明句，不作为物料计价"
+    return False, ""
+
+
+def is_part_description_candidate(name: str) -> tuple[bool, str]:
+    text = str(name or "").strip()
+    if not text:
+        return False, ""
+    if ("(" in text or "（" in text) and any(role in text for role in PART_ROLE_PREFIXES):
+        clue = extract_material_clue_from_parenthetical(text)
+        reason = "部件说明混合文本，需人工确认"
+        if clue:
+            reason = f"{reason}（材质线索：{clue}）"
+        return True, reason
+    if any(text.startswith(role) for role in PART_ROLE_PREFIXES) and contains_any(
+        normalize_text(text),
+        MATERIAL_DESC_WEAK_KEYWORDS,
+    ):
+        return True, "部件说明混合文本，需人工确认"
+    return False, ""
+
+
+def _looks_like_valid_material_candidate(name: str) -> bool:
+    normalized = normalize_text(name)
+    if contains_any(normalized, STRONG_MATERIAL_HINTS):
+        return True
+    if quantity_phrase_count(name) >= 1:
+        return True
+    return len(normalized) <= 12 and any(ch in name for ch in ("扣", "链", "带", "布", "料", "标"))
+
+
+def classify_material_row(
+    name: str,
+    *,
+    kb_hit: bool = False,
+    unit_price: str = "-",
+) -> tuple[str, str]:
+    if kb_hit:
+        if looks_like_valid_unit_price_text(unit_price):
+            return RECOGNITION_MATCHED, "知识库命中"
+        return RECOGNITION_CANDIDATE, "知识库已匹配名称但缺有效单价，待补价/待确认"
+    is_part, part_reason = is_part_description_candidate(name)
+    if is_part:
+        return RECOGNITION_CANDIDATE, part_reason
+    ignored, reason = is_ignored_material_text(name)
+    if ignored:
+        return RECOGNITION_IGNORED, reason
+    if _looks_like_valid_material_candidate(name):
+        return RECOGNITION_CANDIDATE, "未命中知识库，疑似有效材料/配件，待人工确认"
+    if len(normalize_text(name)) >= 8 and contains_any(normalize_text(name), MATERIAL_DESC_WEAK_KEYWORDS):
+        return RECOGNITION_IGNORED, "疑似说明文字，不作为物料计价"
+    return RECOGNITION_CANDIDATE, "未命中知识库，待人工确认"
+
+
+def _usage_from_qty_name(name: str) -> str:
+    match = MATERIAL_QTY_PHRASE_PATTERN.search(str(name or ""))
+    if match:
+        return match.group(0).strip()
+    return "-"
+
+
+def _apply_cost_flags(row: dict[str, Any], status: str) -> None:
+    if status == RECOGNITION_IGNORED:
+        row["exclude_from_cost"] = True
+        row["amount_in_cost"] = False
+    elif status == RECOGNITION_CANDIDATE:
+        row["exclude_from_cost"] = True
+        row["amount_in_cost"] = False
+        row["kb_auto_learned"] = False
+    elif status == RECOGNITION_SPLIT:
+        row["exclude_from_cost"] = True
+        row["amount_in_cost"] = False
+    else:
+        row.setdefault("exclude_from_cost", False)
+        row.setdefault("amount_in_cost", True)
+
+
+def apply_material_validity_layer(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """展开组合配件、过滤垃圾说明句，并写入 recognition_status / recognition_reason。"""
+    out: list[dict[str, Any]] = []
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        kb_hit = bool(row.get("kb_hit"))
+        if _is_inferred_or_structure_pending_row(row, name):
+            nr = dict(row)
+            nr.setdefault("from_bag_structure_extraction", True)
+            nr.setdefault("recognition_status", RECOGNITION_CANDIDATE)
+            nr.setdefault(
+                "recognition_reason",
+                "包类结构清单提取的待补成本项，需由模型或人工补齐单价后参与报价",
+            )
+            if nr.get("recognition_confirmed"):
+                nr["exclude_from_cost"] = False
+                nr["amount_in_cost"] = True
+            else:
+                nr["exclude_from_cost"] = True
+                nr["amount_in_cost"] = False
+            out.append(nr)
+            continue
+        split_names = split_concatenated_material_name(name)
+        if len(split_names) >= 2:
+            for idx, split_name in enumerate(split_names):
+                nr = dict(row)
+                nr["name"] = split_name
+                nr["recognition_status"] = RECOGNITION_SPLIT
+                nr["recognition_reason"] = "由组合配件文本拆分"
+                nr["_source_combined_name"] = name
+                if idx > 0:
+                    nr["unit_price"] = "-"
+                    nr["amount"] = 0.0
+                    nr["kb_hit"] = False
+                    nr["kb_score"] = 0.0
+                    nr.pop("kb_matched_name", None)
+                    nr.pop("kb_matched_spec", None)
+                qty_usage = _usage_from_qty_name(split_name)
+                if qty_usage != "-" and str(nr.get("usage") or "-").strip() in {"", "-", "—"}:
+                    nr["usage"] = qty_usage
+                split_kb_hit = kb_hit and idx == 0
+                split_unit_price = str(nr.get("unit_price") or "-").strip()
+                sub_status, sub_reason = classify_material_row(
+                    split_name,
+                    kb_hit=split_kb_hit,
+                    unit_price=split_unit_price,
+                )
+                if sub_status == RECOGNITION_IGNORED and (
+                    _looks_like_valid_material_candidate(split_name)
+                    or quantity_phrase_count(split_name) >= 1
+                ):
+                    nr["recognition_status"] = RECOGNITION_SPLIT
+                    nr["recognition_reason"] = f"已拆分；{sub_reason}（待补价/待确认）"
+                elif sub_status == RECOGNITION_IGNORED:
+                    nr["recognition_status"] = RECOGNITION_IGNORED
+                    nr["recognition_reason"] = sub_reason
+                elif sub_status == RECOGNITION_CANDIDATE:
+                    nr["recognition_status"] = RECOGNITION_SPLIT
+                    nr["recognition_reason"] = f"已拆分；{sub_reason}"
+                elif split_kb_hit and looks_like_valid_unit_price_text(split_unit_price):
+                    nr["recognition_status"] = RECOGNITION_SPLIT
+                    nr["recognition_reason"] = "由组合配件文本拆分；首项知识库命中"
+                _apply_cost_flags(nr, str(nr.get("recognition_status") or ""))
+                out.append(nr)
+            continue
+
+        status, reason = classify_material_row(
+            name,
+            kb_hit=kb_hit,
+            unit_price=str(row.get("unit_price") or "-"),
+        )
+        nr = dict(row)
+        nr["recognition_status"] = status
+        nr["recognition_reason"] = reason
+        clue = extract_material_clue_from_parenthetical(name)
+        if clue:
+            nr["material_clue"] = clue
+        _apply_cost_flags(nr, status)
+        out.append(nr)
+    return out
+
+
+def confirm_material_candidates_for_quote(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """用户确认结构后，待确认项可参与正式报价（已忽略项仍排除）。"""
+    out: list[dict[str, Any]] = []
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        nr = dict(row)
+        status = str(nr.get("recognition_status") or "").strip()
+        if status == RECOGNITION_IGNORED:
+            nr["exclude_from_cost"] = True
+            nr["amount_in_cost"] = False
+        elif status in {RECOGNITION_CANDIDATE, RECOGNITION_SPLIT}:
+            nr["recognition_confirmed"] = True
+            nr["exclude_from_cost"] = False
+            nr["amount_in_cost"] = True
+        out.append(nr)
+    return out
+
+
+def should_skip_knowledge_learn_row(row: dict[str, Any]) -> bool:
+    from material_inference import is_inferred_cost_row
+
+    if is_inferred_cost_row(row):
+        return True
+    status = str(row.get("recognition_status") or "").strip()
+    if status in {RECOGNITION_IGNORED, RECOGNITION_CANDIDATE, RECOGNITION_SPLIT}:
+        return True
+    if bool(row.get("exclude_from_cost")):
+        return True
+    return False
+
+
+def recognition_status_label(status: str) -> str:
+    mapping = {
+        RECOGNITION_MATCHED: "已匹配",
+        RECOGNITION_CANDIDATE: "待确认",
+        RECOGNITION_IGNORED: "已忽略",
+        RECOGNITION_SPLIT: "已拆分",
+    }
+    return mapping.get(str(status or "").strip(), "")
+
+
+_MISSING_QUOTE_FIELD_TEXT = {"", "-", "—", "无", "空", "none", "null", "nan"}
+_PENDING_RECOGNITION_STATUSES = frozenset({RECOGNITION_CANDIDATE, RECOGNITION_SPLIT})
+
+
+def _is_missing_quote_field_text(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    return not text or text in _MISSING_QUOTE_FIELD_TEXT
+
+
+def _row_active_for_formal_quote(row: dict[str, Any]) -> bool:
+    if bool(row.get("deleted")):
+        return False
+    if bool(row.get("exclude_from_cost")):
+        return False
+    status = str(row.get("recognition_status") or "").strip()
+    return status != RECOGNITION_IGNORED
+
+
+def summarize_structure_quote_gaps(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """列出正式报价前仍缺字段或待确认的行（不含已删除/已忽略）。"""
+    gaps: list[dict[str, Any]] = []
+    for idx, raw in enumerate(items):
+        if not isinstance(raw, dict) or not _row_active_for_formal_quote(raw):
+            continue
+        name = str(raw.get("name") or "").strip() or f"第{idx + 1}行"
+        reasons: list[str] = []
+        status = str(raw.get("recognition_status") or "").strip()
+        if status in _PENDING_RECOGNITION_STATUSES:
+            reasons.append("待确认")
+        if _is_missing_quote_field_text(raw.get("spec")):
+            reasons.append("规格为空")
+        if _is_missing_quote_field_text(raw.get("usage")):
+            reasons.append("用量为空")
+        unit_price = str(raw.get("unit_price") or "").strip()
+        if _is_missing_quote_field_text(unit_price) or not looks_like_valid_unit_price_text(unit_price):
+            reasons.append("缺单价")
+        if reasons:
+            gaps.append({"index": idx, "name": name, "reasons": reasons})
+    return gaps
+
+
+def validate_structure_items_for_formal_quote(
+    items: list[dict[str, Any]],
+    *,
+    allow_estimate: bool = False,
+) -> tuple[bool, dict[str, Any]]:
+    """结构确认后正式报价前的兜底校验。"""
+    gaps = summarize_structure_quote_gaps(items)
+    pending_count = sum(1 for g in gaps if "待确认" in g.get("reasons", []))
+    missing_price_count = sum(1 for g in gaps if "缺单价" in g.get("reasons", []))
+    summary: dict[str, Any] = {
+        "gaps": gaps,
+        "gap_count": len(gaps),
+        "pending_count": pending_count,
+        "missing_price_count": missing_price_count,
+    }
+    if not gaps:
+        return True, summary
+    if allow_estimate:
+        summary["estimate_allowed"] = True
+        return True, summary
+    count = len(gaps)
+    sample_names = "、".join(str(g.get("name") or "").strip() for g in gaps[:3] if g.get("name"))
+    tail = f"（{sample_names}）" if sample_names else ""
+    summary["message"] = (
+        f"还有 {count} 行物料未确认或信息不完整{tail}，请先补全或删除后再生成正式报价。"
+    )
+    return False, summary
