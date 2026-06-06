@@ -2979,11 +2979,8 @@ function renderBomEditMaterialTable(rows) {
           const fkName = `items.${i}.name`;
           const fkUp = `items.${i}.unit_price`;
           const fkUsage = `items.${i}.usage`;
-          const aiBadge = bomRowHasAiEstimate(row, row)
-            ? `<div class="bom-edit-ai-flag">${bomAiEstimateBadgeHtml()}</div>`
-            : "";
           return `<tr data-bom-row-index="${i}"${row.pricing_review_required ? ' class="bom-edit-row-ai"' : ""}>
-            <td><div class="bom-edit-cell"><input type="text" class="bom-edit-input" data-bom-row-field="name" data-bom-row-index="${i}" value="${escapeHtml(row.name || "")}"${bomEditFieldErrorAttr(fkName)} />${bomEditInlineErrorHtml(fkName)}${aiBadge}</div></td>
+            <td><div class="bom-edit-cell"><input type="text" class="bom-edit-input" data-bom-row-field="name" data-bom-row-index="${i}" value="${escapeHtml(row.name || "")}"${bomEditFieldErrorAttr(fkName)} />${bomEditInlineErrorHtml(fkName)}</div></td>
             <td><input type="text" class="bom-edit-input" data-bom-row-field="spec" data-bom-row-index="${i}" value="${escapeHtml(row.spec || "")}" autocomplete="off" /></td>
             <td><div class="bom-edit-cell"><input type="text" class="bom-edit-input bom-edit-input-num" data-bom-row-field="usage" data-bom-row-index="${i}" value="${escapeHtml(row.usage || "")}"${bomEditFieldErrorAttr(fkUsage)} />${bomEditInlineErrorHtml(fkUsage)}</div></td>
             <td><input type="text" class="bom-edit-input" data-bom-row-field="unit" data-bom-row-index="${i}" value="${escapeHtml(row.unit || "")}" placeholder="元/码" autocomplete="off" /></td>
@@ -3288,6 +3285,16 @@ function buildMultiSizeBomHtml(quote, meta) {
   return `<div class="multi-size-bom-wrap"><p class="multi-size-bom-lead muted">本报价含 ${variants.length} 个尺寸变体；管理员 BOM 编辑仍针对默认第一档。</p>${blocks}</div>`;
 }
 
+function countBomAiEstimateRows(pairs) {
+  return sortedPairs([...(pairs || [])]).filter((pair) => bomRowHasAiEstimate(pair.row, pair.db)).length;
+}
+
+function buildBomAiEstimateSummaryHtml(pairs) {
+  const n = countBomAiEstimateRows(pairs);
+  if (!n) return "";
+  return `<p class="bom-ai-estimate-summary muted">部分单价为系统估算，需复核（${n} 项）。勾选「查看详细校验」可查看明细。</p>`;
+}
+
 function buildBomAiEstimateSectionHtml(pairs) {
   const list = sortedPairs([...(pairs || [])]).filter((pair) => bomRowHasAiEstimate(pair.row, pair.db));
   if (!list.length) return "";
@@ -3295,14 +3302,14 @@ function buildBomAiEstimateSectionHtml(pairs) {
     const r = pair.row || {};
     const reason = String(r.recognition_reason || pair.db?.recognition_reason || "AI估算用量/单价").trim();
     return [
-      `${r.name || "-"}${bomAiEstimateBadgeHtml()}`,
+      r.name || "-",
       formatBomDisplayNumberText(r.usage || "-"),
       formatBomDisplayNumberText(r.unit_price || "-"),
       bomAmountText(r),
       reason,
     ];
   });
-  return `<section class="bom-section bom-section-ai-estimate">
+  return `<section class="bom-section bom-section-ai-estimate bom-ai-estimate-detail-only">
     <h3>AI 估算项（待管理员复核）</h3>
     <p class="muted bom-ai-estimate-lead">以下物料由系统自动估算用量/单价，可参与报价但需复核。修改后保存 BOM 将视为管理员确认。</p>
     ${renderBomRowsTable(["物料", "用量", "单价", "成本（元）", "说明"], rows, {
@@ -3318,8 +3325,7 @@ function buildBomHtml(pairs, quote, meta) {
   const list = sortedPairs([...(pairs || [])]);
   const unitPriceRows = list.map((pair) => {
     const r = pair.row || {};
-    const nameCell = bomRowHasAiEstimate(r, pair.db) ? `${r.name || "-"} ${bomAiEstimateBadgeHtml()}` : r.name || "-";
-    return [nameCell, formatBomDisplayNumberText(r.unit_price || "-")];
+    return [r.name || "-", formatBomDisplayNumberText(r.unit_price || "-")];
   });
   const usageRows = list.filter(likelyFabricPair).map((pair) => {
     const r = pair.row || {};
@@ -3333,9 +3339,8 @@ function buildBomHtml(pairs, quote, meta) {
   });
   const costRows = list.map((pair) => {
     const r = pair.row || {};
-    const nameCell = bomRowHasAiEstimate(r, pair.db) ? `${r.name || "-"} ${bomAiEstimateBadgeHtml()}` : r.name || "-";
     return [
-      nameCell,
+      r.name || "-",
       formatBomDisplayNumberText(r.unit_price || "-"),
       formatBomDisplayNumberText(r.usage || "-"),
       bomAmountText(r),
@@ -3356,7 +3361,8 @@ function buildBomHtml(pairs, quote, meta) {
       </section>
       <section class="bom-section">
         <h3>二、物料单价确认</h3>
-        ${renderBomRowsTable(["物料名称", "单价"], unitPriceRows, { rawHtmlCols: [0] })}
+        ${buildBomAiEstimateSummaryHtml(list)}
+        ${renderBomRowsTable(["物料名称", "单价"], unitPriceRows)}
       </section>
       ${pieceAreaHtml}
       <section class="bom-section">
@@ -3373,7 +3379,6 @@ function buildBomHtml(pairs, quote, meta) {
         <h3>五、各物料成本计算（单个）</h3>
         ${renderBomRowsTable(["物料", "单价", "用量", "成本（元）"], costRows, {
           numCols: [3],
-          rawHtmlCols: [0],
           tableClass: "bom-cost-table",
         })}
       </section>

@@ -79,6 +79,11 @@ def _ai_filled_field_keys(row: dict[str, Any]) -> list[str]:
 def _data_origin_label(row: dict[str, Any]) -> str:
     if row.get("manual_row"):
         return "人工"
+    st = str(row.get("source_type") or "").strip()
+    if st == "user_explicit":
+        return "用户输入"
+    if st == "image_inferred":
+        return "图片推断"
     src = normalize_source(row.get("source"))
     return "知识库" if src == "kb" else "AI"
 

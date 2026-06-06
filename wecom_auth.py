@@ -100,11 +100,39 @@ def get_wecom_config() -> WecomConfig | None:
     )
 
 
+def sanitize_oauth_return_path(path: str) -> str:
+    """OAuth state 回跳路径：仅允许站内相对路径，默认 /。"""
+    p = str(path or "").strip()
+    if not p or not p.startswith("/") or p.startswith("//"):
+        return "/"
+    if "://" in p:
+        return "/"
+    return p
+
+
+def wecom_login_entry_path(*, return_path: str = "/") -> str:
+    """业务员前台 OAuth 入口（由服务端再 302 到企业微信授权页）。"""
+    ret = sanitize_oauth_return_path(return_path)
+    qs = urllib.parse.urlencode({"state": ret})
+    return f"/api/auth/wecom/login?{qs}"
+
+
+def oauth_return_absolute_url(state: str, *, cfg: WecomConfig | None = None) -> str:
+    """OAuth callback 成功后跳回的业务员前台地址。"""
+    rel = sanitize_oauth_return_path(state)
+    if cfg is None:
+        cfg = get_wecom_config()
+    base = (cfg.public_base_url if cfg else "").strip().rstrip("/")
+    if base:
+        return f"{base}{rel}"
+    return rel
+
+
 def build_oauth_authorize_url(*, state: str = "") -> str:
     cfg = get_wecom_config()
     if cfg is None:
         raise RuntimeError("企业微信 OAuth 未配置。")
-    st = str(state or "").strip() or uuid.uuid4().hex
+    st = sanitize_oauth_return_path(str(state or "").strip() or "/")
     qs = urllib.parse.urlencode(
         {
             "appid": cfg.corp_id,
@@ -195,10 +223,7 @@ def auth_status_payload(
     enabled = wecom_enabled()
     login_url = ""
     if enabled and cfg is not None and not authenticated:
-        try:
-            login_url = build_oauth_authorize_url()
-        except RuntimeError:
-            login_url = ""
+        login_url = wecom_login_entry_path(return_path="/")
     misconfigured = enabled and cfg is None
     return {
         "wecom_enabled": enabled,
@@ -208,6 +233,7 @@ def auth_status_payload(
         "sales_user_id": sales_user_id if authenticated else "",
         "sales_user_name": sales_user_name if authenticated else "",
         "login_url": login_url,
+        "auto_login": bool(enabled and cfg is not None and not authenticated),
         "identity_source": "wecom" if enabled and authenticated else ("local" if authenticated else ""),
         "entry_message": "请从企业微信进入报价系统" if enabled else "",
     }

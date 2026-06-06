@@ -186,14 +186,21 @@ const WECOM_ENTRY_BLOCKED_MESSAGE = "请从企业微信进入报价系统";
 
 function wecomAuthExpiredUserMessage() {
   if (state.isWecomBrowser) {
-    return "登录已过期，请重新进入企业微信应用，或点击上方「企业微信登录」。";
+    return "登录已过期，请从企业微信重新进入应用。";
   }
   return WECOM_ENTRY_BLOCKED_MESSAGE;
 }
 
 function wecomLoginRequiredUserMessage() {
   if (state.isWecomBrowser) {
-    return "正在使用企业微信，系统将自动完成登录；若未跳转请点击「企业微信登录」。";
+    return "正在识别企业微信身份，请稍候…";
+  }
+  return WECOM_ENTRY_BLOCKED_MESSAGE;
+}
+
+function wecomAuthRetryUserMessage() {
+  if (state.isWecomBrowser) {
+    return "身份识别未完成，请从企业微信重新进入应用。";
   }
   return WECOM_ENTRY_BLOCKED_MESSAGE;
 }
@@ -261,7 +268,7 @@ function maybeAutoWecomLogin() {
     return;
   }
   if (sessionStorage.getItem("wecom_oauth_redirected") === "1") {
-    setComposerStatusLine("企业微信登录未完成，请点击上方「企业微信登录」重试。", "warn", { ttlMs: 12000 });
+    setComposerStatusLine(wecomAuthRetryUserMessage(), "warn", { ttlMs: 12000 });
     return;
   }
   sessionStorage.setItem("wecom_oauth_redirected", "1");
@@ -1603,7 +1610,7 @@ function buildQuoteCardInnerHtml(quote, fileName, msgId, cardOpts = {}) {
       ? `<div class="quote-extra-banner">本结果为额外试算，原 <strong>${escapeHtml(
           String(opts.originalQuantity),
         )}件</strong> 报价仍有效。</div>`
-      : "";
+      : buildPhotoQuoteSourceBanner(quote);
 
   const extraSubtitleHtml =
     (isExtraMaterial || isExtra) && opts.displayTitle
@@ -3406,9 +3413,38 @@ function materialRecognitionStatusLabel(status) {
   }
 }
 
+function buildPhotoQuoteSourceBanner(quote) {
+  const meta = quote?.photo_quote_meta;
+  if (!meta || typeof meta !== "object") {
+    return "";
+  }
+  const parts = [];
+  const userN = Number(meta.user_explicit_count);
+  const imgN = Number(meta.image_inferred_count);
+  const kbN = Number(meta.kb_count);
+  if (Number.isFinite(userN) && userN > 0) {
+    parts.push(`用户明确输入 ${userN} 项`);
+  }
+  if (Number.isFinite(imgN) && imgN > 0) {
+    parts.push(`图片推断 ${imgN} 项（需复核）`);
+  }
+  if (Number.isFinite(kbN) && kbN > 0) {
+    parts.push(`价格库 ${kbN} 项`);
+  }
+  if (!parts.length) {
+    return "";
+  }
+  return `<div class="photo-quote-source-banner note note-info" role="status">${escapeHtml(
+    parts.join(" · "),
+  )}</div>`;
+}
+
 function buildMaterialRecognitionBadge(row) {
   const st = String(row?.recognition_status || "").trim();
   const srcType = String(row?.source_type || "").trim();
+  if (srcType === "user_explicit" || row?.user_specified) {
+    return `<span class="material-recognition-badge matched" title="用户文字明确要求">用户指定</span>`;
+  }
   if (row?.inferred_by_ai || srcType === "structure_inferred" || srcType === "image_inferred") {
     const reason = String(row?.recognition_reason || row?.calc_note || "").trim();
     const title = reason ? escapeHtml(reason) : "结构/图片推理，需人工复核";
@@ -4388,7 +4424,7 @@ function notifySalesSyncAuthExpired() {
   if (now - salesSyncLastAuthWarnAt < SALES_SYNC_STATUS_WARN_COOLDOWN_MS) return;
   salesSyncLastAuthWarnAt = now;
   setComposerStatusLine(
-    "登录状态已过期，请重新进入企业微信应用或刷新页面后重试。",
+    wecomAuthExpiredUserMessage(),
     "warn",
     { ttlMs: 8000 },
   );
@@ -4490,7 +4526,9 @@ async function refreshSalesSyncBundle({ reason = "poll", forceApproval = false }
   if (isSalesSyncAuthBlocked()) {
     renderAdminUpdatesBadge(0);
     if (els.myQuotesPreview) {
-      els.myQuotesPreview.textContent = "登录后可查看历史报价";
+      els.myQuotesPreview.textContent = state.isWecomBrowser
+        ? wecomLoginRequiredUserMessage()
+        : WECOM_ENTRY_BLOCKED_MESSAGE;
     }
     return;
   }
@@ -5031,7 +5069,11 @@ async function loadAdminUpdatesPage() {
   const st = state.authStatus;
   if (st?.wecom_enabled && !st?.authenticated) {
     els.adminUpdatesList.innerHTML = renderMyQuotesAuthBlocked(wecomLoginRequiredUserMessage());
-    if (els.adminUpdatesStats) els.adminUpdatesStats.textContent = "请先登录";
+    if (els.adminUpdatesStats) {
+      els.adminUpdatesStats.textContent = state.isWecomBrowser
+        ? wecomLoginRequiredUserMessage()
+        : WECOM_ENTRY_BLOCKED_MESSAGE;
+    }
     return;
   }
   els.adminUpdatesList.innerHTML = `<p class="admin-updates-empty">加载中…</p>`;
@@ -5973,7 +6015,11 @@ async function fetchAuthStatus() {
 
 function wecomLoginUrl() {
   const st = state.authStatus;
-  return String(st?.login_url || "/api/auth/wecom/login").trim() || "/api/auth/wecom/login";
+  const fromStatus = String(st?.login_url || "").trim();
+  if (fromStatus) {
+    return fromStatus;
+  }
+  return "/api/auth/wecom/login?state=/";
 }
 
 function renderWecomAuthBanner() {
@@ -6011,15 +6057,24 @@ function renderWecomAuthBanner() {
     for (const banner of banners) {
       banner.innerHTML = html;
       banner.classList.remove("wecom-auth-warn");
+      banner.classList.remove("wecom-auth-hidden");
     }
     return;
   }
-  const loginUrl = escapeHtml(wecomLoginUrl());
-  const msg = escapeHtml(wecomLoginRequiredUserMessage());
-  const html = `<span class="wecom-auth-banner-text">${msg}</span> <a class="btn-wecom-login" href="${loginUrl}">企业微信登录</a>`;
+  if (state.isWecomBrowser) {
+    for (const banner of banners) {
+      banner.innerHTML = "";
+      banner.classList.add("wecom-auth-hidden");
+      banner.classList.remove("wecom-auth-warn");
+    }
+    return;
+  }
+  const msg = escapeHtml(WECOM_ENTRY_BLOCKED_MESSAGE);
+  const html = `<span class="wecom-auth-banner-text">${msg}</span>`;
   for (const banner of banners) {
     banner.innerHTML = html;
     banner.classList.add("wecom-auth-warn");
+    banner.classList.remove("wecom-auth-hidden");
   }
 }
 
@@ -6050,12 +6105,7 @@ function syncWecomComposerHints() {
 
 function renderMyQuotesAuthBlocked(message) {
   const text = escapeHtml(message || wecomAuthExpiredUserMessage());
-  const loginUrl = escapeHtml(wecomLoginUrl());
-  const loginBtn =
-    state.authStatus?.wecom_enabled && !state.authStatus?.authenticated
-      ? `<a class="btn-wecom-login my-quotes-auth-login" href="${loginUrl}">企业微信登录</a>`
-      : "";
-  return `<div class="my-quotes-auth-block"><p class="my-quotes-empty">${text}</p>${loginBtn}</div>`;
+  return `<div class="my-quotes-auth-block"><p class="my-quotes-empty">${text}</p></div>`;
 }
 
 async function fetchMyQuotesList(statusFilter = "") {
@@ -6077,7 +6127,9 @@ async function refreshMyQuotesPreview({ silent = false } = {}) {
   }
   const st = state.authStatus;
   if (st?.wecom_enabled && !st?.authenticated) {
-    els.myQuotesPreview.textContent = "登录后可查看历史报价";
+    els.myQuotesPreview.textContent = state.isWecomBrowser
+      ? wecomLoginRequiredUserMessage()
+      : WECOM_ENTRY_BLOCKED_MESSAGE;
     return;
   }
   try {
@@ -6372,7 +6424,9 @@ async function loadMyQuotesPage(statusFilter = "") {
   if (st?.wecom_enabled && !st?.authenticated) {
     els.myQuotesList.innerHTML = renderMyQuotesAuthBlocked(wecomLoginRequiredUserMessage());
     if (els.myQuotesStats) {
-      els.myQuotesStats.textContent = "请先完成企业微信登录";
+      els.myQuotesStats.textContent = state.isWecomBrowser
+        ? wecomLoginRequiredUserMessage()
+        : WECOM_ENTRY_BLOCKED_MESSAGE;
     }
     return;
   }

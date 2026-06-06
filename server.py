@@ -168,6 +168,16 @@ from message_intent import (
     should_explain_quote_without_requote,
 )
 from missing_data_enricher import enrich_missing_quote_data
+from photo_quote_flow import (
+    assess_photo_quote_prerequisites,
+    build_photo_quote_clarify_response,
+    build_photo_quote_data_notice,
+    composer_vision_images,
+    is_photo_quote_candidate,
+    preserve_photo_row_source_markers,
+    run_photo_quote_pipeline,
+    summarize_photo_quote_sources,
+)
 from material_spec_usage_enricher import (
     enrich_material_rows,
     enrich_payload_material_spec_usage,
@@ -295,8 +305,11 @@ from wecom_auth import (
     get_wecom_config,
     is_wecom_browser_user_agent,
     is_wecom_sales_user_id,
+    oauth_return_absolute_url,
+    sanitize_oauth_return_path,
     sales_display_name,
     wecom_enabled,
+    wecom_login_entry_path,
 )
 from quote_explain import (
     build_explain_response_payload,
@@ -1206,14 +1219,34 @@ def _write_front_wecom_browser_required(handler: QuoteHandler) -> None:
 
 def _redirect_wecom_oauth_error(handler: QuoteHandler, *, error_code: str, message: str) -> None:
     cfg = get_wecom_config()
-    base = (cfg.public_base_url if cfg else "/").rstrip("/") or "/"
+    base = oauth_return_absolute_url("/", cfg=cfg)
     qs = urlencode(
         {
             "wecom_auth_error": str(error_code or "wecom_oauth_failed").strip(),
             "wecom_auth_message": str(message or "企业微信登录失败。").strip(),
         }
     )
-    handler.send_redirect(f"{base}/?{qs}")
+    handler.send_redirect(f"{base}?{qs}")
+
+
+def _should_auto_wecom_oauth_on_front_entry(handler: QuoteHandler) -> bool:
+    """企微内置浏览器访问前台首页且未登录时，服务端直接走 OAuth。"""
+    if not wecom_enabled() or get_wecom_config() is None:
+        return False
+    if not _front_wecom_browser_ok(handler):
+        return False
+    sales_uid, _, ok = _resolve_front_sales_identity(handler)
+    if ok and sales_uid:
+        return False
+    parsed = urlparse(handler.path)
+    qs = parse_qs(parsed.query)
+    if (qs.get("wecom_auth_error") or [""])[0].strip():
+        return False
+    return True
+
+
+def _redirect_wecom_front_entry_login(handler: QuoteHandler, *, return_path: str = "/") -> None:
+    handler.send_redirect(wecom_login_entry_path(return_path=return_path))
 
 
 def _resolve_front_sales_identity(handler: QuoteHandler) -> tuple[str, str, bool]:
@@ -2428,6 +2461,9 @@ class QuoteHandler(BaseHTTPRequestHandler):
         parsed_req = urlparse(self.path)
         front_path = parsed_req.path.rstrip("/") or "/"
         if front_path == "/" or front_path == "/index.html":
+            if _should_auto_wecom_oauth_on_front_entry(self):
+                _redirect_wecom_front_entry_login(self, return_path="/")
+                return
             self.serve_static(STATIC_DIR / "index.html")
             return
         if self.path == "/api/quote":
@@ -2485,7 +2521,7 @@ class QuoteHandler(BaseHTTPRequestHandler):
                 return
             parsed_login = urlparse(self.path)
             qs_login = parse_qs(parsed_login.query)
-            state = (qs_login.get("state") or [""])[0].strip() or uuid.uuid4().hex
+            state = sanitize_oauth_return_path((qs_login.get("state") or ["/"])[0])
             try:
                 url = build_oauth_authorize_url(state=state)
             except RuntimeError as exc:
@@ -2536,7 +2572,8 @@ class QuoteHandler(BaseHTTPRequestHandler):
                 )
                 return
             cfg = get_wecom_config()
-            target = cfg.public_base_url if cfg else "/"
+            return_state = sanitize_oauth_return_path((qs_cb.get("state") or ["/"])[0])
+            target = oauth_return_absolute_url(return_state, cfg=cfg)
             logout_headers = [
                 set_sales_session_cookie_header(token),
                 ("Set-Cookie", clear_sales_user_cookie_header_value()),
@@ -3891,6 +3928,8 @@ class QuoteHandler(BaseHTTPRequestHandler):
             has_structured_demand = demand_parse_result is not None or simple_bom_result is not None
             user_text = str(payload.get("user_prompt") or payload.get("prompt") or "").strip()
             text_dimension_quote_done = False
+            photo_quote_done = False
+            vision_tuple = composer_vision_images(payload)
             demand_locked_pf: float | None = None
             if demand_parse_result is not None and demand_parse_result.quote_settings.get("processing_fee_locked"):
                 try:
@@ -3902,6 +3941,105 @@ class QuoteHandler(BaseHTTPRequestHandler):
                 or payload.get("structure_confirmed_by_user")
                 or payload.get("confirm_structure")
             )
+            if (
+                not has_uploaded_sheet
+                and not structure_confirmed
+                and vision_tuple
+            ):
+                if not user_text.strip():
+                    self.write_json(
+                        build_photo_quote_clarify_response(
+                            [
+                                "文字说明（尺寸、数量、材质、里布、拉链、肩带/包装等）",
+                            ],
+                            user_text,
+                        )
+                    )
+                    return
+                if is_photo_quote_candidate(
+                    user_text,
+                    has_uploaded_sheet=has_uploaded_sheet,
+                    vision_count=len(vision_tuple),
+                ):
+                    ready, missing, user_fields = assess_photo_quote_prerequisites(user_text)
+                    if not ready:
+                        self.write_json(build_photo_quote_clarify_response(missing, user_text))
+                        return
+                    draft_items, photo_quote_meta, structure_text, photo_st = run_photo_quote_pipeline(
+                        vision_tuple,
+                        user_text,
+                        user_fields,
+                    )
+                    llm_audit_collector.record_stage(
+                        "photo_quote_vision",
+                        photo_st if isinstance(photo_st, dict) else {},
+                        input_rows=0,
+                        output_rows=len(draft_items),
+                    )
+                    if not draft_items:
+                        self.write_json(
+                            {
+                                "quote_ready": False,
+                                "assistant_message": "图片识别未生成有效物料行，请补充文字说明或上传表格。",
+                                "intent": "photo_quote",
+                                "llm_status": llm_status,
+                            }
+                        )
+                        return
+                    kb0 = self._get_price_kb_safely()
+                    payload["items"] = self._enrich_skeleton_items_with_kb(draft_items, kb0)
+                    payload["items"] = dedupe_composite_overlapping_fabric_rows(
+                        list(payload.get("items") or [])
+                    )
+                    payload["product_name"] = str(
+                        photo_quote_meta.get("product_name") or payload.get("product_name") or "定制包袋"
+                    ).strip() or "定制包袋"
+                    payload["quantities"] = [int(user_fields.get("quantity") or 300)]
+                    payload["product_size"] = user_fields.get("product_size") or {}
+                    payload["product_size_text"] = str(user_fields.get("product_size_text") or "").strip()
+                    payload["structure_text_snapshot"] = structure_text
+                    payload["vision_analysis_text"] = str(photo_quote_meta.get("vision_summary") or "").strip()
+                    payload["photo_quote_flow"] = True
+                    before_demand_items = copy.deepcopy(list(payload.get("items") or []))
+                    merged_items, dem_st = complete_demand_quote(
+                        product={
+                            "name": payload["product_name"],
+                            "type": "",
+                            "size": payload.get("product_size_text") or "",
+                        },
+                        items=payload["items"],
+                        inline_prices=[],
+                        structure_text=structure_text,
+                        user_prompt=user_text,
+                        locked_processing_fee=None,
+                        structure_vision_images=vision_tuple,
+                    )
+                    payload["items"] = preserve_photo_row_source_markers(before_demand_items, merged_items)
+                    llm_audit_collector.record_stage(
+                        "photo_quote_completion",
+                        dem_st if isinstance(dem_st, dict) else {},
+                        input_rows=len(before_demand_items),
+                        output_rows=len(merged_items),
+                        before_items=before_demand_items,
+                        after_items=merged_items,
+                    )
+                    merged_st = dict(llm_status)
+                    if isinstance(dem_st, dict):
+                        merged_st.update({k: v for k, v in dem_st.items() if v not in (None, "")})
+                    llm_status = merged_st
+                    source_counts = summarize_photo_quote_sources(payload["items"])
+                    photo_quote_meta = {**photo_quote_meta, **source_counts}
+                    payload["photo_quote_meta"] = photo_quote_meta
+                    photo_quote_done = True
+                    has_structured_demand = True
+                    sheet_parse_result = {
+                        "file_name": "包款图片询价",
+                        "sheet_name": "",
+                        "row_count": len(merged_items),
+                        "item_count": len(merged_items),
+                        "demand_template": False,
+                        "from_photo_quote": True,
+                    }
             if (
                 not has_uploaded_sheet
                 and not has_structured_demand
@@ -3928,6 +4066,7 @@ class QuoteHandler(BaseHTTPRequestHandler):
             if (
                 not has_uploaded_sheet
                 and not has_structured_demand
+                and not photo_quote_done
                 and is_new_quote_text_priority(user_text)
             ):
                 synth_items, syn_st, p_name, p_size, p_qtys = synthesize_bom_from_new_quote_text(
@@ -4129,6 +4268,8 @@ class QuoteHandler(BaseHTTPRequestHandler):
                 structure_blob = str(demand_parse_result.structure_text or "").strip()
             elif simple_bom_result is not None:
                 structure_blob = str(simple_bom_result.structure_text or "").strip()
+            elif payload.get("photo_quote_flow"):
+                structure_blob = str(payload.get("structure_text_snapshot") or "").strip()
             if structure_blob:
                 rows_st = payload.get("items")
                 if isinstance(rows_st, list):
@@ -4138,6 +4279,8 @@ class QuoteHandler(BaseHTTPRequestHandler):
                 size_for_tighten = demand_parse_result.product_size
             elif simple_bom_result is not None:
                 size_for_tighten = simple_bom_result.product_size
+            elif payload.get("photo_quote_flow") and isinstance(payload.get("product_size"), dict):
+                size_for_tighten = payload.get("product_size")
             if size_for_tighten and isinstance(payload.get("items"), list):
                 tight_meta = tighten_small_bag_usage_amounts(
                     payload["items"],
@@ -4274,13 +4417,21 @@ class QuoteHandler(BaseHTTPRequestHandler):
                     embedding_skip=not embedding_enabled(),
                     **_quote_items_stage_metrics(payload.get("items")),
                 )
-            if has_uploaded_sheet and not structure_confirmed:
+            if (has_uploaded_sheet or payload.get("photo_quote_flow")) and not structure_confirmed:
                 resp = build_structure_confirmation_payload(
                     payload,
                     sheet_parse_result=sheet_parse_result,
                     structure_text=str(payload.get("structure_text_snapshot") or ""),
                     enrichment_report=enrichment_report,
                 )
+                if payload.get("photo_quote_flow"):
+                    resp["intent"] = "PHOTO_QUOTE_CONFIRM"
+                    resp["assistant_message"] = (
+                        "已完成包款图片识别与结构预核对，请先确认物料/用量/单价后再生成正式报价。"
+                    )
+                    resp["title"] = "图片报价 · 结构确认"
+                    if isinstance(payload.get("photo_quote_meta"), dict):
+                        resp["photo_quote_meta"] = payload["photo_quote_meta"]
                 resp["llm_status"] = llm_status
                 resp["llm_audit"] = build_llm_audit(llm_audit_collector, llm_status)
                 if sheet_parse_result is not None:
@@ -4371,6 +4522,17 @@ class QuoteHandler(BaseHTTPRequestHandler):
             response["llm_status"] = llm_status
             response["llm_audit"] = build_llm_audit(llm_audit_collector, llm_status)
             response["missing_data_enrichment"] = enrichment_report
+            if photo_quote_done or payload.get("photo_quote_flow"):
+                meta = summarize_photo_quote_sources(
+                    response.get("detail_rows") or payload.get("items") or []
+                )
+                merged_meta = {**(payload.get("photo_quote_meta") or {}), **meta}
+                response["photo_quote_meta"] = merged_meta
+                notice = build_photo_quote_data_notice(merged_meta)
+                if notice:
+                    existing = str(response.get("data_notice") or "").strip()
+                    response["data_notice"] = f"{existing} {notice}".strip() if existing else notice
+                response["intent"] = "photo_quote"
             if text_dimension_quote_done:
                 response["intent"] = "new_quote_text"
             if isinstance(llm_status, dict):

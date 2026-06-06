@@ -146,6 +146,16 @@ class AdminBomCorrectionStaticTest(unittest.TestCase):
         self.assertIn("bcwCalculatedToolbar", (ROOT / "static" / "admin" / "index.html").read_text(encoding="utf-8"))
         self.assertIn("adminCorrectionProblemTypes", js)
 
+    def test_admin_bom_hides_per_row_ai_estimate_badges(self) -> None:
+        js = (ROOT / "static" / "admin" / "admin.js").read_text(encoding="utf-8")
+        css = (ROOT / "static" / "admin" / "admin.css").read_text(encoding="utf-8")
+        self.assertIn("buildBomAiEstimateSummaryHtml", js)
+        self.assertIn("bom-ai-estimate-detail-only", js)
+        self.assertIn("bom-ai-estimate-detail-only", css)
+        self.assertNotIn("bomRowHasAiEstimate(r, pair.db) ? `${r.name", js)
+        self.assertIn("classifyAnomalies", js)
+        self.assertIn('"AI估算待复核"', js)
+
 
 class AdminBomCorrectionRouteTest(unittest.TestCase):
     def setUp(self) -> None:

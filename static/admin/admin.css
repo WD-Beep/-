@@ -3912,11 +3912,24 @@ tr.row-new-incoming td {
   white-space: nowrap;
 }
 
+.bom-ai-estimate-summary {
+  margin: 0 0 8px;
+  font-size: 0.88rem;
+}
+
 .bom-section-ai-estimate {
   border: 1px solid #fed7aa;
   border-radius: 8px;
   padding: 12px;
   background: #fffaf5;
+}
+
+.bom-ai-estimate-detail-only {
+  display: none;
+}
+
+.ov-show-validate .bom-ai-estimate-detail-only {
+  display: block;
 }
 
 .bom-ai-estimate-lead {

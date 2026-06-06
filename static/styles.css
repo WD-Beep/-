@@ -6246,6 +6246,10 @@ table {
   align-items: center;
 }
 
+.wecom-auth-banner.wecom-auth-hidden {
+  display: none;
+}
+
 .wecom-auth-banner.wecom-auth-warn {
   background: #fff7ed;
   color: #9a3412;

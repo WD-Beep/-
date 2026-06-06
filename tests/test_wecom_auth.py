@@ -75,7 +75,10 @@ from wecom_auth import (
     format_wecom_sales_user_id,
     is_wecom_browser_user_agent,
     is_wecom_sales_user_id,
+    oauth_return_absolute_url,
+    sanitize_oauth_return_path,
     wecom_enabled,
+    wecom_login_entry_path,
 )
 
 
@@ -110,7 +113,11 @@ class WecomAuthUnitTest(unittest.TestCase):
     def test_wecom_disabled_by_default(self) -> None:
         self.assertFalse(wecom_enabled())
 
-    @mock.patch.dict(os.environ, {"WECOM_ENABLED": "1"}, clear=False)
+    @mock.patch.dict(
+        os.environ,
+        {"WECOM_ENABLED": "1", "QUOTE_SALES_SECRET": "", "QUOTE_ADMIN_SECRET": ""},
+        clear=False,
+    )
     def test_wecom_without_secret_cannot_issue_or_verify_session(self) -> None:
         from sales_auth import (
             decode_sales_session_token,
@@ -130,6 +137,23 @@ class WecomAuthUnitTest(unittest.TestCase):
         self.assertTrue(dev_token)
         with mock.patch.dict(os.environ, {"WECOM_ENABLED": "1"}, clear=False):
             self.assertIsNone(decode_sales_session_token(dev_token))
+
+    def test_sanitize_oauth_return_path(self) -> None:
+        self.assertEqual(sanitize_oauth_return_path("/"), "/")
+        self.assertEqual(sanitize_oauth_return_path("//evil"), "/")
+        self.assertEqual(sanitize_oauth_return_path("http://evil/"), "/")
+        self.assertEqual(sanitize_oauth_return_path(""), "/")
+
+    def test_wecom_login_entry_path(self) -> None:
+        self.assertEqual(wecom_login_entry_path(return_path="/"), "/api/auth/wecom/login?state=%2F")
+
+    @mock.patch.dict(os.environ, _WECOM_ENABLED_ENVS, clear=False)
+    def test_oauth_return_absolute_url(self) -> None:
+        from wecom_auth import get_wecom_config
+
+        cfg = get_wecom_config()
+        assert cfg is not None
+        self.assertEqual(oauth_return_absolute_url("/", cfg=cfg), "http://127.0.0.1:8776/")
 
     @mock.patch.dict(os.environ, {"WECOM_ENABLED": "0"}, clear=False)
     def test_local_mode_uses_dev_secret_for_session(self) -> None:
@@ -187,6 +211,64 @@ class WecomAuthHTTPTest(unittest.TestCase):
         except json.JSONDecodeError:
             body = {}
         return resp.status, body if isinstance(body, dict) else {}
+
+    @mock.patch.dict(os.environ, _WECOM_ENABLED_ENVS, clear=False)
+    def test_front_entry_redirects_to_wecom_login_without_cookie(self) -> None:
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=8)
+        conn.request("GET", "/", headers={"User-Agent": WECOM_TEST_UA})
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 302)
+        location = resp.getheader("Location") or ""
+        conn.close()
+        self.assertIn("/api/auth/wecom/login", location)
+        self.assertIn("state=", location)
+
+    @mock.patch.dict(os.environ, _WECOM_ENABLED_ENVS, clear=False)
+    def test_front_entry_serves_html_when_authenticated(self) -> None:
+        cookie = wecom_sales_user_cookie(self.user_a, name="张三")
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=8)
+        conn.request("GET", "/", headers={"User-Agent": WECOM_TEST_UA, "Cookie": cookie})
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 200)
+        self.assertIn(b"<!doctype html>", body[:500].lower())
+
+    @mock.patch.dict(os.environ, _WECOM_ENABLED_ENVS, clear=False)
+    def test_front_entry_skips_redirect_after_oauth_error(self) -> None:
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=8)
+        conn.request(
+            "GET",
+            "/?wecom_auth_error=wecom_oauth_failed&wecom_auth_message=fail",
+            headers={"User-Agent": WECOM_TEST_UA},
+        )
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 200)
+        self.assertIn(b"<!doctype html>", body[:500].lower())
+
+    @mock.patch.dict(os.environ, _WECOM_ENABLED_ENVS, clear=False)
+    def test_wecom_login_redirects_to_oauth(self) -> None:
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=8)
+        conn.request("GET", "/api/auth/wecom/login?state=/", headers={"User-Agent": WECOM_TEST_UA})
+        resp = conn.getresponse()
+        location = resp.getheader("Location") or ""
+        conn.close()
+        self.assertEqual(resp.status, 302)
+        self.assertIn("open.weixin.qq.com/connect/oauth2/authorize", location)
+        self.assertIn("state=%2F", location)
+
+    @mock.patch.dict(os.environ, _WECOM_ENABLED_ENVS, clear=False)
+    def test_auth_status_exposes_login_entry_not_raw_oauth(self) -> None:
+        st, body = self._request("GET", "/api/auth/status")
+        self.assertEqual(st, 200, msg=body)
+        self.assertTrue(body.get("wecom_enabled"))
+        self.assertFalse(body.get("authenticated"))
+        login_url = str(body.get("login_url") or "")
+        self.assertIn("/api/auth/wecom/login", login_url)
+        self.assertNotIn("open.weixin.qq.com", login_url)
+        self.assertTrue(body.get("auto_login"))
 
     @mock.patch.dict(os.environ, _WECOM_ENABLED_ENVS, clear=False)
     def test_wecom_enabled_requires_auth_for_my_quotes(self) -> None:
@@ -258,11 +340,13 @@ class WecomAuthHTTPTest(unittest.TestCase):
     @mock.patch("server.exchange_code_for_profile", return_value=("wecom:OAuthUser", "OAuth用户"))
     def test_wecom_oauth_callback_sets_identity(self, _mock_exchange: mock.Mock) -> None:
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=8)
-        conn.request("GET", "/api/auth/wecom/callback?code=fake-code&state=abc")
+        conn.request("GET", "/api/auth/wecom/callback?code=fake-code&state=/")
         resp = conn.getresponse()
         self.assertEqual(resp.status, 302)
+        location = resp.getheader("Location") or ""
         cookies = [v for (k, v) in resp.getheaders() if k.lower() == "set-cookie"]
         conn.close()
+        self.assertEqual(location, "http://127.0.0.1:8776/")
         joined = " ".join(cookies)
         self.assertIn("aq_sales_sess=", joined)
         self.assertIn("HttpOnly", joined)
@@ -383,6 +467,8 @@ class WecomAuthHTTPTest(unittest.TestCase):
             "WECOM_CORP_SECRET": "secret",
             "WECOM_OAUTH_REDIRECT_URI": "http://127.0.0.1:8776/api/auth/wecom/callback",
             "WECOM_PUBLIC_BASE_URL": "http://127.0.0.1:8776",
+            "QUOTE_SALES_SECRET": "",
+            "QUOTE_ADMIN_SECRET": "",
         },
         clear=False,
     )
