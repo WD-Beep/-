@@ -11,9 +11,11 @@ from sheet_parser import (
     looks_like_material_description_sentence,
     looks_like_valid_unit_price_text,
     normalize_text,
+    parse_piece_count_from_usage,
     quantity_phrase_count,
     should_drop_upload_name,
     split_concatenated_material_name,
+    split_quantity_from_material_name,
 )
 
 RECOGNITION_MATCHED = "matched"
@@ -190,10 +192,44 @@ def classify_material_row(
 
 
 def _usage_from_qty_name(name: str) -> str:
+    _, usage, _ = split_quantity_from_material_name(name)
+    if usage:
+        return usage
     match = MATERIAL_QTY_PHRASE_PATTERN.search(str(name or ""))
     if match:
         return match.group(0).strip()
     return "-"
+
+
+def apply_embedded_quantity_to_row(row: dict[str, Any]) -> dict[str, Any]:
+    """材料名内嵌数量拆到 usage；名称数量优先于错误的 1 个/占位用量。"""
+    if not isinstance(row, dict):
+        return row
+    name = str(row.get("name") or "").strip()
+    if not name:
+        return row
+    clean, qty, src = split_quantity_from_material_name(name)
+    if not src or not clean:
+        return row
+
+    nr = dict(row)
+    nr["name"] = clean
+    nr["_original_name_with_qty"] = name
+    if qty:
+        existing = str(nr.get("usage") or "-").strip()
+        name_count = parse_piece_count_from_usage(qty)
+        exist_count = parse_piece_count_from_usage(existing)
+        should_apply = existing in {"", "-", "—", "个"} or exist_count is None
+        if name_count is not None and exist_count is not None and exist_count != name_count:
+            should_apply = True
+            nr["quantity_corrected_from_name"] = True
+        if should_apply:
+            nr["usage"] = qty
+            nr["quantity_source"] = src
+            nr["usage_ai"] = False
+            nr.pop("amount", None)
+            nr.pop("amount_ai", None)
+    return nr
 
 
 def _apply_cost_flags(row: dict[str, Any], status: str) -> None:
@@ -218,6 +254,7 @@ def apply_material_validity_layer(items: list[dict[str, Any]]) -> list[dict[str,
     for row in items:
         if not isinstance(row, dict):
             continue
+        row = apply_embedded_quantity_to_row(row)
         name = str(row.get("name") or "").strip()
         if not name:
             continue

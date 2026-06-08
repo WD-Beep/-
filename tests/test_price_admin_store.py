@@ -636,6 +636,79 @@ class PriceAdminStoreTest(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_scan_price_data_quality_report_is_readonly(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "data" / f"_tmp_price_scan_{uuid.uuid4().hex[:8]}"
+        root.mkdir(parents=True, exist_ok=True)
+        try:
+            kb_path = root / "price_kb.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "材料询价"
+            ws.append(["材料名称", "规格大小", "单价", "标记", "状态", "备注", "更新时间", "更新人"])
+            ws.append(["普通拉头", "5#", "0.3元/个", "", "active", "", "2026-06-08 10:00:00", "seed"])
+            ws.append(["前片", "19×45", "2元/个", "", "active", "", "2026-06-08 10:00:00", "seed"])
+            wb.save(kb_path)
+            wb.close()
+
+            from price_admin_store import scan_price_data_quality_report
+
+            report = scan_price_data_quality_report(
+                kb_path=kb_path,
+                exception_path=root / "price_exceptions.jsonl",
+                override_path=root / "price_overrides.jsonl",
+                sample_limit=10,
+            )
+            self.assertTrue(report.get("readonly"))
+            self.assertGreaterEqual(report["official_kb"]["garbage_count"], 1)
+            self.assertEqual(kb_path.stat().st_size, kb_path.stat().st_size)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    @patch("price_admin_store.knowledge_reload_hook")
+    @patch("price_admin_store.note_kb_disk_write_success")
+    def test_admin_approve_reruns_quality_check_before_persist(self, _n: object, _r: object) -> None:
+        """修正后入库前再次质量校验：垃圾名不得写入正式库或覆盖层。"""
+        root = Path(__file__).resolve().parents[1] / "data" / f"_tmp_price_approve_q_{uuid.uuid4().hex[:8]}"
+        root.mkdir(parents=True, exist_ok=True)
+        try:
+            kb_path = root / "price_kb.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "材料询价"
+            ws.append(["材料名称", "规格大小", "单价", "标记", "状态", "备注", "更新时间", "更新人"])
+            wb.save(kb_path)
+            wb.close()
+
+            with patch.dict(os.environ, {"PRICE_REVIEW_DATA_DIR": str(root)}):
+                sync_quote_detail_rows_to_price_kb(
+                    {
+                        "quote_ready": True,
+                        "quote_id": "c1d2e3f4-a5b6-7890-abcd-ef1234567890",
+                        "product_name": "斜挎包",
+                        "detail_rows": [{"name": "NEW_BUCKLE_Q", "spec": "777", "unit_price": "-"}],
+                    },
+                    kb_path=kb_path,
+                    history_path=root / "history.jsonl",
+                    exception_path=root / "price_exceptions.jsonl",
+                )
+                pending_rows, _ = list_price_exceptions(
+                    page=1, page_size=5, exception_path=root / "price_exceptions.jsonl"
+                )
+                exc_id = str(pending_rows[0]["exception_id"])
+                with self.assertRaises(ValueError) as ctx:
+                    approve_price_exception(
+                        exc_id,
+                        {"name": "前片", "spec": "-", "price": "2元/个", "updated_by": "admin"},
+                        kb_path=kb_path,
+                        history_path=root / "history.jsonl",
+                        exception_path=root / "price_exceptions.jsonl",
+                    )
+                self.assertIn("质量校验", str(ctx.exception))
+                items, total = list_price_entries(page=1, page_size=10, kb_path=kb_path)
+                self.assertEqual(total, 0)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

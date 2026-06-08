@@ -17,6 +17,7 @@ from kb_data_quality import (
     KbDataQualityVerdict,
     classify_exception_review_hint,
     format_exception_reason_label,
+    validate_price_override_target,
     judge_kb_insert_candidate,
 )
 from core.knowledge_reload import KNOWLEDGE_MUTATION_LOCK, knowledge_reload_hook
@@ -31,6 +32,7 @@ from price_kb_paths import (
     is_official_kb_path,
     official_kb_path,
     auto_learn_log_path,
+    price_overrides_path,
     quote_sync_suggestions_path,
 )
 from price_kb_pollution import (
@@ -39,6 +41,13 @@ from price_kb_pollution import (
     is_test_quote_sync_context,
 )
 from price_learn_candidate import (
+    AUTO_CONFLICT_MARKER,
+    AUTO_PENDING_MARKER,
+    AUTO_SYNC_MARKER,
+    EXCEPTION_STATUS_EXCLUDED,
+    EXCEPTION_STATUS_OPEN,
+    EXCEPTION_STATUS_RESOLVED,
+    PENDING_REVIEW_STATUSES,
     QUEUE_PENDING_AUTO_LEARN,
     QUEUE_PRICE_EXCEPTIONS,
     QUEUE_QUOTE_SYNC_SUGGESTIONS,
@@ -47,7 +56,9 @@ from price_learn_candidate import (
     STATUS_REJECTED,
     build_learn_candidate,
     candidate_dedupe_key,
+    is_open_exception_status,
     is_pending_candidate,
+    is_quote_blocking_learn_candidate,
     normalize_learn_candidate,
     pending_auto_row_to_candidate,
     suggestion_row_to_candidate,
@@ -156,7 +167,7 @@ def load_unified_learn_candidates(*, exception_path: Path | None = None) -> list
     if exception_path is None:
         for raw in _read_jsonl_objects(quote_sync_suggestions_path()):
             st = str(raw.get("status") or "pending_review").strip().lower()
-            if st not in {"pending_review", "open", "pending", ""}:
+            if st not in PENDING_REVIEW_STATUSES:
                 continue
             _put(suggestion_row_to_candidate(raw))
 
@@ -252,7 +263,7 @@ def _note_candidate_approve_failure(
         item["last_approve_error"] = str(message or "").strip()
         item["updated_at"] = now
         item["status"] = STATUS_PENDING
-        item["exception_status"] = "open"
+        item["exception_status"] = EXCEPTION_STATUS_OPEN
     _write_exception_entries(entries, path)
 
 
@@ -273,6 +284,159 @@ def _archive_resolved_candidate(resolved: dict[str, Any], *, exception_path: Pat
     if not replaced:
         existing.append(normalized)
     _write_exception_entries(existing, path)
+
+
+_ACTIVE_OVERRIDE_STATUSES = frozenset({"active", "approved", "resolved"})
+
+
+def _override_target(override_path: Path | None = None) -> Path:
+    return (override_path or price_overrides_path()).resolve()
+
+
+def _read_price_override_entries(path: Path | None = None) -> list[dict[str, Any]]:
+    target = _override_target(path)
+    return _read_jsonl_objects(target)
+
+
+def _write_price_override_entries(rows: list[dict[str, Any]], path: Path | None = None) -> None:
+    _write_jsonl_objects(_override_target(path), rows)
+
+
+def _normalize_override_row(row: dict[str, Any]) -> dict[str, Any]:
+    name = str(row.get("material_name") or row.get("name") or "").strip()
+    spec = str(row.get("spec") or "-").strip() or "-"
+    price = str(row.get("price") or row.get("new_price") or "").strip()
+    status = str(row.get("status") or "active").strip().lower()
+    return {
+        **row,
+        "override_id": str(row.get("override_id") or row.get("candidate_id") or uuid.uuid4().hex),
+        "material_name": name,
+        "name": name,
+        "spec": spec,
+        "price": price,
+        "status": status,
+        "match_name_key": _norm_key(name),
+        "match_spec_key": _norm_key(spec) or "-",
+    }
+
+
+def upsert_confirmed_price_override(
+    *,
+    material_name: str,
+    spec: str,
+    price: str,
+    operator: str = "admin",
+    source_type: str = "admin_correction",
+    candidate_id: str = "",
+    note: str = "",
+    override_path: Path | None = None,
+) -> dict[str, Any]:
+    """写入/更新已确认价格覆盖层（仅 quality 校验通过后调用）。"""
+    name = str(material_name or "").strip()
+    spec_text = str(spec or "-").strip() or "-"
+    price_text = str(price or "").strip()
+    if not name:
+        raise ValueError("材料名称不能为空。")
+    if not _has_usable_price(price_text):
+        raise ValueError("覆盖单价无效。")
+
+    quality = judge_kb_insert_candidate(name, spec_text, price_text)
+    if quality.action == KB_ACTION_DROP:
+        raise ValueError(f"价格质量校验未通过：{quality.reason}")
+    if quality.action == KB_ACTION_REVIEW:
+        raise ValueError(f"价格质量校验未通过：{quality.reason}")
+
+    ok, reason = validate_price_override_target(name, name, target_spec=spec_text, override_spec=spec_text)
+    if not ok:
+        raise ValueError(f"覆盖层校验未通过：{reason}")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    key = (_norm_key(name), _norm_key(spec_text) or "-")
+    entries = [_normalize_override_row(x) for x in _read_price_override_entries(override_path)]
+    saved: dict[str, Any] | None = None
+    for item in entries:
+        if (item.get("match_name_key"), item.get("match_spec_key")) != key:
+            continue
+        item.update(
+            {
+                "material_name": name,
+                "name": name,
+                "spec": spec_text,
+                "price": price_text,
+                "status": "active",
+                "quality_tier": quality.tier,
+                "source_type": source_type,
+                "candidate_id": candidate_id or item.get("candidate_id") or "",
+                "updated_by": operator,
+                "updated_at": now,
+                "note": note,
+            }
+        )
+        saved = item
+        break
+    if saved is None:
+        saved = _normalize_override_row(
+            {
+                "override_id": uuid.uuid4().hex,
+                "material_name": name,
+                "spec": spec_text,
+                "price": price_text,
+                "status": "active",
+                "quality_tier": quality.tier,
+                "source_type": source_type,
+                "candidate_id": candidate_id,
+                "updated_by": operator,
+                "updated_at": now,
+                "created_at": now,
+                "note": note,
+            }
+        )
+        entries.append(saved)
+    _write_price_override_entries(entries, override_path)
+    return saved
+
+
+def lookup_confirmed_price_override(
+    material_name: str,
+    spec: str = "-",
+    *,
+    override_path: Path | None = None,
+) -> dict[str, Any] | None:
+    """读取已确认覆盖层；pending/open 候选不在此层。"""
+    name_key = _norm_key(material_name)
+    spec_key = _norm_key(spec) or "-"
+    if not name_key:
+        return None
+    for item in reversed(_read_price_override_entries(override_path)):
+        row = _normalize_override_row(item)
+        status = str(row.get("status") or "").strip().lower()
+        if status not in _ACTIVE_OVERRIDE_STATUSES:
+            continue
+        if row.get("match_name_key") != name_key:
+            continue
+        if row.get("match_spec_key") not in {spec_key, "-", ""} and spec_key not in {"", "-"}:
+            if row.get("match_spec_key") != spec_key:
+                continue
+        price = str(row.get("price") or "").strip()
+        if not _has_usable_price(price):
+            continue
+        quality = judge_kb_insert_candidate(
+            str(row.get("material_name") or material_name),
+            str(row.get("spec") or spec),
+            price,
+        )
+        if quality.action != KB_ACTION_AUTO:
+            continue
+        ok, _ = validate_price_override_target(
+            str(row.get("material_name") or material_name),
+            material_name,
+            target_spec=spec,
+            override_spec=str(row.get("spec") or spec),
+        )
+        if not ok:
+            continue
+        return row
+    return None
 
 
 def _count_auto_learn_log_entries() -> int:
@@ -357,9 +521,6 @@ def _preserve_kb_price_text(
 ACTIVE_STATUSES = {"active", "启用", "有效", "正常", "使用中", ""}
 INACTIVE_STATUSES = {"inactive", "停用", "disabled", "禁用"}
 PENDING_STATUSES = {"pending", "待补充", "待补价", "待确认"}
-AUTO_SYNC_MARKER = "AUTO_QUOTE_SYNC"
-AUTO_PENDING_MARKER = "AUTO_PENDING_PRICE"
-AUTO_CONFLICT_MARKER = "AUTO_PRICE_CONFLICT"
 DEFAULT_HEADERS = ["材料名称", "规格大小", "单价", "标记", "状态", "备注", "更新时间", "更新人"]
 
 
@@ -450,9 +611,9 @@ def price_exception_stats(exception_path: Path | None = None) -> dict[str, Any]:
     entries, hidden_test = filter_visible_exceptions(
         load_unified_learn_candidates(exception_path=exception_path)
     )
-    open_items = [x for x in entries if str(x.get("exception_status") or "open") == "open"]
-    resolved = [x for x in entries if str(x.get("exception_status") or "") == "resolved"]
-    excluded = [x for x in entries if str(x.get("exception_status") or "") == "excluded"]
+    open_items = [x for x in entries if is_open_exception_status(x.get("exception_status"))]
+    resolved = [x for x in entries if str(x.get("exception_status") or "") == EXCEPTION_STATUS_RESOLVED]
+    excluded = [x for x in entries if str(x.get("exception_status") or "") == EXCEPTION_STATUS_EXCLUDED]
     fixable = [x for x in open_items if str(x.get("review_hint") or "") == "fixable"]
     exclude_suggest = [x for x in open_items if str(x.get("review_hint") or "") == "exclude_suggest"]
     legacy_sugg = sum(
@@ -480,6 +641,136 @@ def price_exception_stats(exception_path: Path | None = None) -> dict[str, Any]:
         "quote_sync_suggestions_pending": legacy_sugg,
         "pending_auto_learn_pending": legacy_pending,
     }
+
+
+def scan_price_data_quality_report(
+    *,
+    kb_path: Path | None = None,
+    exception_path: Path | None = None,
+    override_path: Path | None = None,
+    sample_limit: int = 30,
+) -> dict[str, Any]:
+    """只读扫描正式库 / 覆盖层 / 待审核队列中的可疑脏数据。不修改、不删除任何记录。"""
+    from kb_data_quality import (
+        KB_ACTION_DROP,
+        KB_ACTION_REVIEW,
+        is_accessory_price_outlier,
+        is_special_fee_material_name,
+        judge_kb_insert_candidate,
+    )
+
+    limit = max(1, min(int(sample_limit), 200))
+    report: dict[str, Any] = {
+        "readonly": True,
+        "official_kb": {
+            "total_scanned": 0,
+            "suspicious_count": 0,
+            "garbage_count": 0,
+            "samples": {"suspicious": [], "garbage": []},
+        },
+        "override_layer": {
+            "total_scanned": 0,
+            "invalid_count": 0,
+            "samples": [],
+        },
+        "pending_queue": {
+            "open_count": 0,
+            "quote_blocking_count": 0,
+            "marker_counts": {},
+            "suspicious_samples": [],
+        },
+    }
+
+    kb_target = _kb_target(kb_path)
+    if kb_target.is_file():
+        items, _total = list_price_entries(page=1, page_size=100000, kb_path=kb_target)
+        report["official_kb"]["total_scanned"] = len(items)
+        for row in items:
+            name = str(row.get("name") or "").strip()
+            spec = str(row.get("spec") or "-").strip() or "-"
+            price = str(row.get("price") or "").strip()
+            verdict = judge_kb_insert_candidate(name, spec, price, kb_hit=True)
+            sample = {"name": name, "spec": spec, "price": price, "reason": verdict.reason}
+            if verdict.action == KB_ACTION_DROP:
+                report["official_kb"]["garbage_count"] += 1
+                if len(report["official_kb"]["samples"]["garbage"]) < limit:
+                    report["official_kb"]["samples"]["garbage"].append(sample)
+            elif verdict.action == KB_ACTION_REVIEW or is_accessory_price_outlier(name, price):
+                report["official_kb"]["suspicious_count"] += 1
+                if len(report["official_kb"]["samples"]["suspicious"]) < limit:
+                    report["official_kb"]["samples"]["suspicious"].append(sample)
+
+    override_rows = _read_price_override_entries(override_path)
+    report["override_layer"]["total_scanned"] = len(override_rows)
+    for raw in override_rows:
+        row = _normalize_override_row(raw)
+        name = str(row.get("material_name") or "").strip()
+        spec = str(row.get("spec") or "-").strip() or "-"
+        price = str(row.get("price") or "").strip()
+        verdict = judge_kb_insert_candidate(name, spec, price)
+        status = str(row.get("status") or "").strip().lower()
+        invalid = (
+            status not in _ACTIVE_OVERRIDE_STATUSES
+            or verdict.action != KB_ACTION_AUTO
+        )
+        if invalid:
+            report["override_layer"]["invalid_count"] += 1
+            if len(report["override_layer"]["samples"]) < limit:
+                report["override_layer"]["samples"].append(
+                    {
+                        "name": name,
+                        "spec": spec,
+                        "price": price,
+                        "status": status,
+                        "reason": verdict.reason,
+                    }
+                )
+
+    candidates = load_unified_learn_candidates(exception_path=exception_path)
+    marker_counts: dict[str, int] = {}
+    open_items: list[dict[str, Any]] = []
+    for row in candidates:
+        if is_open_exception_status(row.get("exception_status")):
+            open_items.append(row)
+        marker = str(row.get("marker") or "(none)")
+        marker_counts[marker] = marker_counts.get(marker, 0) + 1
+
+    report["pending_queue"]["open_count"] = len(open_items)
+    report["pending_queue"]["quote_blocking_count"] = sum(
+        1 for row in candidates if is_quote_blocking_learn_candidate(row)
+    )
+    report["pending_queue"]["marker_counts"] = marker_counts
+
+    for row in open_items:
+        name = str(row.get("material_name") or row.get("name") or "").strip()
+        spec = str(row.get("spec") or "-").strip() or "-"
+        price = str(row.get("new_price") or row.get("price") or "").strip()
+        verdict = judge_kb_insert_candidate(name, spec, price, row=row)
+        suspicious = (
+            verdict.action != KB_ACTION_AUTO
+            or is_accessory_price_outlier(name, price)
+            or is_special_fee_material_name(name)
+        )
+        if suspicious and len(report["pending_queue"]["suspicious_samples"]) < limit:
+            report["pending_queue"]["suspicious_samples"].append(
+                {
+                    "candidate_id": str(row.get("candidate_id") or row.get("exception_id") or ""),
+                    "name": name,
+                    "spec": spec,
+                    "price": price,
+                    "marker": str(row.get("marker") or ""),
+                    "reason": verdict.reason,
+                    "quote_blocking": is_quote_blocking_learn_candidate(row),
+                }
+            )
+
+    report["summary"] = {
+        "official_kb_issues": report["official_kb"]["suspicious_count"] + report["official_kb"]["garbage_count"],
+        "override_invalid": report["override_layer"]["invalid_count"],
+        "pending_open": report["pending_queue"]["open_count"],
+        "pending_quote_blocking": report["pending_queue"]["quote_blocking_count"],
+    }
+    return report
 
 
 def list_price_exceptions(
@@ -510,9 +801,9 @@ def list_price_exceptions(
                 ]
             ).lower()
         ]
-    sf = str(status or "open").strip().lower()
-    if sf in {"open", "resolved", "excluded"}:
-        entries = [x for x in entries if str(x.get("exception_status") or "open") == sf]
+    sf = str(status or EXCEPTION_STATUS_OPEN).strip().lower()
+    if sf in {EXCEPTION_STATUS_OPEN, EXCEPTION_STATUS_RESOLVED, EXCEPTION_STATUS_EXCLUDED}:
+        entries = [x for x in entries if str(x.get("exception_status") or EXCEPTION_STATUS_OPEN) == sf]
     entries.sort(
         key=lambda x: (str(x.get("updated_at") or ""), str(x.get("candidate_id") or x.get("exception_id") or "")),
         reverse=True,
@@ -554,9 +845,21 @@ def approve_price_exception(
     if not new_price:
         raise ValueError("审核入库前请先补齐单价。")
 
+    # 修正后入库：再次执行质量校验，不通过则拒绝落盘（正式库 + 覆盖层均不写）
     quality = judge_kb_insert_candidate(name, spec, new_price)
     if quality.action == KB_ACTION_DROP:
         raise ValueError(f"价格质量校验未通过：{quality.reason}")
+    if quality.action == KB_ACTION_REVIEW:
+        raise ValueError(f"价格质量校验未通过：{quality.reason}")
+
+    ok, mismatch_reason = validate_price_override_target(
+        name,
+        name,
+        target_spec=spec,
+        override_spec=spec,
+    )
+    if not ok:
+        raise ValueError(f"价格质量校验未通过：{mismatch_reason}")
 
     kb_target = _kb_target(kb_path)
     conflict_price = _kb_name_spec_conflict_price(name, spec, new_price, kb_path=kb_target)
@@ -585,6 +888,16 @@ def approve_price_exception(
         )
     except Exception:
         raise
+
+    override_entry = upsert_confirmed_price_override(
+        material_name=name,
+        spec=spec,
+        price=new_price,
+        operator=operator,
+        source_type=str(merged.get("source_type") or "admin_correction"),
+        candidate_id=eid,
+        note=str(merged.get("note") or "").strip(),
+    )
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     _append_history(
@@ -624,6 +937,7 @@ def approve_price_exception(
     resolved["resolved_at"] = now
     resolved["resolved_by"] = operator
     resolved["approved_entry"] = result.get("entry")
+    resolved["approved_override"] = override_entry
     resolved["last_approve_error"] = ""
 
     queue = str(target_norm.get("queue_source") or QUEUE_PRICE_EXCEPTIONS)
@@ -716,7 +1030,7 @@ def exclude_price_exception(
     target = next((x for x in entries if str(x.get("exception_id") or "") == eid), None)
     if target is None:
         raise ValueError("异常数据不存在，请刷新后重试。")
-    if str(target.get("exception_status") or "open") != "open":
+    if str(target.get("exception_status") or EXCEPTION_STATUS_OPEN) != EXCEPTION_STATUS_OPEN:
         norm = normalize_learn_candidate(target)
         if str(norm.get("status") or STATUS_PENDING) != STATUS_PENDING:
             raise ValueError("这条异常数据已经处理过。")
@@ -1954,7 +2268,12 @@ def sync_quote_detail_rows_to_price_kb(
 
             same_key_rows = by_key.get(key, [])
             has_price = _has_usable_price(price)
-            force_review = quality.action == KB_ACTION_REVIEW or row_price_needs_review
+            force_review = (
+                quality.action == KB_ACTION_REVIEW
+                or row_price_needs_review
+                or bool(row.get("price_conflict_required"))
+            )
+            row_price_source = str(row.get("price_source") or "").strip()
             if same_key_rows:
                 if has_price and price_key:
                     existing_prices = {
@@ -2018,6 +2337,28 @@ def sync_quote_detail_rows_to_price_kb(
                 exceptions_to_save.append(payload)
                 summary["pending"] += 1
             elif has_price and quality.action == KB_ACTION_AUTO:
+                if row_price_source in {"sheet", "manual"}:
+                    note = (
+                        f"报价使用业务填写单价，需人工确认后入库。"
+                        f"报价ID：{quote_id}；产品：{product_name}"
+                    )
+                    payload = _build_exception_payload(
+                        name=name,
+                        spec=spec,
+                        price=price,
+                        marker=AUTO_PENDING_MARKER,
+                        updated_by=updated_by,
+                        note=note,
+                        quality=quality,
+                        source_quote_id=quote_id,
+                        product_name=product_name,
+                        source_type="sheet_price",
+                        quote_version_id=quote_version_id,
+                        row=row,
+                    )
+                    exceptions_to_save.append(payload)
+                    summary["pending"] += 1
+                    continue
                 note = (
                     f"报价发现新材料，需人工确认后入库。"
                     f"报价ID：{quote_id}；产品：{product_name}"
@@ -2223,6 +2564,11 @@ def _kb_material_name_from_quote_name(value: object) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
+    from sheet_parser import split_quantity_from_material_name
+
+    clean, _, _ = split_quantity_from_material_name(text)
+    if clean:
+        text = clean
     text = _ROLE_SUFFIX_RE.sub("", text).strip()
     text = re.sub(r"[\(\uff08]\s*$", "", text).strip()
     if not text or text in _ROLE_ONLY_MATERIAL_NAMES:

@@ -50,6 +50,11 @@ def auto_learn_log_path() -> Path:
     return review_data_dir() / "quote_auto_learn_log.jsonl"
 
 
+def price_overrides_path() -> Path:
+    """管理员确认过的合格新价覆盖层（优先于正式 KB，低于本次业务价）。"""
+    return review_data_dir() / "price_overrides.jsonl"
+
+
 def is_official_kb_path(path: Path | str | None) -> bool:
     if not path:
         return False

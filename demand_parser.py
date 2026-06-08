@@ -28,12 +28,16 @@ from sheet_parser import (
     SheetParseError,
     detect_section_marker,
     normalize_rows,
+    parse_piece_count_from_usage,
     parse_rows_from_bytes,
     parse_sheet_xml_rows,
     parse_xls_all_sheets_normalized,
     read_sheet_entries,
     read_shared_strings,
     row_get,
+    row_is_quantity_tier_header,
+    row_looks_like_horizontal_param_header,
+    split_quantity_from_material_name,
 )
 
 
@@ -60,6 +64,12 @@ SECTION_C_ROLE_MAP: dict[str, str] = {
     "织带1": "织带",
     "织带2": "织带",
     "绳带": "绳带",
+    "拉片": "拉片",
+    "拉片类型": "拉片",
+    "内部网袋": "辅料",
+    "内里网袋": "辅料",
+    "盖内网袋": "辅料",
+    "内袋": "辅料",
 }
 
 # Headers in section C that are descriptive (color, length, level …) but do
@@ -154,6 +164,7 @@ class Material:
     quoted_usage: str = ""
     calc_method: str = ""
     sheet_amount_unit: str = ""
+    quantity_source: str = ""
 
 
 @dataclass
@@ -178,6 +189,8 @@ class DemandParseResult:
     raw_row_count: int = 0
     # 与同工作簿内「物料展开/BOM」等辅 sheet（简单 BOM 版式）合并后记录名称，便于对账。
     auxiliary_bom_sheet_names: tuple[str, ...] = ()
+    embedded_image_count: int = 0
+    structure_gap_hints: list[dict[str, Any]] = field(default_factory=list)
     # (mime, base64 无 data: 前缀)，仅供 Kimi 多模态；勿写入 to_dict。
     structure_vision_images: tuple[tuple[str, str], ...] = field(default_factory=tuple, repr=False)
 
@@ -201,6 +214,8 @@ class DemandParseResult:
             "gross_margin_by_quantity": {str(k): v for k, v in self.gross_margin_by_quantity.items()},
             "raw_row_count": self.raw_row_count,
             "auxiliary_bom_sheet_names": list(self.auxiliary_bom_sheet_names),
+            "embedded_image_count": self.embedded_image_count,
+            "structure_gap_hints": self.structure_gap_hints,
         }
 
 
@@ -250,7 +265,7 @@ def parse_demand_from_rows(
             structure_inline_materials,
             sections.get("C", {}),
         )
-    quantities = _extract_quantities(sections.get("F", {}))
+    quantities = _extract_quantities(sections.get("F", {}), rows=rows)
     reference_prices = _extract_reference_prices(rows) + _extract_sheet_material_subtotal_anchors(
         rows
     )
@@ -297,6 +312,21 @@ def parse_demand_from_rows(
                 pass
     gross_margin_by_quantity.update(_extract_tier_margins_from_section_f(sections.get("F", {})))
 
+    structure_gap_hints: list[dict[str, Any]] = []
+    if is_demand_template and structure_text.strip():
+        try:
+            from structure_gap_hints import build_structure_gap_hints
+
+            structure_gap_hints = build_structure_gap_hints(
+                structure_text,
+                [vars(m) for m in materials],
+                demand_template=True,
+            )
+        except Exception:
+            structure_gap_hints = []
+
+    _normalize_materials_embedded_quantity(materials)
+
     return DemandParseResult(
         file_name=file_name,
         sheet_name=sheet_name,
@@ -316,6 +346,8 @@ def parse_demand_from_rows(
         gross_margin_by_quantity=gross_margin_by_quantity,
         raw_row_count=len(rows),
         auxiliary_bom_sheet_names=(),
+        embedded_image_count=0,
+        structure_gap_hints=structure_gap_hints,
     )
 
 
@@ -382,14 +414,19 @@ def parse_demand_from_payload(payload: dict[str, Any]) -> DemandParseResult:
         names_all.extend(merged_aux_names)
     if names_all:
         merged.auxiliary_bom_sheet_names = tuple(names_all)
+    _normalize_materials_embedded_quantity(merged.materials)
     if suffix == "xlsx":
-        from xlsx_rich_context import augment_demand_structure_from_xlsx_bytes
+        from xlsx_rich_context import augment_demand_structure_from_xlsx_bytes, list_embedded_images_from_xlsx_bytes
 
         merged.structure_text, merged.structure_vision_images = augment_demand_structure_from_xlsx_bytes(
             file_bytes,
             merged.structure_text,
             priority_sheet_name=sheet_name,
         )
+        try:
+            merged.embedded_image_count = len(list_embedded_images_from_xlsx_bytes(file_bytes))
+        except Exception:
+            merged.embedded_image_count = 0
     return merged
 
 
@@ -449,7 +486,7 @@ def _count_titled_section_markers(rows: list[list[str]]) -> int:
     detect_section_marker also returns; those should not count here.
     """
     import re as _re
-    title_pattern = _re.compile(r"^\s*([A-Fa-f])\s*[\.．、:：]\s*\S+")
+    title_pattern = _re.compile(r"^\s*([A-Ga-g])\s*[\.．、:：]\s*\S+")
     seen: set[str] = set()
     for row in rows[:60]:
         first = row_get(row, 0).strip()
@@ -461,10 +498,8 @@ def _count_titled_section_markers(rows: list[list[str]]) -> int:
 def _extract_sections(rows: list[list[str]]) -> dict[str, dict[str, str]]:
     """Walk rows, locate each "X. ..." marker, then read header+value pairs.
 
-    Within a section, every row that has at least one non-empty cell in
-    column 0 is treated as a header row; the next row that has any non-empty
-    cell is treated as the value row. We zip headers to values column-by-
-    column.
+    Within a section, support horizontal blocks of「表头行 + 多条值行」；同一列
+    多行取值用分号合并，空值不覆盖已有值。
     """
     sections: dict[str, dict[str, str]] = {}
     cursor = 0
@@ -479,9 +514,72 @@ def _extract_sections(rows: list[list[str]]) -> dict[str, dict[str, str]]:
             continue
         next_marker_index = _find_next_section_index(rows, cursor + 1)
         section_rows = rows[cursor + 1 : next_marker_index]
-        sections[letter] = _zip_headers_to_values(section_rows)
+        merged = _zip_headers_to_values(section_rows)
+        if merged:
+            bucket = sections.setdefault(letter, {})
+            for key, value in merged.items():
+                if not value:
+                    continue
+                prev = str(bucket.get(key) or "").strip()
+                if prev and prev != value:
+                    if value not in prev.split(";"):
+                        bucket[key] = f"{prev}; {value}"
+                elif not prev:
+                    bucket[key] = value
         cursor = next_marker_index
+    _merge_implicit_quantity_section(sections, rows)
     return sections
+
+
+def _merge_implicit_quantity_section(sections: dict[str, dict[str, str]], rows: list[list[str]]) -> None:
+    """无 F. 标题时，从「数量1/数量2… + 下一行数值」补全 F 区。"""
+    implicit = _extract_implicit_quantity_section(rows)
+    if not implicit:
+        return
+    bucket = sections.setdefault("F", {})
+    for key, value in implicit.items():
+        if not value:
+            continue
+        prev = str(bucket.get(key) or "").strip()
+        if prev:
+            continue
+        bucket[key] = value
+
+
+def _extract_implicit_quantity_section(rows: list[list[str]]) -> dict[str, str]:
+    for idx, row in enumerate(rows):
+        if not row_is_quantity_tier_header(row):
+            continue
+        value_idx = _next_nonempty_row_index(rows, idx + 1)
+        if value_idx is None:
+            continue
+        value_row = rows[value_idx]
+        if row_is_quantity_tier_header(value_row) or detect_section_marker(value_row) is not None:
+            continue
+        zipped = _zip_single_header_value_row(row, value_row)
+        if zipped:
+            return zipped
+    return {}
+
+
+def _next_nonempty_row_index(rows: list[list[str]], start: int) -> int | None:
+    for idx in range(start, len(rows)):
+        if _row_has_content(rows[idx]):
+            return idx
+    return None
+
+
+def _zip_single_header_value_row(header_row: list[str], value_row: list[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for idx, header in enumerate(header_row):
+        key = _normalise_key(header)
+        if not key:
+            continue
+        value = row_get(value_row, idx).strip()
+        if not value or _is_excel_error_value(value):
+            continue
+        result[key] = value
+    return result
 
 
 def _find_next_section_index(rows: list[list[str]], start: int) -> int:
@@ -492,37 +590,209 @@ def _find_next_section_index(rows: list[list[str]], start: int) -> int:
 
 
 def _zip_headers_to_values(section_rows: list[list[str]]) -> dict[str, str]:
-    """Pair the first non-empty row (treated as headers) with the next
-    non-empty row (treated as values), zipped column-by-column."""
-    header_row: list[str] | None = None
-    value_row: list[str] | None = None
-    for row in section_rows:
-        if not _row_has_content(row):
-            continue
-        if header_row is None:
-            header_row = row
-            continue
-        value_row = row
-        break
-
-    if header_row is None or value_row is None:
-        return {}
-
+    """Pair horizontal header row(s) with one or more value rows, column-by-column."""
     result: dict[str, str] = {}
-    for idx, header in enumerate(header_row):
-        key = _normalise_key(header)
-        if not key:
-            continue
-        value = row_get(value_row, idx).strip()
-        if not value:
-            continue
-        if key in result and result[key]:
-            # Same key appearing twice (e.g. "织带1" / "织带2" both normalise
-            # to "织带") — keep both joined.
-            result[key] = f"{result[key]}; {value}"
-        else:
-            result[key] = value
+    for header_row, value_rows in _split_section_header_value_blocks(section_rows):
+        for idx, header in enumerate(header_row):
+            key = _normalise_key(header)
+            if not key:
+                continue
+            collected: list[str] = []
+            for value_row in value_rows:
+                value = row_get(value_row, idx).strip()
+                if not value or _is_excel_error_value(value):
+                    continue
+                collected.append(value)
+            if not collected:
+                continue
+            merged_val = "; ".join(collected)
+            prev = str(result.get(key) or "").strip()
+            if prev:
+                parts = [p.strip() for p in prev.split(";") if p.strip()]
+                for piece in collected:
+                    if piece not in parts:
+                        parts.append(piece)
+                result[key] = "; ".join(parts)
+            else:
+                result[key] = merged_val
     return result
+
+
+def _split_section_header_value_blocks(
+    section_rows: list[list[str]],
+) -> list[tuple[list[str], list[list[str]]]]:
+    blocks: list[tuple[list[str], list[list[str]]]] = []
+    idx = 0
+    while idx < len(section_rows):
+        row = section_rows[idx]
+        if not _row_has_content(row):
+            idx += 1
+            continue
+        if not _row_looks_like_section_header_row(row, section_rows, idx):
+            idx += 1
+            continue
+        header_row = row
+        idx += 1
+        value_rows: list[list[str]] = []
+        while idx < len(section_rows):
+            candidate = section_rows[idx]
+            if not _row_has_content(candidate):
+                idx += 1
+                continue
+            if _row_looks_like_section_header_row(candidate, section_rows, idx):
+                break
+            if detect_section_marker(candidate) is not None:
+                break
+            if row_is_quantity_tier_header(candidate):
+                break
+            value_rows.append(candidate)
+            idx += 1
+        if value_rows:
+            blocks.append((header_row, value_rows))
+    return blocks
+
+
+def _row_looks_like_section_header_row(
+    row: list[str],
+    section_rows: list[list[str]],
+    row_index: int,
+) -> bool:
+    if detect_section_marker(row) is not None or row_is_quantity_tier_header(row):
+        return False
+    if not _row_is_header_label_row(row):
+        return False
+    nxt = _next_nonempty_row_index(section_rows, row_index + 1)
+    if nxt is None:
+        return False
+    next_row = section_rows[nxt]
+    if detect_section_marker(next_row) is not None or row_is_quantity_tier_header(next_row):
+        return False
+    return _row_is_data_value_row(next_row) or not _row_is_header_label_row(next_row)
+
+
+def _looks_like_demand_data_value(text: str) -> bool:
+    """需求表「值行」特征：含规格/数量/单价等，而非列标题。"""
+    raw = str(text or "").strip()
+    if not raw or _is_excel_error_value(raw):
+        return False
+    if re.search(
+        r"\d+\s*[DdTt]|#\d|\d+(?:\.\d+)?\s*(?:mm|cm)|\d+(?:\.\d+)?\s*码|/\s*码|\*\s*\d|\*\d",
+        raw,
+        re.I,
+    ):
+        return True
+    if re.fullmatch(r"\d+(?:\.\d+)?", raw):
+        return True
+    if any(sep in raw for sep in ("，", ",", "；", ";", "+", "、", "＋")) and len(raw) > 5:
+        return True
+    if len(raw) >= 8 and any(k in raw for k in ("防水", "PU", "PEVA", "EPE", "尼龙", "涤纶", "牛津", "织带", "DCH", "DCF")):
+        return True
+    return False
+
+
+def _looks_like_demand_header_label(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw or len(raw) > 48:
+        return False
+    if _looks_like_demand_data_value(raw):
+        return False
+    if detect_section_marker([raw]) is not None:
+        return False
+    if row_is_quantity_tier_header([raw]):
+        return False
+    key = _normalise_key(raw)
+    if not key:
+        return False
+    if key in SECTION_C_NON_MATERIAL_HEADERS or key in SECTION_C_ROLE_MAP:
+        return True
+    header_suffixes = (
+        "类型",
+        "等级",
+        "颜色",
+        "编码",
+        "标准名",
+        "长度",
+        "说明",
+        "方式",
+        "备注",
+        "选",
+        "分摊",
+        "费用",
+        "是否",
+        "装箱",
+        "外箱",
+        "包装",
+        "数量",
+        "利润率",
+        "毛利率",
+        "复杂",
+        "模具",
+        "刀模",
+        "注塑",
+        "注塑",
+        "摊",
+    )
+    if any(s in raw for s in header_suffixes):
+        return True
+    bare_roles = (
+        "外料",
+        "里料",
+        "拉链",
+        "拉头",
+        "拉片",
+        "扣具",
+        "织带",
+        "肩带",
+        "绳带",
+        "辅料",
+        "加固辅料",
+        "logo方式",
+        "logo工艺",
+        "工艺备注",
+        "特殊工艺备注",
+        "单个包装",
+        "外箱类型",
+        "装箱量",
+        "外箱尺寸",
+        "产品类型",
+        "产品名称",
+        "品名款号",
+        "客户名称",
+        "业务员编号",
+        "国家",
+        "币种",
+    )
+    if raw in bare_roles or key in {_normalise_key(x) for x in bare_roles}:
+        return True
+    if re.search(r"[\(（].*(?:标准名|编码).*[\)）]", raw):
+        return True
+    if raw.lower() in {"l(cm)", "w(cm)", "h(cm)", "lcm", "wcm", "hcm"}:
+        return True
+    if row_looks_like_horizontal_param_header([raw]) and len(raw) <= 16:
+        return True
+    return False
+
+
+def _row_is_header_label_row(row: list[str]) -> bool:
+    cells = [str(c or "").strip() for c in row if str(c or "").strip()]
+    if not cells:
+        return False
+    labels = sum(1 for c in cells if _looks_like_demand_header_label(c))
+    if labels >= 2 and labels >= max(2, int(len(cells) * 0.5)):
+        return True
+    return bool(row_looks_like_horizontal_param_header(row) and labels >= 2)
+
+
+def _row_is_data_value_row(row: list[str]) -> bool:
+    cells = [str(c or "").strip() for c in row if str(c or "").strip()]
+    if not cells:
+        return False
+    data_hits = sum(1 for c in cells if _looks_like_demand_data_value(c))
+    if data_hits >= 1 and data_hits >= max(1, int(len(cells) * 0.34)):
+        return True
+    if not _row_is_header_label_row(row):
+        return any(not _looks_like_demand_header_label(c) for c in cells)
+    return False
 
 
 def _row_has_content(row: list[str]) -> bool:
@@ -591,12 +861,63 @@ def _looks_like_fabric_name_not_descriptor(chunk: str) -> bool:
     return True
 
 
+def _looks_like_strap_spec_descriptor(chunk: str) -> bool:
+    """肩带/织带单元格逗号后的粗细/尺寸片段（如「约0.8cm粗」），不是第二种物料。"""
+    c = str(chunk or "").strip()
+    if not c:
+        return False
+    if re.fullmatch(
+        r"(?:约|大约|≈)?\s*\d+(?:\.\d+)?\s*(?:cm|mm|CM|MM|厘米|毫米)(?:粗|宽|厚|直径|径)?",
+        c,
+    ):
+        return True
+    if re.search(r"\d+(?:\.\d+)?\s*(?:cm|mm|CM|MM|厘米|毫米)", c):
+        if len(c) <= 18 and not any(
+            kw in c for kw in ("提手", "织带", "肩带", "绳", "带", "扣", "拉链", "圆绳", "坑带")
+        ):
+            return True
+    return False
+
+
+def _section_c_strap_spec_from_value(role: str, raw_value: str) -> str:
+    """从肩带/织带单元格的规格描述片段提取尺寸（如 0.8cm）。"""
+    if role not in ("肩带", "织带", "绳带"):
+        return ""
+    for part in _split_multi_value(raw_value):
+        if not _looks_like_strap_spec_descriptor(part):
+            continue
+        _name, spec, *_rest = _split_name_spec_inline(part)
+        if spec:
+            return spec
+    return ""
+
+
+def _is_section_c_non_material_header(raw_key: str) -> bool:
+    """C 区描述性/用量元数据列，不生成独立材料行。"""
+    key = str(raw_key or "").strip()
+    if not key:
+        return True
+    if key in SECTION_C_NON_MATERIAL_HEADERS:
+        return True
+    compact = re.sub(r"\s+", "", key)
+    if re.search(r"(?:长度|宽度|高度|厚度|周长)(?:cm|mm|CM|MM)?$", compact):
+        if any(token in compact for token in ("肩带", "织带", "绳", "绑带", "背带")):
+            return True
+    if compact.endswith("颜色") and any(
+        token in compact for token in ("外料", "里料", "拉链", "肩带", "织带")
+    ):
+        return True
+    return False
+
+
 def _split_section_c_material_chunks(role: str, raw_value: str) -> list[str]:
     """外料/里料：逗号仅保留可计价主料片段；性状短语由调用方写入上一行 note。"""
     parts = _split_multi_value(raw_value)
-    if role not in ("外料", "里料"):
-        return parts
-    return [p for p in parts if _looks_like_fabric_name_not_descriptor(p)]
+    if role in ("外料", "里料"):
+        return [p for p in parts if _looks_like_fabric_name_not_descriptor(p)]
+    if role in ("肩带", "织带", "绳带"):
+        return [p for p in parts if not _looks_like_strap_spec_descriptor(p)]
+    return parts
 
 
 def _section_c_trailing_descriptors(role: str, raw_value: str) -> list[str]:
@@ -643,6 +964,49 @@ def _inject_shoulder_strap_length_from_section_c(
         return
 
 
+def _normalize_materials_embedded_quantity(materials: list[Material]) -> None:
+    """需求表材料名内嵌数量拆到 quoted_usage，避免脏名进入报价/KB。"""
+    for m in materials:
+        clean, qty, src = split_quantity_from_material_name(str(m.name or "").strip())
+        if not src or not clean:
+            continue
+        m.name = clean
+        if qty:
+            name_count = parse_piece_count_from_usage(qty)
+            exist_count = parse_piece_count_from_usage(m.quoted_usage) if m.quoted_usage else None
+            if exist_count is None or (name_count is not None and exist_count != name_count):
+                m.quoted_usage = qty
+                m.quantity_source = src
+
+
+def _resolve_section_c_role(raw_key: str) -> str | None:
+    role = SECTION_C_ROLE_MAP.get(raw_key)
+    if role:
+        return role
+    raw = str(raw_key or "")
+    if "拉片" in raw:
+        return "拉片"
+    if "网袋" in raw:
+        return "辅料"
+    if "肩带" in raw or "织带" in raw:
+        return "织带"
+    if "拉链" in raw:
+        return "拉链"
+    if "拉头" in raw:
+        return "拉头"
+    if "扣具" in raw or "扣" in raw:
+        return "扣具"
+    if "绳" in raw or "绑带" in raw:
+        return "绳带"
+    if "外料" in raw or "主面料" in raw:
+        return "外料"
+    if "里料" in raw or "内衬" in raw or "内里" in raw:
+        return "里料"
+    if "辅料" in raw or "加固" in raw:
+        return "辅料"
+    return None
+
+
 def _extract_materials_from_section_c(section_c: dict[str, str]) -> list[Material]:
     """Walk section C key/value pairs and pick out the rows that name a
     purchasable material (外料 / 里料 / 拉链 / 扣具 / 织带 / 绳带 …)."""
@@ -650,13 +1014,14 @@ def _extract_materials_from_section_c(section_c: dict[str, str]) -> list[Materia
     seen: set[tuple[str, str]] = set()
 
     for raw_key, raw_value in section_c.items():
-        if raw_key in SECTION_C_NON_MATERIAL_HEADERS:
+        if _is_section_c_non_material_header(raw_key):
             continue
-        role = SECTION_C_ROLE_MAP.get(raw_key)
+        role = _resolve_section_c_role(raw_key)
         if role is None:
             continue
         chunks = _split_section_c_material_chunks(role, raw_value)
         trailing_desc = _section_c_trailing_descriptors(role, raw_value)
+        strap_extra_spec = _section_c_strap_spec_from_value(role, raw_value)
         for chunk in chunks:
             name, spec, note, inline = _split_name_spec_inline(chunk)
             if not name:
@@ -678,7 +1043,7 @@ def _extract_materials_from_section_c(section_c: dict[str, str]) -> list[Materia
                 Material(
                     role=role,
                     name=name,
-                    spec=spec or _spec_from_section_c(section_c, raw_key),
+                    spec=spec or strap_extra_spec or _spec_from_section_c(section_c, raw_key),
                     note=eff_note,
                     inline_price=inline,
                     source="demand_form",
@@ -1142,14 +1507,26 @@ def _extract_tier_margins_from_section_f(section_f: dict[str, str]) -> dict[int,
     return out
 
 
-def _extract_quantities(section_f: dict[str, str]) -> tuple[int, ...]:
+def _extract_quantities(
+    section_f: dict[str, str],
+    *,
+    rows: list[list[str]] | None = None,
+) -> tuple[int, ...]:
     quantities: list[int] = []
-    for key, value in section_f.items():
-        if not key.startswith("数量"):
-            continue
-        match = re.search(r"\d+", str(value))
-        if match:
-            quantities.append(int(match.group(0)))
+    sources: list[dict[str, str]] = []
+    if section_f:
+        sources.append(section_f)
+    if rows:
+        implicit = _extract_implicit_quantity_section(rows)
+        if implicit:
+            sources.append(implicit)
+    for src in sources:
+        for key, value in src.items():
+            if not str(key or "").startswith("数量"):
+                continue
+            match = re.search(r"\d+", str(value))
+            if match:
+                quantities.append(int(match.group(0)))
     quantities = sorted(set(quantities))
     return tuple(quantities)
 

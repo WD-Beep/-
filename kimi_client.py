@@ -1003,12 +1003,18 @@ def _merge_demand_rows(
                 row["usage"] = ai_usage
                 row["usage_ai"] = True
 
-        # Unit price: keep KB-hit price untouched, otherwise accept LLM value.
+        # Unit price: 业务表/手工/KB 价优先，LLM 仅在缺价时补价。
+        from price_source_resolver import has_business_unit_price, row_unit_price_is_authoritative
+
         kb_hit = _kb_hit_has_valid_unit_price(row)
         ai_price = str(ai_row.get("unit_price", "")).strip()
-        if not kb_hit and ai_price and not _is_missing(ai_price):
+        if row_unit_price_is_authoritative(row) or has_business_unit_price(row.get("unit_price")):
+            row["unit_price_ai"] = False
+        elif not kb_hit and ai_price and not _is_missing(ai_price):
             row["unit_price"] = ai_price
             row["unit_price_ai"] = True
+            row["price_source"] = "ai_estimate"
+            row["pricing_review_required"] = True
 
         had_llm_amount = _capture_llm_suggested_amount(row, ai_row)
         _finalize_row_amount_local_only(row)
@@ -1025,21 +1031,30 @@ def _merge_demand_rows(
 
 
 def _set_demand_row_source(row: dict[str, Any]) -> None:
-    """Source reflects the **unit_price** origin only.
+    """Source / price_source 反映单价来源：业务表 > 正式 KB > AI 估算。"""
+    from price_source_resolver import (
+        PRICE_SOURCE_AI,
+        PRICE_SOURCE_KB,
+        PRICE_SOURCE_MANUAL,
+        PRICE_SOURCE_OVERRIDE,
+        PRICE_SOURCE_SHEET,
+        infer_price_source,
+    )
 
-    Per the user's decision, the standard-library price (KB hit) is the
-    authoritative quote source; an LLM-estimated 用量 alongside a KB price
-    should still surface as a KB row so business users can scan KB-vs-AI
-    pricing at a glance.
-    """
-    if _kb_hit_has_valid_unit_price(row):
+    ps = infer_price_source(row)
+    row["price_source"] = ps
+    if ps == PRICE_SOURCE_KB:
         row["source"] = "kb"
-    elif _as_bool(row.get("unit_price_ai")):
+    elif ps == PRICE_SOURCE_OVERRIDE:
+        row["source"] = "kb"
+    elif ps == PRICE_SOURCE_AI:
         row["source"] = "ai"
     else:
-        row["source"] = str(row.get("source") or "kb").lower()
-        if row["source"] not in {"kb", "ai"}:
-            row["source"] = "kb"
+        row["source"] = "kb"
+    if bool(row.get("unit_price_ai")) or ps == PRICE_SOURCE_AI:
+        row["pricing_review_required"] = bool(row.get("pricing_review_required", True))
+    elif ps in {PRICE_SOURCE_SHEET, PRICE_SOURCE_MANUAL}:
+        row["pricing_review_required"] = bool(row.get("price_conflict_required"))
 
 
 def _fallback_demand_quote(
@@ -2385,6 +2400,10 @@ def _has_usable_unit_price(value: str) -> bool:
 
 
 def _kb_hit_has_valid_unit_price(row: dict[str, Any]) -> bool:
+    from price_source_resolver import PRICE_SOURCE_KB, infer_price_source
+
+    if infer_price_source(row) != PRICE_SOURCE_KB:
+        return False
     return bool(row.get("kb_hit")) and _has_usable_unit_price(str(row.get("unit_price") or ""))
 
 

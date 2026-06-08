@@ -337,6 +337,33 @@ description: >-
 - 必测项：`pytest tests/test_display_number_format.py tests/test_display_format_layers.py`；前台/后台/PDF 不出现 2 位及以上小数；整数不显示 `.0`
 - 相关文件/模块：static/app.js、static/admin/admin.js、static/quote_sheet.js、quote_sheet_prefill.py、display_number_format.py
 
+### 错误模式：需求表 C/F/G 区只读首行值行导致物料/数量/包装漏解析
+- 发生场景：标准需求表(填写区)如 B260178；C 区表头下有多行值；无 F. 标题仅有数量1/2/3；G. 包装与装箱
+- 错误表现：materials 仅 6 条；quantities 空；quote_params.G 无礼盒/纸箱；第 2 行 EPE/黑色拉链/拉头/拉片丢失
+- 根因：`_zip_headers_to_values` 只配对首条值行；`SECTION_TITLE_PATTERN` 不含 G；数量区无 F 标题时不入 sections.F；表头/值行误判（如「编码」被 `\码` 正则命中）
+- 正确做法：表头+多值行 column merge（`;` 合并）；`detect_section_marker` 支持 A-G；无 F 标题时从数量1 表头+下一行提取；G 区 param label 含包装/外箱/装箱；值行与表头用 `_looks_like_demand_data_value` 区分
+- 禁止做法：把结构说明自动当正式 BOM；空值覆盖已有列；改动报价公式/价格库
+- 必测项：`pytest tests/test_demand_parser_multrow_sections.py tests/test_demand_strict_table_materials.py tests/test_sheet_parser.py`；B260178 materials≥10、quantities=(500,1000,1500)、sections.G 含礼盒/纸箱
+- 相关文件/模块：demand_parser.py、sheet_parser.py
+
+### 错误模式：拉头/拉链单价离谱（总价误填为单价）
+- 发生场景：需求表 C 区拉头/金属拉链；报价同步入库；KB 命中
+- 错误表现：明细出现「黑色拉头*1：60元/个」「金色金属拉链：120元/条」，小计异常
+- 根因：历史 `quote_auto_learn` 将「金色拉头 60元/个」写入正式库；`sync_quote_detail_rows_to_price_kb` 对 `kb_hit=True` 走 `AUTO_QUOTE_SYNC` 未拦截异常单价
+- 正确做法：`judge_kb_insert_candidate` 名称含拉头且单价≥10、含拉链且单价≥20 → `pending_review`/`AUTO_PENDING_PRICE`；KB 命中与 `parse_items` 同步拒绝异常单价；正式库脏数据用 `scripts/audit_suspicious_zipper_slider_prices.py` 审计后后台人工删改
+- 禁止做法：仅改前端显示；无确认脚本删正式库；正常 0.3元/个拉头、0.3元/条拉链误拦
+- 必测项：`pytest tests/test_kb_auto_learn_rules.py -k suspicious_slider or suspicious_metal_zipper`；`pytest tests/test_kb_data_quality.py tests/test_price_learn_loop.py -q`
+- 相关文件/模块：kb_data_quality.py、price_admin_store.py、price_kb.py、quote_engine.py、server.py
+
+### 错误模式：知识库价覆盖业务表单价 / 价格来源优先级混乱
+- 发生场景：需求表 C 区已填单价；KB 命中；报价同步入库
+- 错误表现：业务填 0.35元/个 被 KB 0.3 覆盖；或冲突价被 AUTO_QUOTE_SYNC 当可信价
+- 根因：`attach_demand_items` KB 命中无条件写 `unit_price`；缺 `price_source` 字段；`kb_hit=True` 被当作单价权威
+- 正确做法：优先级 业务表/手工 > 正式 KB（仅缺价补价）> AI 估算；冲突保留业务价并 `price_conflict_required`；业务价/冲突/AI 价只进待审核不写正式库；异常 KB 拉头/拉链价拒绝参与报价
+- 禁止做法：KB 覆盖已有业务单价；待审核候选参与 lookup；冲突价 AUTO_QUOTE_SYNC 直写正式库
+- 必测项：`pytest tests/test_price_source_priority.py tests/test_kb_auto_learn_rules.py tests/test_price_learn_loop.py tests/test_kb_data_quality.py -q`
+- 相关文件/模块：price_source_resolver.py、price_kb.py、server.py、quote_engine.py、price_admin_store.py、kimi_client.py、sheet_parser.py
+
 ## 快速验收命令（自报项目目录）
 
 ```powershell

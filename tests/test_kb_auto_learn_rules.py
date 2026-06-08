@@ -159,6 +159,75 @@ class KbAutoLearnRulesTest(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    @patch("price_admin_store.knowledge_reload_hook")
+    @patch("price_admin_store.note_kb_disk_write_success")
+    def test_suspicious_slider_price_from_kb_goes_pending_review(self, _n: object, _r: object) -> None:
+        root = self._make_root()
+        try:
+            kb_path = self._make_kb(root)
+            summary = self._sync(
+                root,
+                kb_path,
+                {
+                    "quote_ready": True,
+                    "quote_id": "Q-SLIDER-001",
+                    "product_name": "双层保温午餐包",
+                    "detail_rows": [
+                        {
+                            "name": "黑色拉头*1",
+                            "spec": "普通拉头",
+                            "unit_price": "60元/个",
+                            "kb_hit": True,
+                            "source": "kb",
+                        }
+                    ],
+                },
+            )
+            self.assertEqual(summary["auto_inserted"], 0)
+            self.assertEqual(summary["pending"], 1)
+            pending, total = list_price_exceptions(
+                page=1, page_size=20, exception_path=root / "price_exceptions.jsonl"
+            )
+            self.assertEqual(total, 1)
+            self.assertEqual(pending[0]["marker"], AUTO_PENDING_MARKER)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    @patch("price_admin_store.knowledge_reload_hook")
+    @patch("price_admin_store.note_kb_disk_write_success")
+    def test_suspicious_metal_zipper_price_from_kb_goes_pending_review(self, _n: object, _r: object) -> None:
+        root = self._make_root()
+        try:
+            kb_path = self._make_kb(root)
+            summary = self._sync(
+                root,
+                kb_path,
+                {
+                    "quote_ready": True,
+                    "quote_id": "Q-ZIPPER-001",
+                    "product_name": "双层保温午餐包",
+                    "detail_rows": [
+                        {
+                            "name": "金色金属拉链",
+                            "spec": "金色金属拉链",
+                            "unit_price": "120元/条",
+                            "usage": "0.2米",
+                            "kb_hit": True,
+                            "source": "kb",
+                        }
+                    ],
+                },
+            )
+            self.assertEqual(summary["auto_inserted"], 0)
+            self.assertEqual(summary["pending"], 1)
+            pending, total = list_price_exceptions(
+                page=1, page_size=20, exception_path=root / "price_exceptions.jsonl"
+            )
+            self.assertEqual(total, 1)
+            self.assertEqual(pending[0]["marker"], AUTO_PENDING_MARKER)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_piece_names_drop_not_insert(self) -> None:
         for name in ("前片", "网袋", "隔层", "侧片", "拉链弧形盖"):
             verdict = judge_kb_insert_candidate(name, "19×45", "2元/个")

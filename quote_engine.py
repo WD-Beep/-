@@ -60,6 +60,12 @@ class LineItem:
     usage_ai: bool = False
     unit_price_ai: bool = False
     amount_ai: bool = False
+    price_source: str = ""
+    pricing_review_required: bool = False
+    price_conflict_required: bool = False
+    kb_matched_name: str = ""
+    kb_matched_spec: str = ""
+    kb_reference_price: str = ""
     calc_note: str = ""
     recognition_status: str = ""
     recognition_reason: str = ""
@@ -94,6 +100,18 @@ class LineItem:
             "calc_note": clean_calc_note_text(self.calc_note),
             "calc_method": clean_calc_note_text(self.calc_note),
         }
+        if self.price_source:
+            out["price_source"] = self.price_source
+        if self.pricing_review_required:
+            out["pricing_review_required"] = True
+        if self.price_conflict_required:
+            out["price_conflict_required"] = True
+        if self.kb_matched_name:
+            out["kb_matched_name"] = self.kb_matched_name
+        if self.kb_matched_spec:
+            out["kb_matched_spec"] = self.kb_matched_spec
+        if self.kb_reference_price:
+            out["kb_reference_price"] = self.kb_reference_price
         if self.recognition_status:
             out["recognition_status"] = self.recognition_status
         if self.recognition_reason:
@@ -847,12 +865,33 @@ def parse_items(
         raw_spec = spec_for_amount_calc(row)
         raw_usage = usage_for_amount_recalc(row)
         unit_price = str(row.get("unit_price", row.get("单价参考", "-"))).strip() or "-"
+        from kb_data_quality import ACCESSORY_PRICE_OUTLIER_REASON, sanitize_accessory_unit_price
+        from price_source_resolver import BUSINESS_PRICE_SOURCES, infer_price_source
+
+        price_source = infer_price_source(row)
+        if price_source in BUSINESS_PRICE_SOURCES:
+            price_rejected = False
+        else:
+            unit_price, price_rejected = sanitize_accessory_unit_price(name, unit_price)
+        if price_rejected:
+            unit_price_ai = True
+            kb_hit = False
+            price_source = "ai_estimate"
+            row["pricing_review_required"] = True
+            calc_note = _append_calc_note(
+                clean_calc_note_text(row.get("calc_note") or row.get("calc_method") or ""),
+                ACCESSORY_PRICE_OUTLIER_REASON,
+            )
+        else:
+            calc_note = clean_calc_note_text(row.get("calc_note") or row.get("calc_method") or "")
 
         spec_ai = parse_bool(row.get("spec_ai"), False)
         usage_ai = parse_bool(row.get("usage_ai"), False)
-        unit_price_ai = parse_bool(row.get("unit_price_ai"), False)
+        if not price_rejected:
+            unit_price_ai = parse_bool(row.get("unit_price_ai"), False)
         amount_ai = parse_bool(row.get("amount_ai"), False)
-        kb_hit = parse_bool(row.get("kb_hit"), False)
+        if not price_rejected:
+            kb_hit = parse_bool(row.get("kb_hit"), False)
         kb_auto_learned = parse_bool(row.get("kb_auto_learned"), False)
         source = normalize_source(
             row.get("source"),
@@ -873,9 +912,8 @@ def parse_items(
         price_unit_kind = _price_unit_kind(unit_price)
         unit_converted = False
         unit_conversion_basis = ""
-        calc_note = clean_calc_note_text(row.get("calc_note") or row.get("calc_method") or "")
         amount_value = parse_float(row.get("amount"), 0.0)
-        recalculated = _recalculated_amount_and_price(usage, unit_price)
+        recalculated = _recalculated_amount_and_price(usage, unit_price) if not price_rejected else None
         if recalculated is not None:
             expected_amount, display_unit_price, calc_addition = recalculated
             if abs(expected_amount - amount_value) > 0.01:
@@ -917,6 +955,12 @@ def parse_items(
                 usage_ai=usage_ai,
                 unit_price_ai=unit_price_ai,
                 amount_ai=amount_ai,
+                price_source=price_source,
+                pricing_review_required=bool(row.get("pricing_review_required")),
+                price_conflict_required=bool(row.get("price_conflict_required")),
+                kb_matched_name=str(row.get("kb_matched_name") or ""),
+                kb_matched_spec=str(row.get("kb_matched_spec") or ""),
+                kb_reference_price=str(row.get("kb_reference_price") or ""),
                 calc_note=calc_note,
                 recognition_status=str(row.get("recognition_status") or "").strip(),
                 recognition_reason=str(row.get("recognition_reason") or "").strip(),

@@ -282,9 +282,14 @@ def smart_lookup(
 
     hit: KBHit | None = price_kb.lookup(query, spec_norm, min_score=min_score)
     if hit is not None:
+        from kb_data_quality import is_accessory_price_outlier
+
+        display_price = format_kb_entry_price_display(hit.entry)
+        if is_accessory_price_outlier(query, display_price):
+            return {"kb_hit": False, "unit_price": None, "candidates": [], "kb_price_rejected": True}
         return {
             "kb_hit": True,
-            "unit_price": format_kb_entry_price_display(hit.entry),
+            "unit_price": display_price,
             "candidates": [],
         }
 

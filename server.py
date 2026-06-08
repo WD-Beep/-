@@ -195,7 +195,7 @@ from kimi_client import (
 from llm_audit import LlmAuditCollector, build_llm_audit
 from core.smart_lookup import enqueue_knowledge_learn_after_rule_miss
 from embedding.bge_encoder import embedding_enabled
-from price_kb import format_kb_entry_price_display, get_price_kb, KBHit
+from price_kb import format_kb_entry_price_display, get_price_kb, KBHit, apply_material_price_lookup
 from price_admin_store import (
     approve_price_exception,
     approve_price_exceptions_bulk,
@@ -209,6 +209,7 @@ from price_admin_store import (
     list_price_history,
     price_exception_stats,
     price_admin_stats,
+    scan_price_data_quality_report,
     reject_price_exception,
     reject_price_exceptions_bulk,
     sync_quote_detail_rows_to_price_kb,
@@ -1776,6 +1777,7 @@ class QuoteHandler(BaseHTTPRequestHandler):
             try:
                 stats = price_admin_stats()
                 stats.update(price_exception_stats())
+                stats["quality_scan"] = scan_price_data_quality_report(sample_limit=20)
                 self.write_json(stats)
             except Exception as exc:
                 self.write_json({"error": "price_kb_unavailable", "message": str(exc)}, status=500)
@@ -4848,31 +4850,39 @@ class QuoteHandler(BaseHTTPRequestHandler):
         kb_misses: list[str] = []
 
         from demand_field_sources import material_row_source_type
+        from price_source_resolver import PRICE_SOURCE_SHEET, has_business_unit_price
 
         for material in demand.materials:
             field_src = material_row_source_type(material.source, material.role)
+            sheet_price = str(material.inline_price or "").strip()
+            has_sheet_price = has_business_unit_price(sheet_price)
             row: dict[str, object] = {
                 "name": material.name,
                 "role": material.role,
                 "spec": material.spec or "-",
                 "usage": "-",
-                "unit_price": material.inline_price or "-",
+                "unit_price": sheet_price if has_sheet_price else "-",
                 "amount": 0.0,
                 "kb_hit": False,
                 "kb_score": 0.0,
                 "spec_ai": False,
                 "usage_ai": False,
-                "unit_price_ai": bool(material.inline_price),
+                "unit_price_ai": not has_sheet_price,
                 "amount_ai": False,
-                "source": "kb" if material.inline_price else "ai",
+                "source": "ai" if not has_sheet_price else "kb",
                 "demand_source": material.source,
                 "field_source_type": field_src,
             }
+            if has_sheet_price:
+                row["price_source"] = PRICE_SOURCE_SHEET
             qu = str(getattr(material, "quoted_usage", "") or "").strip()
             if qu:
                 row["usage"] = qu
                 row["_sheet_usage_lock"] = True
                 row["usage_ai"] = False
+            qs = str(getattr(material, "quantity_source", "") or "").strip()
+            if qs:
+                row["quantity_source"] = qs
             else:
                 uh = usage_hint_from_bracket(str(material.note or ""), str(material.inline_price or ""))
                 if uh:
@@ -4885,24 +4895,36 @@ class QuoteHandler(BaseHTTPRequestHandler):
             hit: KBHit | None = None
             if kb is not None:
                 hit = kb.lookup(material.name, material.spec)
-            if hit is not None:
-                entry = hit.entry
-                row["unit_price"] = format_kb_entry_price_display(
-                    entry,
+            row.update(
+                apply_material_price_lookup(
+                    material_name=material.name,
+                    spec=str(row.get("spec") or material.spec or "-"),
                     role=material.role,
                     usage=str(row.get("usage") or ""),
+                    existing_row=row,
+                    kb_hit=hit,
                 )
-                row["unit_price_ai"] = False
-                row["kb_hit"] = True
-                row["kb_score"] = round(hit.score, 2)
-                row["kb_matched_name"] = entry.raw_name
-                row["kb_matched_spec"] = entry.raw_spec
-                row["kb_auto_learned"] = bool(getattr(entry, "auto_learned", False))
-                row["source"] = "kb"
-                if entry.raw_spec and (not material.spec or material.spec == "-"):
-                    row["spec"] = entry.raw_spec
-                kb_hits.append({"name": material.name, "matched": entry.raw_name, "score": row["kb_score"]})
-            else:
+            )
+            if row.get("kb_hit"):
+                kb_hits.append(
+                    {
+                        "name": material.name,
+                        "matched": str(row.get("kb_matched_name") or material.name),
+                        "score": row.get("kb_score"),
+                    }
+                )
+            elif row.get("override_hit"):
+                kb_hits.append(
+                    {
+                        "name": material.name,
+                        "matched": str(row.get("override_matched_name") or material.name),
+                        "score": 1.0,
+                        "source": "override",
+                    }
+                )
+            elif row.get("kb_price_rejected") or row.get("price_conflict_required"):
+                kb_misses.append(material.name)
+            elif hit is None and not row.get("override_hit"):
                 kb_misses.append(material.name)
             items.append(row)
 
@@ -5014,7 +5036,9 @@ class QuoteHandler(BaseHTTPRequestHandler):
             return None
 
     def _enrich_skeleton_items_with_kb(self, items: list[dict], kb) -> list[dict[str, object]]:
-        """文字生成的 BOM 骨架：尽量用知识库标价覆盖单价。"""
+        """文字生成的 BOM 骨架：缺价时才用知识库标价补价。"""
+        from price_source_resolver import PRICE_SOURCE_MANUAL, PRICE_SOURCE_SHEET, has_business_unit_price
+
         rows: list[dict[str, object]] = []
         for raw in items:
             if not isinstance(raw, dict):
@@ -5023,40 +5047,39 @@ class QuoteHandler(BaseHTTPRequestHandler):
             if not name:
                 continue
             spec = str(raw.get("spec") or "-").strip() or "-"
+            raw_price = str(raw.get("unit_price") or raw.get("单价参考") or "").strip()
+            has_business = has_business_unit_price(raw_price)
             row: dict[str, object] = {
                 "name": name,
                 "role": str(raw.get("role") or "辅料").strip() or "辅料",
                 "spec": spec,
-                "usage": "-",
-                "unit_price": "-",
+                "usage": str(raw.get("usage") or "-").strip() or "-",
+                "unit_price": raw_price if has_business else "-",
                 "amount": 0.0,
                 "kb_hit": False,
                 "kb_score": 0.0,
                 "spec_ai": bool(raw.get("spec_ai", True)),
                 "usage_ai": False,
-                "unit_price_ai": True,
+                "unit_price_ai": not has_business,
                 "amount_ai": False,
-                "source": "ai",
+                "source": "ai" if not has_business else "kb",
             }
+            if has_business:
+                ps = str(raw.get("price_source") or "").strip()
+                row["price_source"] = ps if ps in {PRICE_SOURCE_SHEET, PRICE_SOURCE_MANUAL} else PRICE_SOURCE_MANUAL
             hit: KBHit | None = None
             if kb is not None:
                 hit = kb.lookup(name, spec)
-            if hit is not None:
-                entry = hit.entry
-                row["unit_price"] = format_kb_entry_price_display(
-                    entry,
+            row.update(
+                apply_material_price_lookup(
+                    material_name=name,
+                    spec=spec,
                     role=str(row.get("role") or ""),
                     usage=str(row.get("usage") or ""),
+                    existing_row=row,
+                    kb_hit=hit,
                 )
-                row["unit_price_ai"] = False
-                row["kb_hit"] = True
-                row["kb_score"] = round(hit.score, 2)
-                row["kb_matched_name"] = entry.raw_name
-                row["kb_matched_spec"] = entry.raw_spec
-                row["kb_auto_learned"] = bool(getattr(entry, "auto_learned", False))
-                row["source"] = "kb"
-                if entry.raw_spec and (not spec or spec == "-"):
-                    row["spec"] = entry.raw_spec
+            )
             rows.append(row)
         return rows
 
@@ -5087,24 +5110,29 @@ class QuoteHandler(BaseHTTPRequestHandler):
         skip the KB lookup, mark unit_price_ai=False, and let the LLM only
         fill in 用量.
         """
+        from price_source_resolver import PRICE_SOURCE_SHEET, has_business_unit_price
+
         items: list[dict[str, object]] = []
         for material in parsed.materials:
-            has_price = bool(material.unit_price.strip())
+            unit_price_text = str(material.unit_price or "").strip()
+            has_price = has_business_unit_price(unit_price_text)
             row: dict[str, object] = {
                 "name": material.name,
                 "role": material.role,
                 "spec": material.spec or "-",
                 "usage": "-",
-                "unit_price": material.unit_price or "-",
+                "unit_price": unit_price_text if has_price else "-",
                 "amount": 0.0,
-                "kb_hit": has_price,  # Treat user-entered price as authoritative.
-                "kb_score": 1.0 if has_price else 0.0,
+                "kb_hit": False,
+                "kb_score": 0.0,
                 "spec_ai": False,
                 "usage_ai": False,
                 "unit_price_ai": not has_price,
                 "amount_ai": False,
-                "source": "kb" if has_price else "ai",
+                "source": "ai" if not has_price else "kb",
             }
+            if has_price:
+                row["price_source"] = PRICE_SOURCE_SHEET
             items.append(row)
 
         margin = parsed.quote_settings.get("gross_margin_rate")

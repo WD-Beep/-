@@ -54,14 +54,66 @@ class KbDataQualityTest(unittest.TestCase):
         )
         self.assertEqual(verdict.action, KB_ACTION_DROP)
 
-    def test_format_exception_reason_missing_price(self) -> None:
+    def test_embedded_quantity_name_blocked_from_kb_auto(self) -> None:
+        verdict = judge_kb_insert_candidate("黑色拉头*1", "普通拉头", "0.3元/个")
+        self.assertEqual(verdict.action, KB_ACTION_REVIEW)
+        self.assertIn("数量词", verdict.reason)
+
+    def test_review_suspicious_slider_price(self) -> None:
+        verdict = judge_kb_insert_candidate(
+            "黑色拉头",
+            "普通拉头",
+            "60元/个",
+            kb_hit=True,
+            row={"source": "kb", "kb_hit": True},
+        )
+        self.assertEqual(verdict.action, KB_ACTION_REVIEW)
+        self.assertIn("拉链/拉头单价明显异常", verdict.reason)
+
+    def test_review_suspicious_zipper_price(self) -> None:
+        verdict = judge_kb_insert_candidate(
+            "金色金属拉链",
+            "金色金属拉链",
+            "120元/条",
+            kb_hit=True,
+            row={"source": "kb", "kb_hit": True},
+        )
+        self.assertEqual(verdict.action, KB_ACTION_REVIEW)
+        self.assertIn("拉链/拉头单价明显异常", verdict.reason)
+
+    def test_normal_slider_price_still_auto(self) -> None:
+        verdict = judge_kb_insert_candidate(
+            "普通拉头",
+            "5#",
+            "0.3元/个",
+            kb_hit=True,
+            row={"source": "kb", "kb_hit": True},
+        )
+        self.assertEqual(verdict.action, KB_ACTION_AUTO)
+
+    def test_normal_zipper_price_still_auto(self) -> None:
+        verdict = judge_kb_insert_candidate(
+            "5#尼龙拉链",
+            "#5",
+            "0.3元/条",
+            kb_hit=True,
+            row={"source": "kb", "kb_hit": True},
+        )
+        self.assertEqual(verdict.action, KB_ACTION_AUTO)
+
+    def test_format_exception_reason_zipper_outlier(self) -> None:
+        from kb_data_quality import format_exception_reason_label
+
+        verdict = judge_kb_insert_candidate("黑色拉头", "普通拉头", "60元/个")
+        self.assertEqual(format_exception_reason_label(verdict), "拉链拉头单价异常")
+
         from kb_data_quality import format_exception_reason_label, KbDataQualityVerdict
 
         verdict = judge_kb_insert_candidate("NEW_BUCKLE", "777ZZ", "-")
         self.assertEqual(format_exception_reason_label(verdict), "缺少价格")
 
     def test_drop_piece_names(self) -> None:
-        for name in ("前袋", "网袋", "隔层", "前片"):
+        for name in ("前袋", "网袋", "隔层", "前片", "侧片", "合计", "小计"):
             verdict = judge_kb_insert_candidate(name, "19×45", "2元/个")
             self.assertEqual(verdict.action, KB_ACTION_DROP, name)
 
@@ -79,6 +131,29 @@ class KbDataQualityTest(unittest.TestCase):
             classify_exception_review_hint(name, verdict, has_price=False),
             "exclude_suggest",
         )
+
+    def test_special_fee_semantic_mismatch(self) -> None:
+        from kb_data_quality import is_material_semantic_mismatch, validate_price_override_target
+
+        self.assertTrue(is_material_semantic_mismatch("拉头烤漆费", "普通拉头"))
+        ok, reason = validate_price_override_target("拉头烤漆费", "普通拉头")
+        self.assertFalse(ok)
+        self.assertIn("特殊费用", reason)
+
+
+    def test_quote_blocking_marker_constants(self) -> None:
+        from price_learn_candidate import AUTO_PENDING_MARKER, QUOTE_BLOCKING_MARKERS, is_quote_blocking_learn_candidate
+
+        self.assertIn(AUTO_PENDING_MARKER, QUOTE_BLOCKING_MARKERS)
+        row = {
+            "material_name": "五金标准扣具",
+            "spec": "常规",
+            "new_price": "0.35元/个",
+            "status": "pending",
+            "exception_status": "open",
+            "marker": AUTO_PENDING_MARKER,
+        }
+        self.assertTrue(is_quote_blocking_learn_candidate(row))
 
 
 if __name__ == "__main__":

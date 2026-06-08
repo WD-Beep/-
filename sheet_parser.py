@@ -303,9 +303,10 @@ PRODUCT_NAME_KEYWORDS = (
     "style_name",
 )
 
-SINGLE_SECTION_LETTER_PATTERN = re.compile(r"^\s*[A-Fa-f]\s*$")
-SECTION_TITLE_PATTERN = re.compile(r"^\s*([A-Fa-f])\s*[\.\uFF0E\u3001:\uFF1A]\s*(.*)$")
-SECTION_GROUP_PATTERN = re.compile(r"^\s*([A-Fa-f])\s*组\s*(.*)$")
+SINGLE_SECTION_LETTER_PATTERN = re.compile(r"^\s*[A-Ga-g]\s*$")
+SECTION_TITLE_PATTERN = re.compile(r"^\s*([A-Ga-g])\s*[\.\uFF0E\u3001:\uFF1A]\s*(.*)$")
+SECTION_GROUP_PATTERN = re.compile(r"^\s*([A-Ga-g])\s*组\s*(.*)$")
+_QUANTITY_TIER_HEADER_CELL = re.compile(r"^数量\d+$", re.I)
 INVALID_UNIT_PRICE_VALUES = {"yes", "no", "true", "false", "\u662f", "\u5426"}
 
 HEADER_ALIASES = {
@@ -972,6 +973,7 @@ def rows_to_items_raw(rows: list[list[str]], *, start_row: int | None) -> RowSca
                     "unit_price": candidate_unit_price,
                     "amount": round(candidate_amount, 2),
                     "source": "kb",
+                    "price_source": "sheet",
                     "spec_ai": False,
                     "usage_ai": False,
                     "unit_price_ai": False,
@@ -1169,6 +1171,7 @@ def scan_rows_by_fixed_columns(*, data_rows: list[list[str]], column_map: dict[s
                     "unit_price": candidate_unit_price,
                     "amount": candidate_amount,
                     "source": "kb",
+                    "price_source": "sheet",
                     "spec_ai": False,
                     "usage_ai": False,
                     "unit_price_ai": False,
@@ -1324,6 +1327,7 @@ def scan_rows_for_items(
                     "unit_price": candidate_unit_price,
                     "amount": round(candidate_amount, 2),
                     "source": "kb",
+                    "price_source": "sheet",
                     "spec_ai": False,
                     "usage_ai": False,
                     "unit_price_ai": False,
@@ -1487,6 +1491,23 @@ def last_section_before_index(rows: list[list[str]], index: int) -> tuple[str, s
     return "", ""
 
 
+def row_is_quantity_tier_header(row: list[str]) -> bool:
+    """识别「数量1/数量2/…」表头行（可无 F. 数量阶梯 分区标题）。"""
+    hits = 0
+    for cell in row:
+        key = normalize_parameter_key(str(cell or ""))
+        if not key:
+            continue
+        if _QUANTITY_TIER_HEADER_CELL.match(key) or re.fullmatch(r"qty\d+", key, re.I):
+            hits += 1
+    return hits >= 2
+
+
+def row_looks_like_horizontal_param_header(row: list[str]) -> bool:
+    """与 extract_quote_parameters 一致：一行内多个参数标签。"""
+    return _looks_like_horizontal_param_header(row)
+
+
 def detect_section_marker(row: list[str]) -> tuple[str, str] | None:
     first = row_get(row, 0).strip()
     second = row_get(row, 1).strip()
@@ -1540,6 +1561,9 @@ _PARAM_LABEL_HINTS = (
     "类型",
     "logo",
     "工艺",
+    "包装",
+    "外箱",
+    "装箱",
 )
 
 _PARAM_HEADER_SUFFIXES = (
@@ -1557,6 +1581,8 @@ _PARAM_HEADER_SUFFIXES = (
     "等级",
     "选",
     "复杂程度",
+    "包装",
+    "装箱",
 )
 
 
@@ -2135,6 +2161,100 @@ MATERIAL_QTY_PHRASE_PATTERN = re.compile(
     r"\d+(?:\.\d+)?\s*(?:\u4e2a|\u53ea|\u6761|\u9897|\u5957|pcs?|pc)",
     flags=re.IGNORECASE,
 )
+_QTY_UNIT_SUFFIX = r"(?:个|只|条|颗|套|pcs?|pc)"
+_QTY_NUM = r"\d+(?:\.\d+)?"
+_NAME_QTY_ASTERISK = re.compile(rf"^(.+?)\*({_QTY_NUM})$", re.I)
+_NAME_QTY_PREFIX = re.compile(rf"^({_QTY_NUM})\s*({_QTY_UNIT_SUFFIX})\s*(.+)$", re.I)
+_NAME_QTY_SUFFIX = re.compile(rf"^(.+?)({_QTY_NUM})\s*({_QTY_UNIT_SUFFIX})$", re.I)
+_NAME_QTY_MIDDLE = re.compile(rf"^(.+?)({_QTY_NUM})\s*({_QTY_UNIT_SUFFIX})(.+)$", re.I)
+_EMBEDDED_QTY_GUARD = re.compile(
+    rf"(?:^\d+\s*{_QTY_UNIT_SUFFIX})|(?:\*\d+(?:\.\d+)?$)|(?:\d+\s*{_QTY_UNIT_SUFFIX}$)",
+    re.I,
+)
+
+
+def _format_piece_usage(num_str: str, unit: str) -> str:
+    try:
+        num = float(str(num_str or "").strip())
+    except (TypeError, ValueError):
+        return ""
+    if not (0 < num <= 5000):
+        return ""
+    num_s = str(int(num)) if abs(num - int(num)) < 1e-9 else str(num).rstrip("0").rstrip(".")
+    unit_norm = str(unit or "个").strip()
+    if unit_norm.lower() in {"pcs", "pc"}:
+        unit_norm = "个"
+    return f"{num_s}{unit_norm}"
+
+
+def parse_piece_count_from_usage(usage: object) -> float | None:
+    """从用量文本提取件数（个/只/pcs），无法识别时返回 None。"""
+    text = str(usage or "").strip()
+    if not text or text in {"-", "—", "/"}:
+        return None
+    m = re.search(rf"({_QTY_NUM})\s*{_QTY_UNIT_SUFFIX}", text, re.I)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def split_quantity_from_material_name(name: str) -> tuple[str, str, str]:
+    """从材料名拆出真实名称与件数用量。
+
+    返回 (clean_name, usage_text, quantity_source)。
+    quantity_source: name_asterisk | name_prefix | name_suffix | name_middle | ""
+    """
+    text = str(name or "").strip()
+    if not text:
+        return "", "", ""
+    if is_obvious_concatenated_material_name(text):
+        return text, "", ""
+
+    m = _NAME_QTY_ASTERISK.match(text)
+    if m:
+        base = str(m.group(1) or "").strip()
+        usage = _format_piece_usage(m.group(2), "个")
+        if base and usage and len(base) >= 2:
+            return base, usage, "name_asterisk"
+
+    m = _NAME_QTY_PREFIX.match(text)
+    if m:
+        usage = _format_piece_usage(m.group(1), m.group(2))
+        rest = str(m.group(3) or "").strip()
+        if usage and rest and len(rest) >= 2 and not re.match(rf"^{_QTY_NUM}", rest):
+            return rest, usage, "name_prefix"
+
+    m = _NAME_QTY_SUFFIX.match(text)
+    if m:
+        base = str(m.group(1) or "").strip()
+        usage = _format_piece_usage(m.group(2), m.group(3))
+        if base and usage and len(base) >= 1:
+            return base, usage, "name_suffix"
+
+    m = _NAME_QTY_MIDDLE.match(text)
+    if m:
+        left = str(m.group(1) or "").strip()
+        right = str(m.group(4) or "").strip()
+        usage = _format_piece_usage(m.group(2), m.group(3))
+        combined = f"{left}{right}".strip()
+        if usage and combined and len(combined) >= 2:
+            return combined, usage, "name_middle"
+
+    return text, "", ""
+
+
+def material_name_has_embedded_quantity(name: object) -> bool:
+    """材料名是否仍含应拆出的数量前缀/后缀/星号件数。"""
+    text = str(name or "").strip()
+    if not text:
+        return False
+    _, qty, src = split_quantity_from_material_name(text)
+    if src and qty:
+        return True
+    return bool(_EMBEDDED_QTY_GUARD.search(text))
 
 
 def split_material_pair_values(value: str) -> list[str]:

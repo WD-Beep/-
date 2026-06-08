@@ -507,6 +507,16 @@ def _slash_token_to_display_unit(token: str, *, name: str = "", spec: str = "", 
     return _infer_material_price_unit(name=name, spec=spec, usage=usage, role=role)
 
 
+def _price_text_keys_equal(left: str, right: str) -> bool:
+    def _norm(value: str) -> str:
+        text = str(value or "").strip().lower()
+        if text in {"", "-", "—", "/"}:
+            return ""
+        return "".join(text.split())
+
+    return _norm(left) == _norm(right)
+
+
 def format_material_unit_price_text(
     price_text: str,
     *,
@@ -514,15 +524,21 @@ def format_material_unit_price_text(
     spec: str = "",
     usage: str = "",
     role: str = "",
+    preserve_stored_price: bool = False,
 ) -> str:
     """将价格库/报价行中的裸数字或简写（6.5、0.3/Y）规范为带「元/单位」的展示文本。"""
     text = str(price_text or "").strip()
     if not text or text in {"-", "—", "/"}:
         return text
+    if preserve_stored_price and "元" in text and _PRICE_UNIT_PATTERN.search(text):
+        return text
     if "元" in text and _PRICE_UNIT_PATTERN.search(text):
         from display_number_format import format_numbers_in_display_text
 
-        return format_numbers_in_display_text(text)
+        formatted = format_numbers_in_display_text(text)
+        if not _price_text_keys_equal(formatted, text):
+            return text
+        return formatted
 
     slash_m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*/\s*([A-Za-z?]+)\s*", text)
     if slash_m:
@@ -553,4 +569,100 @@ def format_kb_entry_price_display(
         spec=entry.raw_spec,
         usage=usage,
         role=role,
+    )
+
+
+def apply_kb_lookup_fields(
+    *,
+    material_name: str,
+    entry: KBEntry,
+    hit_score: float,
+    role: str = "",
+    usage: str = "",
+    spec: str = "",
+    existing_row: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """将查价结果映射为报价行字段：业务价 > 覆盖层 > 正式 KB > 拒绝/待 AI。"""
+    from kb_data_quality import ACCESSORY_PRICE_OUTLIER_REASON, is_accessory_price_outlier
+    from price_source_resolver import apply_confirmed_price_lookup
+
+    display_price = format_kb_entry_price_display(entry, role=role, usage=usage)
+    kb_fields: dict[str, object] = {
+        "kb_matched_name": entry.raw_name,
+        "kb_matched_spec": entry.raw_spec,
+        "kb_auto_learned": bool(getattr(entry, "auto_learned", False)),
+        "kb_lookup_score": round(float(hit_score), 2),
+        "kb_score": round(float(hit_score), 2),
+    }
+    if entry.raw_spec and (not spec or spec == "-"):
+        kb_fields["spec"] = entry.raw_spec
+
+    kb_rejected = is_accessory_price_outlier(material_name, display_price)
+    base_row = dict(existing_row or {})
+    if not base_row.get("unit_price"):
+        base_row["unit_price"] = "-"
+
+    merged = apply_confirmed_price_lookup(
+        base_row,
+        material_name=material_name,
+        spec=str(spec or base_row.get("spec") or entry.raw_spec or "-"),
+        kb_fields=kb_fields,
+        kb_display_price=display_price,
+        kb_rejected=kb_rejected,
+        kb_reject_reason=ACCESSORY_PRICE_OUTLIER_REASON if kb_rejected else "",
+        role=role,
+        usage=usage,
+    )
+    return merged
+
+
+def apply_material_price_lookup(
+    *,
+    material_name: str,
+    spec: str = "-",
+    role: str = "",
+    usage: str = "",
+    existing_row: dict[str, object] | None = None,
+    kb_hit: KBHit | None = None,
+) -> dict[str, object]:
+    """报价查价统一入口：委托 price_source_resolver.apply_confirmed_price_lookup。
+
+    只读已确认覆盖层与正式 KB；待审核候选不在此路径。
+    """
+    from kb_data_quality import ACCESSORY_PRICE_OUTLIER_REASON, is_accessory_price_outlier
+    from price_source_resolver import apply_confirmed_price_lookup
+
+    base_row = dict(existing_row or {})
+    if not base_row.get("unit_price"):
+        base_row["unit_price"] = "-"
+
+    kb_fields: dict[str, object] = {}
+    display_price = ""
+    kb_rejected = False
+    reject_reason = ""
+    if kb_hit is not None:
+        entry = kb_hit.entry
+        display_price = format_kb_entry_price_display(entry, role=role, usage=usage)
+        kb_fields = {
+            "kb_matched_name": entry.raw_name,
+            "kb_matched_spec": entry.raw_spec,
+            "kb_auto_learned": bool(getattr(entry, "auto_learned", False)),
+            "kb_lookup_score": round(float(kb_hit.score), 2),
+            "kb_score": round(float(kb_hit.score), 2),
+        }
+        if entry.raw_spec and (not spec or spec == "-"):
+            kb_fields["spec"] = entry.raw_spec
+        kb_rejected = is_accessory_price_outlier(material_name, display_price)
+        reject_reason = ACCESSORY_PRICE_OUTLIER_REASON if kb_rejected else ""
+
+    return apply_confirmed_price_lookup(
+        base_row,
+        material_name=material_name,
+        spec=str(spec or base_row.get("spec") or "-"),
+        kb_fields=kb_fields,
+        kb_display_price=display_price,
+        kb_rejected=kb_rejected,
+        kb_reject_reason=reject_reason,
+        role=role,
+        usage=usage,
     )

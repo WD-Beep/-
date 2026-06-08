@@ -1,4 +1,15 @@
-"""知识库/价格库新增前的数据质量判断。"""
+"""知识库/价格库新增前的数据质量判断。
+
+调用时机：
+  - 报价同步入库（sync_quote_detail_rows_to_price_kb）写入候选前
+  - 管理员「修正后入库」（approve_price_exception / upsert_confirmed_price_override）落盘前
+  - 覆盖层读取（lookup_confirmed_price_override）二次校验
+
+裁决结果：
+  - auto_insert     → 可进正式库或覆盖层
+  - pending_review  → 仅进待审核队列，不参与报价
+  - drop            → 垃圾/表头/部位名，丢弃
+"""
 
 from __future__ import annotations
 
@@ -27,6 +38,7 @@ _GARBAGE_FRAGMENT_RX = re.compile(
     re.I,
 )
 _BLOCKED_NAME_TOKENS = ("合计", "小计", "系统成本", "加工费", "杂费", "管理费", "开模", "模具", "系统估算")
+_SPECIAL_FEE_MARKERS = ("烤漆费", "染色费", "电镀费", "烫金费", "喷油费", "加工费", "开模费", "模具费")
 _PIECE_OR_NON_MATERIAL_NAMES = frozenset(
     {
         "前片",
@@ -45,6 +57,97 @@ _PIECE_OR_NON_MATERIAL_NAMES = frozenset(
 )
 _NON_MATERIAL_NAME_MARKERS = ("推理待核", "系统估算", "AI估算", "推断", "结构/图片推理", "待确认")
 _SUSPICIOUS_UNIT_RX = re.compile(r"^\d+(?:\.\d+)?(?:/|元)?$")
+
+
+def _first_price_number(text: str) -> float | None:
+    match = re.search(r"(\d+(?:\.\d+)?)", str(text or ""))
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+ACCESSORY_PRICE_OUTLIER_REASON = "拉链/拉头单价明显异常，疑似总价误填为单价，待人工确认"
+
+
+def is_special_fee_material_name(name: str) -> bool:
+    text = str(name or "").strip()
+    return bool(text) and any(marker in text for marker in _SPECIAL_FEE_MARKERS)
+
+
+def normalize_material_match_key(name: object, spec: object = "-") -> tuple[str, str]:
+    def _local_norm_key(value: object) -> str:
+        text = str(value or "").strip().lower()
+        if text in {"", "-", "—", "/"}:
+            return ""
+        return "".join(text.split())
+
+    return _local_norm_key(name), _local_norm_key(spec) or "-"
+
+
+def is_material_semantic_mismatch(override_name: str, target_name: str) -> bool:
+    """特殊费用/工艺费名称不能覆盖普通物料名（如拉头烤漆费 → 普通拉头）。"""
+    on = str(override_name or "").strip()
+    tn = str(target_name or "").strip()
+    if not on or not tn:
+        return True
+    if is_special_fee_material_name(on) and not is_special_fee_material_name(tn):
+        return True
+    on_norm = normalize_text(on)
+    tn_norm = normalize_text(tn)
+    if on_norm == tn_norm:
+        return False
+    # 候选名含工艺/费用词而目标为常规物料
+    if contains_any(on_norm, ("烤漆", "染色", "电镀", "烫金", "喷油")) and not contains_any(
+        tn_norm, ("烤漆", "染色", "电镀", "烫金", "喷油")
+    ):
+        return True
+    return False
+
+
+def validate_price_override_target(
+    override_name: str,
+    target_name: str,
+    *,
+    target_spec: str = "-",
+    override_spec: str = "-",
+) -> tuple[bool, str]:
+    """覆盖层写入/命中时校验材料名+规格语义一致。"""
+    if is_material_semantic_mismatch(override_name, target_name):
+        return False, "特殊费用或工艺项不能覆盖普通物料，请修正材料名/规格"
+    name_key, spec_key = normalize_material_match_key(target_name, target_spec)
+    o_name_key, o_spec_key = normalize_material_match_key(override_name, override_spec)
+    if name_key != o_name_key:
+        return False, "覆盖材料名与目标材料不一致"
+    if spec_key != o_spec_key and o_spec_key not in {"", "-"}:
+        return False, "覆盖规格与目标规格不一致"
+    return True, ""
+
+
+def is_accessory_price_outlier(name: str, price: str) -> bool:
+    """拉头/拉链单价明显偏离正常区间，疑似总价误填为单价。"""
+    text = str(name or "").strip()
+    price_num = _first_price_number(price)
+    if not text or price_num is None:
+        return False
+    if "拉头" in text and price_num >= 10:
+        return True
+    if "拉链" in text and price_num >= 20:
+        return True
+    return False
+
+
+def _looks_like_accessory_price_outlier(name: str, price: str) -> bool:
+    return is_accessory_price_outlier(name, price)
+
+
+def sanitize_accessory_unit_price(name: str, unit_price: str) -> tuple[str, bool]:
+    """返回 (清洗后单价, 是否因异常被清空)。"""
+    if is_accessory_price_outlier(name, unit_price):
+        return "-", True
+    return unit_price, False
 
 
 @dataclass(frozen=True)
@@ -178,6 +281,18 @@ def judge_kb_insert_candidate(
     material_spec = str(spec or "").strip() or "-"
     material_price = str(price or "").strip()
 
+    from sheet_parser import material_name_has_embedded_quantity, split_quantity_from_material_name
+
+    if material_name_has_embedded_quantity(material_name):
+        clean, _, _ = split_quantity_from_material_name(material_name)
+        if clean and clean != material_name:
+            return KbDataQualityVerdict(
+                KB_ACTION_REVIEW,
+                "材料名含数量词，需去掉数量后再入库",
+                "suspicious",
+            )
+        return KbDataQualityVerdict(KB_ACTION_DROP, "名称无效或为表头/汇总项", "garbage")
+
     if _blocked_material_name(material_name):
         return KbDataQualityVerdict(KB_ACTION_DROP, "名称无效或为表头/汇总项", "garbage")
     if _is_piece_or_structure_name(material_name):
@@ -252,6 +367,13 @@ def judge_kb_insert_candidate(
     if _SUSPICIOUS_UNIT_RX.fullmatch(material_price.replace(" ", "")):
         return KbDataQualityVerdict(KB_ACTION_REVIEW, "单价格式缺少单位，待人工确认", "suspicious")
 
+    if _looks_like_accessory_price_outlier(material_name, material_price):
+        return KbDataQualityVerdict(
+            KB_ACTION_REVIEW,
+            ACCESSORY_PRICE_OUTLIER_REASON,
+            "suspicious",
+        )
+
     if kb_hit or str((row or {}).get("source") or "").strip().lower() == "kb":
         return KbDataQualityVerdict(KB_ACTION_AUTO, "知识库命中或来源可信", "trusted")
 
@@ -269,6 +391,8 @@ def format_exception_reason_label(verdict: KbDataQualityVerdict, *, is_combined_
         return "规格缺失"
     if "单价格式" in reason or "缺少单位" in reason:
         return "价格格式异常"
+    if "拉链/拉头单价明显异常" in reason:
+        return "拉链拉头单价异常"
     if "AI" in reason or "系统估算" in reason:
         return "AI单价需确认"
     if "混合" in reason or "部件说明" in reason or "命名过长" in reason:

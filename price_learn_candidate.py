@@ -29,6 +29,29 @@ AUTO_CONFLICT_MARKER = "AUTO_PRICE_CONFLICT"
 AUTO_PENDING_MARKER = "AUTO_PENDING_PRICE"
 AUTO_SYNC_MARKER = "AUTO_QUOTE_SYNC"
 
+# 待审核队列 exception_status（与 status 字段不同，legacy 兼容用）
+EXCEPTION_STATUS_OPEN = "open"
+EXCEPTION_STATUS_RESOLVED = "resolved"
+EXCEPTION_STATUS_EXCLUDED = "excluded"
+
+# 合并队列读取时视为「仍在待审」的 status 值
+PENDING_REVIEW_STATUSES = frozenset(
+    {
+        STATUS_PENDING,
+        "pending_review",
+        EXCEPTION_STATUS_OPEN,
+        "",
+    }
+)
+
+# 这些 marker 的候选只进后台队列，不参与报价查价
+QUOTE_BLOCKING_MARKERS = frozenset(
+    {
+        AUTO_PENDING_MARKER,
+        AUTO_SYNC_MARKER,
+        AUTO_CONFLICT_MARKER,
+    }
+)
 
 def _now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -78,19 +101,38 @@ def infer_source_type(
 def candidate_status_to_exception_status(status: str) -> str:
     st = str(status or STATUS_PENDING).strip().lower()
     if st == STATUS_APPROVED:
-        return "resolved"
+        return EXCEPTION_STATUS_RESOLVED
     if st == STATUS_REJECTED:
-        return "excluded"
-    return "open"
+        return EXCEPTION_STATUS_EXCLUDED
+    return EXCEPTION_STATUS_OPEN
 
 
 def exception_status_to_candidate_status(exception_status: str) -> str:
-    st = str(exception_status or "open").strip().lower()
-    if st == "resolved":
+    st = str(exception_status or EXCEPTION_STATUS_OPEN).strip().lower()
+    if st == EXCEPTION_STATUS_RESOLVED:
         return STATUS_APPROVED
-    if st == "excluded":
+    if st == EXCEPTION_STATUS_EXCLUDED:
         return STATUS_REJECTED
     return STATUS_PENDING
+
+
+def is_open_exception_status(status: object) -> bool:
+    return str(status or EXCEPTION_STATUS_OPEN).strip().lower() == EXCEPTION_STATUS_OPEN
+
+
+def is_resolved_exception_status(status: object) -> bool:
+    return str(status or "").strip().lower() == EXCEPTION_STATUS_RESOLVED
+
+
+def is_quote_blocking_learn_candidate(row: dict[str, Any]) -> bool:
+    """待审核/未确认候选：仅后台展示，不得参与报价查价或写入覆盖层。"""
+    norm = normalize_learn_candidate(row)
+    if str(norm.get("status") or STATUS_PENDING) != STATUS_PENDING:
+        return False
+    if is_open_exception_status(norm.get("exception_status")):
+        return True
+    marker = str(norm.get("marker") or "").strip()
+    return marker in QUOTE_BLOCKING_MARKERS
 
 
 def build_learn_candidate(
@@ -188,7 +230,7 @@ def normalize_learn_candidate(row: dict[str, Any]) -> dict[str, Any]:
     old_price = str(row.get("old_price") or "").strip()
     st = str(row.get("status") or "").strip().lower()
     if st not in {STATUS_PENDING, STATUS_APPROVED, STATUS_REJECTED}:
-        st = exception_status_to_candidate_status(str(row.get("exception_status") or "open"))
+        st = exception_status_to_candidate_status(str(row.get("exception_status") or EXCEPTION_STATUS_OPEN))
     exc_status = candidate_status_to_exception_status(st)
     operator = str(row.get("operator") or row.get("updated_by") or "system").strip() or "system"
     quote_id = str(row.get("quote_id") or row.get("source_quote_id") or "").strip()
