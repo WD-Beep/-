@@ -1,0 +1,3 @@
+import runtime_bootstrap
+
+runtime_bootstrap.prefer_project_venv_packages()

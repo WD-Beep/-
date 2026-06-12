@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Environment
+.env
+.env.local
+
+# Build
+.next/
+out/
+dist/
+*.egg-info/
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+*.out
+
+# Database
+postgres_data/
+
+# Local probes / scratch files
+tmp_*
+probe_*.txt
+*_result.txt
+lemnos_probe.json

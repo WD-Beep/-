@@ -1,0 +1,30 @@
+from datetime import datetime
+
+from pydantic import BaseModel
+
+from app.schemas.collection_task import CollectionTaskRead
+
+
+class PlatformCount(BaseModel):
+    platform: str
+    count: int
+
+
+class DashboardSummary(BaseModel):
+    total_influencers: int
+    total_tasks: int
+    active_tasks: int
+    completed_tasks: int
+    failed_tasks: int
+    total_email_logs: int
+    sent_emails: int
+    failed_emails: int
+    instagram_influencers: int = 0
+    email_coverage_rate: float = 0.0
+    contactable_count: int = 0
+    high_match_count: int = 0
+    average_score: float | None = None
+    average_product_fit: float | None = None
+    average_roi_forecast: float | None = None
+    platforms: list[PlatformCount]
+    recent_tasks: list[CollectionTaskRead]
