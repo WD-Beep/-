@@ -804,11 +804,6 @@ async function saveQuoteApproval() {
   const statusKey = normalizeApprovalStatusKey(els.approvalStatusSelect?.value);
   const note = String(els.approvalNoteInput?.value || "").trim();
   const reviewerName = readReviewerNameFromInput();
-  if (!reviewerName) {
-    showAdminToast("请填写审核人姓名", "err");
-    els.approvalReviewerInput?.focus();
-    return;
-  }
   if (els.btnSaveQuoteApproval) els.btnSaveQuoteApproval.disabled = true;
   const { ok, data } = await apiJson(
     `/admin-api/quotes/${encodeURIComponent(selectedQuoteId)}/approval`,

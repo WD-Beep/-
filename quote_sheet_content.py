@@ -51,7 +51,8 @@ _SHEET_EMBED_SOURCES = frozenset(
 
 _SOURCE_PATH_REJECT = re.compile(
     r"(qr|qrcode|logo|icon|watermark|stamp|条码|二维码|截图|screenshot|table|sheet|"
-    r"工艺|尺寸表|说明图|文字)",
+    r"工艺|尺寸表|说明图|文字|bom|物料|清单|明细|参数|spec|worksheet|excel|"
+    r"bill[\s_-]?of[\s_-]?materials?|material[\s_-]?list|grid|清单表|规格表|参数表)",
     re.I,
 )
 
@@ -61,7 +62,10 @@ _NON_PRODUCT_IMAGE_KEYWORDS = re.compile(
     r"payment|pay(?:ment)?|付款|bank|银行|account|账号|收款|"
     r"receipt|小票|invoice|发票|ticket|票据|"
     r"barcode|条码|说明图|工艺|文字图|截图|screenshot|capture|"
-    r"qrcode|qr[\s_-]?code|二维码|other|杂项)",
+    r"qrcode|qr[\s_-]?code|二维码|other|杂项|"
+    r"bom|物料清单|材料表|明细表|清单表|参数表|规格表|"
+    r"bill[\s_-]?of[\s_-]?materials?|material[\s_-]?list|worksheet|"
+    r"excel[\s_-]?table|table[\s_-]?screenshot|grid|单元格|cell[\s_-]?grid)",
     re.I,
 )
 
@@ -190,6 +194,318 @@ def has_product_image_keywords(text: str) -> bool:
     return bool(_PRODUCT_IMAGE_KEYWORDS.search(str(text or "")))
 
 
+IMAGE_TYPE_PRODUCT = "product_photo"
+IMAGE_TYPE_BOM = "bom_table"
+IMAGE_TYPE_SPEC = "spec_table"
+IMAGE_TYPE_UNKNOWN = "unknown"
+
+
+def _png_unfilter_scanline(filter_type: int, row: list[int], prev: list[int], bpp: int) -> list[int]:
+    out = row[:]
+    if filter_type == 0:
+        return out
+    if filter_type == 1:
+        for i in range(len(out)):
+            left = out[i - bpp] if i >= bpp else 0
+            out[i] = (out[i] + left) & 0xFF
+        return out
+    if filter_type == 2:
+        for i in range(len(out)):
+            out[i] = (out[i] + prev[i]) & 0xFF
+        return out
+    if filter_type == 3:
+        for i in range(len(out)):
+            left = out[i - bpp] if i >= bpp else 0
+            up = prev[i]
+            out[i] = (out[i] + ((left + up) // 2)) & 0xFF
+        return out
+    # Paeth
+    for i in range(len(out)):
+        left = out[i - bpp] if i >= bpp else 0
+        up = prev[i]
+        up_left = prev[i - bpp] if i >= bpp else 0
+        p = left + up - up_left
+        pa = abs(p - left)
+        pb = abs(p - up)
+        pc = abs(p - up_left)
+        nearest = left if pa <= pb and pa <= pc else up if pb <= pc else up_left
+        out[i] = (out[i] + nearest) & 0xFF
+    return out
+
+
+def _decode_png_rgb_matrix(blob: bytes) -> list[list[tuple[int, int, int]]] | None:
+    import struct
+    import zlib
+
+    if blob[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    pos = 8
+    width = height = 0
+    bit_depth = 0
+    color_type = 0
+    idat_parts: list[bytes] = []
+    palette: list[tuple[int, int, int]] = []
+    while pos + 8 <= len(blob):
+        length = int.from_bytes(blob[pos : pos + 4], "big")
+        ctype = blob[pos + 4 : pos + 8]
+        data = blob[pos + 8 : pos + 8 + length]
+        pos += 12 + length
+        if ctype == b"IHDR":
+            width, height, bit_depth, color_type, *_rest = struct.unpack(">IIBBBBB", data)
+        elif ctype == b"PLTE":
+            palette = [tuple(data[i : i + 3]) for i in range(0, len(data), 3)]
+        elif ctype == b"IDAT":
+            idat_parts.append(data)
+        elif ctype == b"IEND":
+            break
+    if not idat_parts or width <= 0 or height <= 0 or bit_depth != 8:
+        return None
+    bpp_map = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+    bpp = bpp_map.get(color_type)
+    if not bpp:
+        return None
+    try:
+        raw = zlib.decompress(b"".join(idat_parts))
+    except zlib.error:
+        return None
+    stride = width * bpp
+    if len(raw) < height * (1 + stride):
+        return None
+    rgb_rows: list[list[tuple[int, int, int]]] = []
+    offset = 0
+    prev = [0] * stride
+    for _y in range(height):
+        filter_type = raw[offset]
+        offset += 1
+        scan = list(raw[offset : offset + stride])
+        offset += stride
+        scan = _png_unfilter_scanline(filter_type, scan, prev, bpp)
+        prev = scan[:]
+        row_rgb: list[tuple[int, int, int]] = []
+        if color_type == 2:
+            for x in range(width):
+                i = x * 3
+                row_rgb.append((scan[i], scan[i + 1], scan[i + 2]))
+        elif color_type == 0:
+            for x in range(width):
+                g = scan[x]
+                row_rgb.append((g, g, g))
+        elif color_type == 3 and palette:
+            for x in range(width):
+                idx = scan[x]
+                row_rgb.append(palette[idx] if idx < len(palette) else (255, 255, 255))
+        else:
+            return None
+        rgb_rows.append(row_rgb)
+    return rgb_rows
+
+
+def _downsample_luma_grid(
+    rgb_rows: list[list[tuple[int, int, int]]],
+    max_side: int = 96,
+) -> list[list[int]]:
+    h = len(rgb_rows)
+    w = len(rgb_rows[0]) if h else 0
+    if w <= 0 or h <= 0:
+        return []
+    scale = max(w, h) / max(1, max_side)
+    tw = max(8, int(round(w / scale)))
+    th = max(8, int(round(h / scale)))
+    grid: list[list[int]] = []
+    for tr in range(th):
+        sr = min(h - 1, int(tr * h / th))
+        row: list[int] = []
+        for tc in range(tw):
+            sc = min(w - 1, int(tc * w / tw))
+            r, g, b = rgb_rows[sr][sc]
+            row.append(int(0.299 * r + 0.587 * g + 0.114 * b))
+        grid.append(row)
+    return grid
+
+
+def _image_luma_grid(blob: bytes, max_side: int = 96) -> list[list[int]] | None:
+    rgb = _decode_png_rgb_matrix(blob)
+    if not rgb:
+        return None
+    return _downsample_luma_grid(rgb, max_side=max_side)
+
+
+def _row_edge_density(row: list[int], threshold: int = 38) -> float:
+    if len(row) < 2:
+        return 0.0
+    hits = sum(1 for i in range(1, len(row)) if abs(row[i] - row[i - 1]) >= threshold)
+    return hits / (len(row) - 1)
+
+
+def _col_edge_density(grid: list[list[int]], col: int, threshold: int = 38) -> float:
+    if len(grid) < 2:
+        return 0.0
+    hits = sum(
+        1 for r in range(1, len(grid)) if abs(grid[r][col] - grid[r - 1][col]) >= threshold
+    )
+    return hits / (len(grid) - 1)
+
+
+def _table_grid_score(grid: list[list[int]]) -> float:
+    """0~1：越高越像 Excel/BOM 表格截图（网格线 + 文字块 + 白底）。"""
+    h = len(grid)
+    w = len(grid[0]) if h else 0
+    if h < 8 or w < 8:
+        return 0.0
+    pixels = h * w
+    white = sum(1 for r in range(h) for c in range(w) if grid[r][c] >= 232)
+    dark = sum(1 for r in range(h) for c in range(w) if grid[r][c] <= 120)
+    white_ratio = white / pixels
+    text_ratio = dark / pixels
+
+    h_line_rows = sum(1 for r in range(h) if _row_edge_density(grid[r]) >= 0.22)
+    v_line_cols = sum(1 for c in range(w) if _col_edge_density(grid, c) >= 0.20)
+
+    dense_text_rows = 0
+    for r in range(h):
+        dr = sum(1 for c in range(w) if grid[r][c] <= 130) / w
+        if 0.06 <= dr <= 0.42 and _row_edge_density(grid[r]) >= 0.10:
+            dense_text_rows += 1
+
+    score = 0.0
+    if h_line_rows >= max(5, int(h * 0.08)) and v_line_cols >= max(3, int(w * 0.06)):
+        score += 0.55
+    elif h_line_rows >= max(7, int(h * 0.12)):
+        score += 0.35
+    if white_ratio >= 0.38 and text_ratio >= 0.04:
+        score += 0.15
+    if dense_text_rows >= max(6, int(h * 0.10)):
+        score += 0.20
+    if h_line_rows >= 8 and v_line_cols >= 5 and white_ratio >= 0.30:
+        score += 0.15
+    return min(1.0, score)
+
+
+def _text_dense_document_score(grid: list[list[int]]) -> float:
+    """0~1：白底密集文字行（BOM/物料表截图，网格线不明显时也倾向文档）。"""
+    h = len(grid)
+    w = len(grid[0]) if h else 0
+    if h < 8 or w < 8:
+        return 0.0
+    pixels = h * w
+    white = sum(1 for r in range(h) for c in range(w) if grid[r][c] >= 228)
+    white_ratio = white / pixels
+
+    text_rows = 0
+    for r in range(h):
+        dark = sum(1 for c in range(w) if grid[r][c] <= 145) / w
+        if 0.05 <= dark <= 0.42 and _row_edge_density(grid[r], threshold=28) >= 0.07:
+            text_rows += 1
+
+    text_row_ratio = text_rows / h
+    top_band = max(1, h // 3)
+    bot_start = max(top_band, h * 2 // 3)
+    top_text = 0
+    bot_text = 0
+    for r in range(h):
+        dark = sum(1 for c in range(w) if grid[r][c] <= 145) / w
+        if 0.05 <= dark <= 0.42 and _row_edge_density(grid[r], threshold=28) >= 0.07:
+            if r < top_band:
+                top_text += 1
+            elif r >= bot_start:
+                bot_text += 1
+    score = 0.0
+    if white_ratio >= 0.40 and text_row_ratio >= 0.10:
+        score += 0.40
+    if text_rows >= max(8, int(h * 0.12)):
+        score += 0.30
+    if white_ratio >= 0.48 and text_row_ratio >= 0.18:
+        score += 0.25
+    if top_text < 2 or bot_text < 2:
+        score *= 0.42
+    body_score = _product_body_score(grid)
+    if body_score >= 0.16:
+        score = max(0.0, score - body_score * 0.85)
+    return min(1.0, score)
+
+
+def _product_body_score(grid: list[list[int]]) -> float:
+    """0~1：中心区域存在较大非文字块（产品主体），表格密集文字则偏低。"""
+    h = len(grid)
+    w = len(grid[0]) if h else 0
+    if h < 8 or w < 8:
+        return 0.0
+    y0, y1 = int(h * 0.18), int(h * 0.82)
+    x0, x1 = int(w * 0.18), int(w * 0.82)
+    center_vals = [grid[r][c] for r in range(y0, y1) for c in range(x0, x1)]
+    if not center_vals:
+        return 0.0
+    center_mean = sum(center_vals) / len(center_vals)
+    corner_vals = (
+        [grid[r][c] for r in range(h) for c in range(w) if r < h // 5 or r >= h * 4 // 5 or c < w // 5 or c >= w * 4 // 5]
+    )
+    corner_mean = sum(corner_vals) / max(1, len(corner_vals))
+    contrast = abs(center_mean - corner_mean)
+    dark_center = sum(1 for v in center_vals if v <= 165) / len(center_vals)
+    if contrast >= 18 and dark_center >= 0.12:
+        blob_bonus = 0.18 if dark_center > 0.72 and contrast >= 35 else 0.0
+        return min(1.0, contrast / 55.0 + min(dark_center, 0.72) * 0.35 + blob_bonus)
+    return 0.0
+
+
+def looks_like_table_grid_image(blob: bytes) -> bool:
+    grid = _image_luma_grid(blob)
+    if not grid:
+        return False
+    if _table_grid_score(grid) >= 0.40:
+        return True
+    return _text_dense_document_score(grid) >= 0.55
+
+
+def classify_embedded_image_bytes(
+    blob: bytes,
+    *,
+    source_path: str = "",
+) -> str:
+    """候选图类型：product_photo / bom_table / spec_table / unknown。"""
+    label = str(source_path or "")
+    if label and has_non_product_image_keywords(label):
+        if re.search(r"bom|物料|清单|明细|material[\s_-]?list", label, re.I):
+            return IMAGE_TYPE_BOM
+        return IMAGE_TYPE_SPEC
+
+    dims = _image_dimensions(blob)
+    if not dims or not blob or len(blob) < 200:
+        return IMAGE_TYPE_UNKNOWN
+    w, h = dims
+
+    if looks_like_document_screenshot(w, h):
+        short, long = min(w, h), max(w, h)
+        return IMAGE_TYPE_SPEC if long / max(short, 1) < 2.15 else IMAGE_TYPE_BOM
+
+    grid = _image_luma_grid(blob)
+    table_score = _table_grid_score(grid) if grid else 0.0
+    text_doc_score = _text_dense_document_score(grid) if grid else 0.0
+    body_score = _product_body_score(grid) if grid else 0.0
+
+    if body_score >= 0.18 and table_score < 0.38 and text_doc_score < 0.48:
+        if has_product_image_keywords(label) or body_score >= 0.20:
+            return IMAGE_TYPE_PRODUCT
+
+    if table_score >= 0.40:
+        return IMAGE_TYPE_BOM
+    if text_doc_score >= 0.42 and body_score < 0.14:
+        return IMAGE_TYPE_BOM
+
+    if not looks_like_bag_product_photo(w, h):
+        return IMAGE_TYPE_UNKNOWN
+
+    if has_product_image_keywords(label) and body_score >= 0.10 and text_doc_score < 0.35:
+        return IMAGE_TYPE_PRODUCT
+    if body_score >= 0.22 and table_score < 0.18 and text_doc_score < 0.28:
+        return IMAGE_TYPE_PRODUCT
+    if body_score >= 0.16 and table_score < 0.12 and text_doc_score < 0.22:
+        return IMAGE_TYPE_PRODUCT
+    if table_score >= 0.22 or (text_doc_score >= 0.32 and body_score < 0.12):
+        return IMAGE_TYPE_BOM
+    return IMAGE_TYPE_UNKNOWN
+
+
 def looks_like_bag_product_photo(w: int, h: int) -> bool:
     """Excel 嵌入图几何特征：形似包款主图（非横条表格/说明截图）。"""
     if w <= 0 or h <= 0:
@@ -214,6 +530,9 @@ def sheet_embed_product_style_annotation(
     """解析阶段：明显包图则标记为 product_style（供报价单信任来源使用）。"""
     if source_path and has_non_product_image_keywords(source_path):
         return None
+    image_type = classify_embedded_image_bytes(blob, source_path=source_path)
+    if image_type != IMAGE_TYPE_PRODUCT:
+        return None
     if not is_acceptable_product_image_bytes(blob, source_path=source_path):
         return None
     dims = _image_dimensions(blob)
@@ -224,6 +543,7 @@ def sheet_embed_product_style_annotation(
         return None
     return {
         "image_role": "product_style",
+        "image_type": IMAGE_TYPE_PRODUCT,
         "product_image": True,
         "sheet_embed_product_detected": True,
     }
@@ -235,12 +555,18 @@ def annotate_sheet_embed_image_item(item: dict[str, Any]) -> dict[str, Any]:
     row.setdefault("from_sheet_embed", True)
     row.setdefault("image_source", "sheet_embed")
     blob = _decode_image_blob(row)
-    ann = sheet_embed_product_style_annotation(
-        blob,
-        source_path=str(row.get("source_path") or row.get("file_name") or ""),
-    )
+    source_path = str(row.get("source_path") or row.get("file_name") or "")
+    image_type = classify_embedded_image_bytes(blob, source_path=source_path)
+    row["image_type"] = image_type
+    if image_type in (IMAGE_TYPE_BOM, IMAGE_TYPE_SPEC):
+        row["product_image"] = False
+        row["image_role"] = image_type
+        return row
+    ann = sheet_embed_product_style_annotation(blob, source_path=source_path)
     if ann:
         row.update(ann)
+    else:
+        row.setdefault("product_image", False)
     return row
 
 
@@ -278,6 +604,8 @@ def is_acceptable_product_image_bytes(
     w, h = dims
     if looks_like_document_screenshot(w, h):
         return False
+    if looks_like_table_grid_image(blob):
+        return False
     short, long = min(w, h), max(w, h)
     if short < _MIN_EDGE_PX:
         return False
@@ -302,6 +630,9 @@ def _image_role(item: dict[str, Any]) -> str:
 def is_trusted_quote_sheet_image_source(item: dict[str, Any]) -> bool:
     """来源是否允许进入报价单「款式图片」列（与像素校验解耦）。"""
     if not isinstance(item, dict):
+        return False
+    image_type = str(item.get("image_type") or "").strip().lower()
+    if image_type in (IMAGE_TYPE_BOM, IMAGE_TYPE_SPEC):
         return False
     label_text = image_label_text(item)
     if has_non_product_image_keywords(label_text):
@@ -348,6 +679,12 @@ def product_image_score(item: dict[str, Any]) -> float:
     role = _image_role(item)
     if role in _REJECTED_IMAGE_ROLES:
         return -1.0
+    image_type = str(item.get("image_type") or "").strip().lower()
+    if image_type in (IMAGE_TYPE_BOM, IMAGE_TYPE_SPEC):
+        return -1.0
+    if image_type and image_type != IMAGE_TYPE_PRODUCT and not item.get("product_image"):
+        if not is_trusted_quote_sheet_image_item(item):
+            return -1.0
     if not is_trusted_quote_sheet_image_item(item):
         return -1.0
     blob = _decode_image_blob(item)
@@ -357,9 +694,16 @@ def product_image_score(item: dict[str, Any]) -> float:
     w, h = dims
     if not looks_like_bag_product_photo(w, h):
         return -1.0
+    if looks_like_table_grid_image(blob):
+        return -1.0
     short, long = min(w, h), max(w, h)
     ratio_penalty = 0.85 if long / max(short, 1) > 2.2 else 1.0
     score = float(w * h) * ratio_penalty
+    grid = _image_luma_grid(blob)
+    if grid:
+        body = _product_body_score(grid)
+        score += body * 400_000.0
+        score -= _table_grid_score(grid) * 600_000.0
     if has_product_image_keywords(label_text):
         score += 500_000.0
     return score
@@ -755,6 +1099,14 @@ def brief_customer_description_for_quote_sheet(
 
 def minimal_png_bytes(width: int = 120, height: int = 120) -> bytes:
     """生成最小合法 RGB PNG（测试与夹具用）。"""
+    return _rgb_png_from_pixel_fn(width, height, lambda _x, _y: (200, 210, 220))
+
+
+def _rgb_png_from_pixel_fn(
+    width: int,
+    height: int,
+    pixel_fn,
+) -> bytes:
     import struct
     import zlib
 
@@ -767,7 +1119,64 @@ def minimal_png_bytes(width: int = 120, height: int = 120) -> bytes:
 
     sig = b"\x89PNG\r\n\x1a\n"
     ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
-    row = b"\x00" + (b"\xc8\xd0\xe0" * w)
-    raw = row * h
+    raw_rows: list[bytes] = []
+    for y in range(h):
+        row = bytearray([0])
+        for x in range(w):
+            r, g, b = pixel_fn(x, y)
+            row.extend((int(r) & 0xFF, int(g) & 0xFF, int(b) & 0xFF))
+        raw_rows.append(bytes(row))
+    raw = b"".join(raw_rows)
     idat = zlib.compress(raw, 9)
     return sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+
+
+def table_screenshot_png_bytes(
+    width: int = 320,
+    height: int = 240,
+    *,
+    rows: int = 14,
+    cols: int = 10,
+) -> bytes:
+    """生成带网格线与单元格文字块的表格型 PNG（测试 BOM 表截图过滤）。"""
+
+    def pixel(x: int, y: int) -> tuple[int, int, int]:
+        row_h = max(1, height // max(1, rows))
+        col_w = max(1, width // max(1, cols))
+        if y % row_h == 0 or x % col_w == 0:
+            return (45, 45, 45)
+        cell_x, cell_y = x // col_w, y // row_h
+        if (cell_x + cell_y) % 2 == 0 and (x % col_w > 5 and y % row_h > 7):
+            if (x + y * 3) % 11 < 3:
+                return (25, 25, 25)
+        return (255, 255, 255)
+
+    return _rgb_png_from_pixel_fn(width, height, pixel)
+
+
+def dense_text_bom_png_bytes(width: int = 200, height: int = 220) -> bytes:
+    """白底多行文字块、无清晰网格线（测试 BOM 物料表误判为包图）。"""
+
+    def pixel(x: int, y: int) -> tuple[int, int, int]:
+        line_h = max(8, height // 18)
+        band = y % line_h
+        if band < max(2, line_h // 4) and (x * 5 + y * 3) % 13 < 4:
+            return (35, 35, 35)
+        return (255, 255, 255)
+
+    return _rgb_png_from_pixel_fn(width, height, pixel)
+
+
+def product_like_png_bytes(width: int = 160, height: int = 200) -> bytes:
+    """生成白底 + 中心产品色块的 PNG（测试包款实物图优先）。"""
+
+    cx, cy = width / 2.0, height / 2.0
+
+    def pixel(x: int, y: int) -> tuple[int, int, int]:
+        dx = (x - cx) / max(1.0, width * 0.30)
+        dy = (y - cy) / max(1.0, height * 0.36)
+        if dx * dx + dy * dy < 1.0:
+            return (72, 108, 148)
+        return (248, 248, 248)
+
+    return _rgb_png_from_pixel_fn(width, height, pixel)

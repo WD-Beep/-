@@ -161,6 +161,15 @@ description: >-
 - 必测项：生成 PDF 后检查款式图片列只显示包本身
 - 相关文件/模块：quote_sheet_images、quote_sheet_content、quote_sheet_prefill
 
+### 错误模式：款式图误用 BOM/物料表嵌入图
+- 发生场景：Excel 同时嵌入包照片与 BOM/物料清单截图；生成报价单 PDF
+- 错误表现：款式图片列显示 BOM 表格、物料明细表，而非包款实物图（如双层保温午餐包案例）
+- 根因：`classify_embedded_image_bytes` 对 `table_score<0.22` 一律判为 product；无网格线的密集文字 BOM 未识别；灰底夹具图被误当包图
+- 正确做法：新增 `_text_dense_document_score` 识别白底密集文字行；BOM 判定阈值降至 0.40；匿名嵌入必须 `body_score` 达标才标 `product_style`；多图时 `product_image_score` 择优包图；不确定则空图；前端 `isAcceptableProductImageDataUrl` 同步拦截表格/文字文档
+- 禁止做法：`table_score` 低就默认 product；把 BOM 当款式图；为填空硬塞第一张嵌入图
+- 必测项：`pytest tests/test_quote_sheet_content.py -k dense_text_bom or bom_table or prefers_product`；PDF 款式列仅包图；仅 BOM 时显示无图
+- 相关文件/模块：quote_sheet_content.py、quote_sheet_images.py、quote_sheet_prefill.py、static/quote_sheet.js
+
 ### 错误模式：产品图列自动带入包装图/标签图/材料图/银行图
 - 发生场景：生成报价单 → 产品明细「图」列自动回填
 - 错误表现：出现包装图、吊牌、尺寸说明、材料样卡、二维码、小票、银行信息等非包款图
@@ -363,6 +372,51 @@ description: >-
 - 禁止做法：KB 覆盖已有业务单价；待审核候选参与 lookup；冲突价 AUTO_QUOTE_SYNC 直写正式库
 - 必测项：`pytest tests/test_price_source_priority.py tests/test_kb_auto_learn_rules.py tests/test_price_learn_loop.py tests/test_kb_data_quality.py -q`
 - 相关文件/模块：price_source_resolver.py、price_kb.py、server.py、quote_engine.py、price_admin_store.py、kimi_client.py、sheet_parser.py
+
+### 错误模式：生成 PDF 点击后无即时反馈、校验滞后
+- 发生场景：报价单页点击「下载 PDF」或「导出 PDF（FOB·美金）」
+- 错误表现：按钮无 loading；数秒后才弹窗提示缺收款账户/打样费；用户误以为未点到或系统卡住；校验失败时 Network 已发起生成请求
+- 根因：`exportByScope` 英文导出先 `await ensureEnglishSnapshotReady`；`exportPdf` 先 `await ensureExportPreflight` 弹模态框；`runExportPdfBody` 才设 loading；`payeeState.searching` 被当作通过
+- 正确做法：点击后同步 `runExportSyncPreflight`（收款账户/打样费/客户/产品/报价币种/SWIFT）；失败立即 `alert`「请先补充：…」+ 滚动高亮首项、不调接口、不 loading；通过立刻 `setExportButtonsLoading` + `exportGuard.inflight`；后端保留兜底校验
+- 禁止做法：必填校验仅放后端或 PDF 生成完成后；校验失败仍 `await` 翻译/validate-export 后才提示；打样费 `0`/空串判断不一致
+- 必测项：不选收款账户→立刻提示「请先补充：收款账户」且无 PDF 请求；缺打样费/多缺项合并提示；校验通过按钮立即「正在生成 PDF…」；`pytest tests/test_quote_sheet_export_preflight.py -q`
+- 相关文件/模块：static/quote_sheet.js
+
+### 错误模式：英文 PDF 底部签字区下移后公司名/Customer Signature 消失
+- 发生场景：英文报价单 PDF 调整底部签字区纵向位置（左侧横线+公司名、右侧 Customer Signature）
+- 错误表现：导出 PDF 仅见左侧横线；公司名与右侧 Customer Signature 缺失；收款信息与签字区之间空白异常大
+- 根因：`transform: translateY()` 只改变视觉位置不撑开容器；html2pdf/html2canvas 按元素边界裁切；英文 `.qs-pdf-stamp-slot { min-height: 27mm }` 叠加位移导致底部溢出
+- 正确做法：签字区用 `margin-top` 替代 `translateY`；`.qs-pdf-pay-wrap` 设 `min-height` + `padding-bottom`；英文 `#pvFooterCo` 设 `min-height: calc(2 * 1.55em + 0.45em)` + `padding-bottom: 0.45em` 防换行裁切；`Customer Signature` 用 `align-self:start` + `margin-top: calc(shift-y + stamp-slot + sig + co-mt)` 与公司名首行对齐
+- 禁止做法：仅增大 translateY 指望 html2pdf 自动扩展；只移左侧或右侧导致不同步；改 pay-inner `top` 或 pay-wrap `margin-top` 导致收款信息位移
+- 必测项：Ctrl+F5 后导出英文 PDF：左侧横线+公司名完整；右侧 Customer Signature 可见且与左侧同一水平带；上方 Remark/Sample/收款信息位置不变；`pytest tests/test_quote_sheet_pdf_layout.py::QuoteSheetPdfLayoutTest::test_pdf_footer_layout_spacing_in_css -q`
+- 相关文件/模块：static/styles.css、static/quote_sheet.js、static/index.html
+
+### 错误模式：肩带/织带长度描述被提取成材料名
+- 发生场景：需求表 C 区「肩带/织带类型」单元格含 `约1.3m`、`约0.8cm粗` 等长度/粗细片段
+- 错误表现：BOM 出现 `约---1.3m` 等伪材料行；长度未进入用量/规格
+- 根因：`_looks_like_strap_spec_descriptor` 未识别米制长度；纯长度片段未过滤为 section C 元数据
+- 正确做法：长度/尺寸片段归 `quoted_usage`/`spec`；`_looks_like_length_or_dimension_metadata` 过滤伪材料名；`_section_c_strap_length_from_value` 写入肩带行用量
+- 禁止做法：把 `约1.3m` 当独立 purchasable material；仅前端隐藏脏行
+- 必测项：`pytest tests/test_demand_parser_multrow_sections.py::DemandParserStrapLengthMetadataTest -q`；BOM 无 `约1.3m` 材料名
+- 相关文件/模块：demand_parser.py
+
+### 错误模式：规格尺寸被当用量重算导致离谱小计（如 1610）
+- 发生场景：后台只改单价；行 spec/usage 含 `140*90CM`；单价 `11.5元/码`
+- 错误表现：小计被算成 `140×11.5=1610` 或 `16010` 等
+- 根因：`normalize_spec_usage`/`usage_for_amount_recalc` 把尺寸挪到 usage；`reconcile_row_amount_after_unit_price_change` 用 `_first_number("140*90CM")` 当数量
+- 正确做法：`usage_is_billable_quantity` 拦截尺寸串；尺寸留在 spec；改单价时优先按比例缩放旧小计
+- 禁止做法：`_first_number` 直接乘单价；仅改 UI 显示不改重算链路
+- 必测项：`pytest tests/test_quote_engine.py -k dimension_or_reconcile`；`pytest tests/test_material_spec_usage_enricher.py -k dimension -q`
+- 相关文件/模块：quote_engine.py、material_spec_usage_enricher.py、server.py
+
+### 错误模式：待确认物料有单价/用量却不进明细报价
+- 发生场景：结构/明细预览中「待确认」行已填单价、用量或 calc_note 可推导用量；点击「确认结构并开始报价」
+- 错误表现：明细数据表仅 1～2 行；三档成本偏低；预览里 FJ-18/PEVA/扣具等消失；`约1.1-1.3m` 等长度伪行反而出现
+- 根因：`parse_items`/`apply_material_validity_layer` 对 `candidate_review` 设 `exclude_from_cost=True`；结构确认后重跑 validity 覆盖用户 patch；`promote_quotable_rows_for_quote` 曾仅凭 `recognition_confirmed` 放行
+- 正确做法：`row_is_quotable_for_cost`（有效单价 + 可计费用量/小计/calc 推导）→ `exclude_from_cost=False`；待确认仅风险提示；缺单价/用量进 `quote_participation_summary.excluded` 并展示原因；结构确认后 `promote_quotable_rows_for_quote` 而非重跑 validity；长度伪材料名用 `_looks_like_length_or_dimension_metadata` 过滤
+- 禁止做法：仅凭 `recognition_status==candidate_review` 或 `kb_hit==False` 静默排除；结构确认后重跑 `apply_material_validity_layer` 覆盖 merge；无 participation 摘要
+- 必测项：`pytest tests/test_material_row_validity.py -k pending_or_participation -q`；待确认+单价+用量→进 parse_items/calculate_quote；缺单价→excluded 含「缺少单价」；手动 patch merge→`exclude_from_cost=False`
+- 相关文件/模块：material_row_validity.py、quote_engine.py、server.py、static/app.js
 
 ## 快速验收命令（自报项目目录）
 

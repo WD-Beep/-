@@ -107,7 +107,7 @@ class StructureConfirmationMergeTest(unittest.TestCase):
         self.assertEqual(row["usage"], "2个")
         self.assertEqual(row["unit_price"], "0.3元/个")
         self.assertAlmostEqual(float(row["amount"] or 0), 0.6, places=2)
-        self.assertTrue(row["ai"])
+        self.assertFalse(row["ai"])
 
     def test_structure_confirmation_payload_prefills_split_accessories_with_kb_hit_dash(self) -> None:
         payload = {

@@ -101,12 +101,17 @@ def apply_dual_mode_envelope(resp: dict[str, Any], *, trace: Mapping[str, Any], 
     dual_intent, confidence, route_target = infer_dual_route(resp, http_status=http_status)
     legacy_flow = resp.pop("intent", None)
 
-    if legacy_flow is not None and legacy_flow != "":
-        lf = legacy_flow if isinstance(legacy_flow, str) else str(legacy_flow)
-        if lf not in DUAL_INTENTS:
-            resp["flow_intent"] = lf
-
-    resp["intent"] = dual_intent
+    reply_type = str(resp.get("reply_type") or "").strip().lower()
+    if reply_type == "structure_confirmation":
+        preserved = str(legacy_flow or "STRUCTURE_CONFIRMATION_REQUIRED").strip()
+        resp["intent"] = preserved or "STRUCTURE_CONFIRMATION_REQUIRED"
+        resp["dual_intent"] = dual_intent
+    else:
+        if legacy_flow is not None and legacy_flow != "":
+            lf = legacy_flow if isinstance(legacy_flow, str) else str(legacy_flow)
+            if lf not in DUAL_INTENTS:
+                resp["flow_intent"] = lf
+        resp["intent"] = dual_intent
     resp["confidence"] = round(float(confidence), 4)
     resp["route_target"] = route_target
     resp["latency_ms"] = latency_ms

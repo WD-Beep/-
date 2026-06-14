@@ -7,8 +7,11 @@ import unittest
 import zipfile
 
 from quote_sheet_content import (
+    IMAGE_TYPE_BOM,
+    IMAGE_TYPE_PRODUCT,
     annotate_sheet_embed_image_item,
     brief_customer_description_for_quote_sheet,
+    classify_embedded_image_bytes,
     customer_description_for_quote_sheet,
     extract_main_material_for_quote_sheet,
     extract_materials_for_quote_sheet,
@@ -17,9 +20,13 @@ from quote_sheet_content import (
     is_trusted_quote_sheet_image_item,
     looks_like_bag_product_photo,
     looks_like_document_screenshot,
+    looks_like_table_grid_image,
+    dense_text_bom_png_bytes,
     minimal_png_bytes,
     product_image_score,
+    product_like_png_bytes,
     sanitize_quote_sheet_description,
+    table_screenshot_png_bytes,
 )
 from quote_sheet_images import extract_embedded_images_with_rows_from_xlsx_bytes
 from quote_sheet_images import merge_product_images_by_priority
@@ -182,7 +189,7 @@ class QuoteSheetContentTest(unittest.TestCase):
     def test_annotate_sheet_embed_marks_bag_not_table(self) -> None:
         bag = annotate_sheet_embed_image_item(
             {
-                "data_base64": base64.b64encode(minimal_png_bytes(140, 180)).decode(),
+                "data_base64": base64.b64encode(product_like_png_bytes(140, 180)).decode(),
                 "source_path": "xl/media/image1.png",
             }
         )
@@ -204,7 +211,7 @@ class QuoteSheetContentTest(unittest.TestCase):
                 "[Content_Types].xml",
                 '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>',
             )
-            zf.writestr("xl/media/image1.png", minimal_png_bytes(140, 180))
+            zf.writestr("xl/media/image1.png", product_like_png_bytes(140, 180))
         imgs = extract_embedded_images_with_rows_from_xlsx_bytes(buf.getvalue())
         self.assertEqual(len(imgs), 1)
         self.assertEqual(imgs[0].get("image_role"), "product_style")
@@ -222,7 +229,7 @@ class QuoteSheetContentTest(unittest.TestCase):
         self.assertEqual(imgs, [])
 
     def test_merge_marked_sales_embed_for_single_product(self) -> None:
-        b64 = base64.b64encode(minimal_png_bytes(140, 180)).decode()
+        b64 = base64.b64encode(product_like_png_bytes(140, 180)).decode()
         item = annotate_sheet_embed_image_item(
             {
                 "row_index": 8,
@@ -280,7 +287,7 @@ class QuoteSheetContentTest(unittest.TestCase):
             self.assertFalse(ann.get("product_image"))
 
     def test_prefer_bag_keyword_over_packaging_when_both_embedded(self) -> None:
-        bag_b64 = base64.b64encode(minimal_png_bytes(140, 180)).decode()
+        bag_b64 = base64.b64encode(product_like_png_bytes(140, 180)).decode()
         label_b64 = base64.b64encode(minimal_png_bytes(160, 200)).decode()
         bag = annotate_sheet_embed_image_item(
             {
@@ -331,6 +338,86 @@ class QuoteSheetContentTest(unittest.TestCase):
         plain = {**base, "source_path": "xl/media/image2.png"}
         named = {**base, "source_path": "xl/media/bag_main_style.png"}
         self.assertGreater(product_image_score(named), product_image_score(plain))
+
+    def test_classify_square_bom_table_screenshot(self) -> None:
+        blob = table_screenshot_png_bytes(300, 220)
+        self.assertEqual(classify_embedded_image_bytes(blob), IMAGE_TYPE_BOM)
+        self.assertTrue(looks_like_table_grid_image(blob))
+        self.assertFalse(is_acceptable_product_image_bytes(blob))
+
+    def test_classify_product_like_photo(self) -> None:
+        blob = product_like_png_bytes(160, 200)
+        self.assertEqual(classify_embedded_image_bytes(blob), IMAGE_TYPE_PRODUCT)
+        self.assertTrue(looks_like_bag_product_photo(160, 200))
+
+    def test_annotate_rejects_bom_table_embed(self) -> None:
+        blob = table_screenshot_png_bytes(280, 210)
+        ann = annotate_sheet_embed_image_item(
+            {"data_base64": base64.b64encode(blob).decode(), "source_path": "xl/media/image3.png"}
+        )
+        self.assertEqual(ann.get("image_type"), IMAGE_TYPE_BOM)
+        self.assertNotEqual(ann.get("image_role"), "product_style")
+        self.assertFalse(ann.get("product_image"))
+
+    def test_extract_xlsx_prefers_product_over_bom_table(self) -> None:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(
+                "[Content_Types].xml",
+                '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>',
+            )
+            zf.writestr("xl/media/image1.png", table_screenshot_png_bytes(300, 220))
+            zf.writestr("xl/media/image2.png", product_like_png_bytes(160, 200))
+        imgs = extract_embedded_images_with_rows_from_xlsx_bytes(buf.getvalue())
+        self.assertEqual(len(imgs), 1)
+        self.assertEqual(imgs[0].get("image_type"), IMAGE_TYPE_PRODUCT)
+        self.assertTrue(imgs[0].get("product_image"))
+        merged = merge_product_images_by_priority(sales_images=imgs, product_count=1)
+        self.assertTrue(str(merged.get(0) or "").startswith("data:image/png"))
+        self.assertIn(
+            base64.b64encode(product_like_png_bytes(160, 200)).decode(),
+            str(merged.get(0) or ""),
+        )
+
+    def test_classify_dense_text_bom_without_grid_as_bom(self) -> None:
+        blob = dense_text_bom_png_bytes(200, 220)
+        self.assertEqual(classify_embedded_image_bytes(blob), IMAGE_TYPE_BOM)
+        self.assertTrue(looks_like_table_grid_image(blob))
+        self.assertFalse(is_acceptable_product_image_bytes(blob))
+        ann = annotate_sheet_embed_image_item(
+            {"data_base64": base64.b64encode(blob).decode(), "source_path": "xl/media/image4.png"}
+        )
+        self.assertFalse(ann.get("product_image"))
+        merged = merge_product_images_by_priority(sales_images=[ann], product_count=1)
+        self.assertEqual(merged, {})
+
+    def test_dense_text_bom_loses_to_product_when_both_present(self) -> None:
+        bom = dense_text_bom_png_bytes(200, 220)
+        bag = product_like_png_bytes(160, 200)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(
+                "[Content_Types].xml",
+                '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>',
+            )
+            zf.writestr("xl/media/image1.png", bom)
+            zf.writestr("xl/media/image2.png", bag)
+        imgs = extract_embedded_images_with_rows_from_xlsx_bytes(buf.getvalue())
+        self.assertEqual(len(imgs), 1)
+        self.assertTrue(imgs[0].get("product_image"))
+
+    def test_only_bom_table_embeds_yield_empty_map(self) -> None:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(
+                "[Content_Types].xml",
+                '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>',
+            )
+            zf.writestr("xl/media/image1.png", table_screenshot_png_bytes(320, 240))
+        imgs = extract_embedded_images_with_rows_from_xlsx_bytes(buf.getvalue())
+        self.assertEqual(imgs, [])
+        merged = merge_product_images_by_priority(sales_images=imgs, product_count=1)
+        self.assertEqual(merged, {})
 
 
 if __name__ == "__main__":

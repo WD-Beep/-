@@ -203,6 +203,65 @@
           </div>
 
         </section>
+
+        <section class="pane price-learning-pane" aria-label="价格学习待审核建议">
+          <div class="pane-head">
+            <h2 class="pane-title">价格学习 / 待审核建议</h2>
+            <button type="button" id="btnLearningRefresh" class="btn btn-secondary btn-sm">刷新</button>
+          </div>
+          <p class="muted price-save-hint">
+            学习只进候选；批准后才写入正式价库与覆盖层。candidate 状态不会影响正式报价。
+          </p>
+          <div class="table-scroll table-scroll-list">
+            <table class="data-table data-table-compact">
+              <thead>
+                <tr>
+                  <th>材料</th>
+                  <th>规格</th>
+                  <th>样本数</th>
+                  <th>平均偏差</th>
+                  <th>最近出现</th>
+                  <th>成交/丢单</th>
+                  <th>建议方向</th>
+                  <th>建议单价</th>
+                  <th>依据</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="priceLearningBody"></tbody>
+            </table>
+            <div id="priceLearningEmpty" class="empty-state muted" hidden>暂无待审核调价建议。</div>
+          </div>
+        </section>
+
+        <section class="pane price-learning-records-pane" aria-label="价格学习候选记录">
+          <div class="pane-head">
+            <h2 class="pane-title">学习候选记录 / 成交补录</h2>
+            <button type="button" id="btnLearningRecordsRefresh" class="btn btn-secondary btn-sm">刷新</button>
+          </div>
+          <p class="muted price-save-hint">
+            候选记录不影响正式报价；可补录成交状态、最终成交价、丢单原因，或排除不当样本。
+          </p>
+          <div class="table-scroll table-scroll-list">
+            <table class="data-table data-table-compact">
+              <thead>
+                <tr>
+                  <th>材料</th>
+                  <th>系统价</th>
+                  <th>人工价</th>
+                  <th>偏差</th>
+                  <th>成交状态</th>
+                  <th>最终价</th>
+                  <th>丢单原因</th>
+                  <th>时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="priceLearningRecordsBody"></tbody>
+            </table>
+            <div id="priceLearningRecordsEmpty" class="empty-state muted" hidden>暂无候选学习记录。</div>
+          </div>
+        </section>
       </main>
     </div>
 

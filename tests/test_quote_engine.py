@@ -315,7 +315,7 @@ class QuoteEngineTest(unittest.TestCase):
         self.assertEqual(result["settings"]["system_overhead_rule"], "demand_pct_of_material_total")
         self.assertEqual(result["settings"]["system_overhead"], 5.0)
 
-    def test_dimension_like_value_moves_to_usage(self):
+    def test_dimension_like_value_stays_in_spec_not_usage(self):
         result = calculate_quote(
             {
                 "items": [
@@ -324,8 +324,27 @@ class QuoteEngineTest(unittest.TestCase):
             }
         )
         row = result["detail_rows"][0]
-        self.assertEqual(row["spec"], "-")
-        self.assertEqual(row["usage"], "140*90CM")
+        self.assertEqual(row["spec"], "140*90CM")
+        self.assertNotEqual(row["usage"], "140*90CM")
+        self.assertAlmostEqual(float(row["amount"]), 17.0, places=2)
+
+    def test_reconcile_unit_price_ignores_dimension_usage(self):
+        from quote_engine import reconcile_row_amount_after_unit_price_change
+
+        row = {
+            "name": "盖内网袋",
+            "spec": "140*90CM",
+            "usage": "140*90CM",
+            "unit_price": "11.5元/码",
+            "amount": 2.0,
+        }
+        reconcile_row_amount_after_unit_price_change(
+            row,
+            old_unit_text="10元/码",
+            old_amount=2.0,
+        )
+        self.assertAlmostEqual(float(row["amount"]), 2.3, places=2)
+        self.assertNotAlmostEqual(float(row["amount"]), 1610.0, places=0)
 
     def test_fob_adds_four_yuan_per_piece(self):
         result = calculate_quote({})

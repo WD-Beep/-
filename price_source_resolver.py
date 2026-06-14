@@ -269,6 +269,13 @@ def apply_confirmed_price_lookup(
             override_fields=override_fields,
             override_display_price=display_price,
         )
+        src_type = str(override_hit.get("source_type") or "").strip()
+        if src_type == "manual_approved_learning":
+            merged["rule_applied"] = "manual_approved_learning"
+            merged["learning_rule_source"] = src_type
+        note = str(override_hit.get("note") or override_hit.get("evidence") or "").strip()
+        if note:
+            merged["evidence"] = note
         if kb_display_price and prices_norm_conflict(display_price, kb_display_price):
             merged["price_conflict_required"] = True
             merged["kb_reference_price"] = kb_display_price

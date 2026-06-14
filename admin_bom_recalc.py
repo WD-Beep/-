@@ -433,6 +433,9 @@ def admin_recalc_and_save_bom(
     mark_admin_visual_correction_pending(quote_uid, actor)
 
     from quote_correction_learning import capture_learning_from_bom_save
+    from quote_price_auto_learning import extract_deal_context
+
+    deal_context = extract_deal_context(body if isinstance(body, dict) else {})
 
     learning_status = capture_learning_from_bom_save(
         quote_uid,
@@ -442,6 +445,7 @@ def admin_recalc_and_save_bom(
         old_quote=old_quote_snapshot,
         new_product=product,
         corrected_by=actor,
+        deal_context=deal_context,
     )
 
     fresh = get_saved_quote_admin_bundle(quote_uid)

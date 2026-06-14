@@ -38,6 +38,16 @@ _TEST_CONN: sqlite3.Connection | None = None
 APPLY_CONFIDENCE_MIN = 0.8
 SUGGEST_CONFIDENCE_MIN = 0.6
 
+BUILTIN_RULE_ID_PREFIX = "builtin-"
+LEARNED_RULE_ID_PREFIX = "learned-"
+CANDIDATE_RULE_ID_PREFIX = "candidate-"
+RULE_STATUS_PENDING = "pending_review"
+RULE_STATUS_APPROVED = "approved"
+RULE_STATUS_ACTIVE = "active"
+RULE_STATUS_REJECTED = "rejected"
+RULE_SOURCE_ADMIN_APPROVED = "admin_approved_correction"
+RULE_SOURCE_MANUAL_LEARNING = "manual_approved_learning"
+
 _BAD_USAGE_GROUP_RE = re.compile(r"^\s*1\s*(?:套|组)\s*$|^\s*一\s*组\s*$", re.I)
 _BAD_USAGE_PATTERNS = (
     r"^\s*1\s*套\s*$",
@@ -186,6 +196,16 @@ def ensure_correction_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_qcr_enabled ON quote_correction_rules(enabled, rule_type)"
     )
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(quote_correction_rules)").fetchall()}
+    for name, ddl in {
+        "rule_status": "TEXT NOT NULL DEFAULT 'active'",
+        "auto_learned": "INTEGER NOT NULL DEFAULT 0",
+        "rule_source": "TEXT NOT NULL DEFAULT ''",
+        "approved_by": "TEXT NOT NULL DEFAULT ''",
+        "approved_at": "TEXT NOT NULL DEFAULT ''",
+    }.items():
+        if name not in cols:
+            conn.execute(f"ALTER TABLE quote_correction_rules ADD COLUMN {name} {ddl}")
 
 
 def init_correction_learning_storage() -> None:
@@ -445,21 +465,48 @@ def _row_to_rule(row: sqlite3.Row) -> CorrectionRule:
     )
 
 
-def load_enabled_rules() -> list[CorrectionRule]:
+def is_builtin_rule_id(rule_id: str) -> bool:
+    return str(rule_id or "").startswith(BUILTIN_RULE_ID_PREFIX)
+
+
+def _rule_row_is_quote_applicable(row: sqlite3.Row) -> bool:
+    """仅 builtin 固定规则或已人工审批的学习规则可参与正式报价。"""
+    rule_id = str(row["rule_id"] or "")
+    if is_builtin_rule_id(rule_id):
+        return bool(row["enabled"]) if "enabled" in row.keys() else True
+    keys = row.keys() if hasattr(row, "keys") else ()
+    status = str(row["rule_status"] or RULE_STATUS_ACTIVE) if "rule_status" in keys else RULE_STATUS_ACTIVE
+    if status in (RULE_STATUS_PENDING, RULE_STATUS_REJECTED, "candidate"):
+        return False
+    enabled = bool(row["enabled"]) if "enabled" in keys else False
+    if not enabled:
+        return False
+    auto_learned = int(row["auto_learned"] or 0) if "auto_learned" in keys else 0
+    rule_type = str(row["rule_type"] or "")
+    rule_source = str(row["rule_source"] or "") if "rule_source" in keys else ""
+    approved_sources = {RULE_SOURCE_ADMIN_APPROVED, RULE_SOURCE_MANUAL_LEARNING}
+    is_learned_like = (
+        rule_id.startswith((LEARNED_RULE_ID_PREFIX, CANDIDATE_RULE_ID_PREFIX))
+        or rule_type.startswith(("learned_", "auto_"))
+        or bool(auto_learned)
+    )
+    if is_learned_like:
+        return status == RULE_STATUS_APPROVED and rule_source in approved_sources
+    return status in (RULE_STATUS_APPROVED, RULE_STATUS_ACTIVE) and rule_source in approved_sources
+
+
+def load_quote_applicable_rules() -> list[CorrectionRule]:
+    """正式报价可用规则：builtin 白名单 + 已审批学习规则。"""
     init_correction_learning_storage()
     rules: list[CorrectionRule] = []
     conn = _connect()
     try:
         rows = conn.execute(
-            "SELECT * FROM quote_correction_rules WHERE enabled = 1"
-            " ORDER BY confidence DESC, source_count DESC"
+            "SELECT * FROM quote_correction_rules ORDER BY confidence DESC, source_count DESC"
         ).fetchall()
         for row in rows:
-            keys = row.keys() if hasattr(row, "keys") else ()
-            status = str(row["rule_status"] or "active") if "rule_status" in keys else "active"
-            if status in ("pending_review", "rejected"):
-                continue
-            rules.append(_row_to_rule(row))
+            if _rule_row_is_quote_applicable(row):
+                rules.append(_row_to_rule(row))
     finally:
         if _TEST_CONN is None:
             conn.close()
@@ -468,6 +515,65 @@ def load_enabled_rules() -> list[CorrectionRule]:
         if br.rule_id not in seen:
             rules.append(br)
     return rules
+
+
+def load_enabled_rules() -> list[CorrectionRule]:
+    """兼容旧调用；与 load_quote_applicable_rules 等价。"""
+    return load_quote_applicable_rules()
+
+
+def approve_correction_rule(
+    rule_id: str,
+    *,
+    approved_by: str = "admin",
+    rule_source: str = RULE_SOURCE_ADMIN_APPROVED,
+) -> dict[str, Any]:
+    """人工审批 correction 学习规则；未审批规则不得进入正式报价。"""
+    rid = str(rule_id or "").strip()
+    if not rid:
+        raise ValueError("rule_id 不能为空。")
+    if is_builtin_rule_id(rid):
+        raise ValueError("内置固定规则无需审批。")
+    operator = str(approved_by or "admin").strip() or "admin"
+    src = str(rule_source or RULE_SOURCE_ADMIN_APPROVED).strip() or RULE_SOURCE_ADMIN_APPROVED
+    if src not in {RULE_SOURCE_ADMIN_APPROVED, RULE_SOURCE_MANUAL_LEARNING}:
+        raise ValueError("rule_source 无效。")
+    now = _utc_now_iso()
+    init_correction_learning_storage()
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT rule_id FROM quote_correction_rules WHERE rule_id = ?",
+            (rid,),
+        ).fetchone()
+        if not row:
+            raise ValueError("规则不存在。")
+        conn.execute(
+            """
+            UPDATE quote_correction_rules
+            SET enabled = 1,
+                rule_status = ?,
+                rule_source = ?,
+                approved_by = ?,
+                approved_at = ?,
+                updated_at = ?,
+                confidence = MAX(confidence, ?)
+            WHERE rule_id = ?
+            """,
+            (RULE_STATUS_APPROVED, src, operator, now, now, APPLY_CONFIDENCE_MIN, rid),
+        )
+        conn.commit()
+    finally:
+        if _TEST_CONN is None:
+            conn.close()
+    return {
+        "ok": True,
+        "rule_id": rid,
+        "approved_by": operator,
+        "approved_at": now,
+        "rule_source": src,
+        "rule_status": RULE_STATUS_APPROVED,
+    }
 
 
 def record_correction(
@@ -574,12 +680,16 @@ def _maybe_promote_rule(
         INSERT INTO quote_correction_rules (
             rule_id, rule_type, field_name, match_keywords, match_product_keywords,
             match_structure_keywords, bad_values, corrected_value, confidence, source_count,
-            enabled, affects_calculation, created_at, updated_at, reason
-        ) VALUES (?, ?, ?, ?, '[]', '[]', ?, ?, ?, ?, 1, ?, ?, ?, ?)
+            enabled, affects_calculation, created_at, updated_at, reason,
+            rule_status, auto_learned, rule_source
+        ) VALUES (?, ?, ?, ?, '[]', '[]', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 1, ?)
         ON CONFLICT(rule_id) DO UPDATE SET
-            source_count = source_count + 1,
-            confidence = MIN(0.95, confidence + 0.05),
-            updated_at = excluded.updated_at
+            source_count = MAX(source_count, excluded.source_count),
+            updated_at = excluded.updated_at,
+            rule_status = CASE
+                WHEN quote_correction_rules.rule_status = ? THEN quote_correction_rules.rule_status
+                ELSE excluded.rule_status
+            END
         """,
         (
             rule_id,
@@ -593,7 +703,10 @@ def _maybe_promote_rule(
             affects,
             now,
             now,
-            f"同类人工修正累计 {cnt['c']} 次",
+            f"同类人工修正累计 {cnt['c']} 次（待审批，不自动生效）",
+            RULE_STATUS_PENDING,
+            "correction_candidate",
+            RULE_STATUS_APPROVED,
         ),
     )
 
@@ -954,6 +1067,11 @@ def apply_correction_rules_to_items(
 
 
 def apply_correction_rules_to_payload(payload: dict[str, Any]) -> list[RuleApplication]:
+    return apply_quote_applicable_rules_to_payload(payload)
+
+
+def apply_quote_applicable_rules_to_payload(payload: dict[str, Any]) -> list[RuleApplication]:
+    """仅应用 builtin 固定规则与已审批 correction 学习规则，candidate/pending 不参与报价。"""
     if not isinstance(payload, dict):
         return []
     from material_spec_usage_enricher import (
@@ -967,11 +1085,50 @@ def apply_correction_rules_to_payload(payload: dict[str, Any]) -> list[RuleAppli
         "product_name": payload.get("product_name"),
     }
     items = payload.get("items")
-    hits = apply_correction_rules_to_items(items if isinstance(items, list) else [], ctx)
+    hits = apply_correction_rules_to_items(
+        items if isinstance(items, list) else [],
+        ctx,
+        rules=load_quote_applicable_rules(),
+    )
     purge_dynamic_usage_placeholders(items if isinstance(items, list) else [])
     if hits:
         payload["correction_rule_applications"] = [asdict(h) for h in hits]
     return hits
+
+
+def _deal_context_from_sources(
+    quote: dict[str, Any] | None = None,
+    body: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    from quote_price_auto_learning import extract_deal_context
+
+    merged: dict[str, Any] = {}
+    if isinstance(quote, dict):
+        merged.update(quote)
+        meta = quote.get("meta") if isinstance(quote.get("meta"), dict) else {}
+        merged.update(meta)
+    if isinstance(body, dict):
+        merged.update(body)
+    return extract_deal_context(merged)
+
+
+def _system_unit_price_for_row(
+    material_name: str,
+    old_row: dict[str, Any],
+    old_quote: dict[str, Any] | None,
+) -> str:
+    """改价前的系统单价：优先 old_quote.detail_rows，其次 BOM 旧行。"""
+    name = str(material_name or "").strip()
+    old_dr = {
+        str(r.get("name") or ""): r
+        for r in (old_quote or {}).get("detail_rows") or []
+        if isinstance(r, dict)
+    }
+    dr_row = old_dr.get(name) or {}
+    sys_price = str(dr_row.get("unit_price") or "").strip()
+    if sys_price and sys_price not in {"-", "—", "/"}:
+        return sys_price
+    return str(old_row.get("unit_price") or "").strip()
 
 
 def _compare_field(
@@ -990,6 +1147,8 @@ def _compare_field(
     can_promote: bool,
     result: LearningCaptureResult,
     spec: str = "",
+    deal_context: dict[str, str] | None = None,
+    old_quote: dict[str, Any] | None = None,
 ) -> None:
     if old_v == new_v:
         return
@@ -1011,6 +1170,32 @@ def _compare_field(
         if hid:
             result.history_ids.append(hid)
             result.recorded_count += 1
+            if field_name == "unit_price" and str(new_v or "").strip():
+                try:
+                    from quote_price_auto_learning import capture_unit_price_learning_from_correction
+
+                    system_price = _system_unit_price_for_row(
+                        material_name,
+                        {"unit_price": old_v},
+                        old_quote,
+                    )
+                    deal_ctx = deal_context or {}
+                    capture_unit_price_learning_from_correction(
+                        quote_uid=quote_uid,
+                        material_name=material_name,
+                        spec=str(spec or "-").strip() or "-",
+                        old_price=system_price,
+                        new_price=new_v,
+                        quote_id=quote_id,
+                        product_name=product_name,
+                        corrected_by=corrected_by,
+                        correction_context=context,
+                        deal_status=str(deal_ctx.get("deal_status") or ""),
+                        final_price=str(deal_ctx.get("final_price") or ""),
+                        loss_reason=str(deal_ctx.get("loss_reason") or ""),
+                    )
+                except Exception:
+                    logger.debug("price auto learning record skipped", exc_info=True)
             if (
                 corrected_by == "admin"
                 and field_name == "unit_price"
@@ -1067,11 +1252,13 @@ def capture_bom_edit_corrections(
     old_quote: dict[str, Any] | None = None,
     new_product: dict[str, Any] | None = None,
     corrected_by: str = "admin",
+    deal_context: dict[str, str] | None = None,
 ) -> LearningCaptureResult:
     """对比 BOM / 产品元数据保存前后，写入修正历史。"""
     result = LearningCaptureResult()
     q = quote if isinstance(quote, dict) else {}
     oq = old_quote if isinstance(old_quote, dict) else {}
+    deal_ctx = deal_context or _deal_context_from_sources(q, None)
     st = str(q.get("structure_text_snapshot") or q.get("structure_text") or "")
     pn = str(q.get("product_name") or "")
     qid = str(q.get("quote_id") or "")
@@ -1106,6 +1293,8 @@ def capture_bom_edit_corrections(
                 can_promote=field in ("usage", "spec", "piece_part", "unit_price", "piece_count"),
                 result=result,
                 spec=row_spec,
+                deal_context=deal_ctx,
+                old_quote=oq,
             )
 
     old_dr = {str(r.get("name") or ""): r for r in (oq.get("detail_rows") or []) if isinstance(r, dict)}
@@ -1169,6 +1358,7 @@ def capture_learning_from_bom_save(
     old_quote: dict[str, Any] | None = None,
     new_product: dict[str, Any] | None = None,
     corrected_by: str = "admin",
+    deal_context: dict[str, str] | None = None,
 ) -> LearningCaptureResult:
     try:
         return capture_bom_edit_corrections(
@@ -1179,6 +1369,7 @@ def capture_learning_from_bom_save(
             old_quote=old_quote,
             new_product=new_product,
             corrected_by=corrected_by,
+            deal_context=deal_context,
         )
     except Exception as exc:
         logger.exception("capture_learning_from_bom_save failed quote_uid=%s", quote_uid)

@@ -2250,6 +2250,27 @@ thead th {
   position: relative;
 }
 
+.qs-payee-type-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  margin-bottom: 10px;
+}
+
+.qs-payee-type-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary, #4b5563);
+  cursor: pointer;
+  user-select: none;
+}
+
+.qs-payee-type-option input {
+  margin: 0;
+}
+
 .qs-payee-label {
   display: block;
 }
@@ -2791,11 +2812,41 @@ thead th {
 
 .qs-pdf-root {
   --qs-pdf-footer-inset: 6px;
+  /* 页眉右侧三行整体平移：左边界约在公司名 Co. 的 C 正下方（内容区左缘 108mm） */
+  --qs-pdf-meta-right-left: 108mm;
+  --qs-pdf-meta-right-shift-x: 27mm;
+  /* 底部公章/公司名/客户签名整体下移；仅作用于 .qs-pdf-stamp-side / .qs-pdf-cust-sign-side */
+  --qs-pdf-signature-shift-y: calc(35pt + 10mm);
+  --qs-pdf-signature-shift-y-cn-bump: 5mm;
+  --qs-pdf-signature-shift-y-en-bump: 10mm;
+  --qs-pdf-signature-shift-y-extra: 20mm;
+  --qs-pdf-stamp-shift-y-cn: calc(
+    var(--qs-pdf-signature-shift-y) + var(--qs-pdf-signature-shift-y-cn-bump) + var(--qs-pdf-signature-shift-y-extra)
+  );
+  --qs-pdf-cust-shift-y-cn: calc(
+    var(--qs-pdf-signature-shift-y) - 6mm + var(--qs-pdf-signature-shift-y-cn-bump) + var(--qs-pdf-signature-shift-y-extra)
+  );
+  --qs-pdf-stamp-shift-y-en: calc(
+    var(--qs-pdf-signature-shift-y) + var(--qs-pdf-signature-shift-y-en-bump) + var(--qs-pdf-signature-shift-y-extra)
+  );
+  --qs-pdf-cust-shift-y-en: calc(
+    var(--qs-pdf-signature-shift-y) + var(--qs-pdf-signature-shift-y-en-bump) + var(--qs-pdf-signature-shift-y-extra)
+  );
+  /* 英文底部签字区：公章占位 + 签字线 + 公司名首行，用于左右签名文字带对齐 */
+  --qs-pdf-en-stamp-slot-h: 17mm;
+  --qs-pdf-en-sig-block-h: 9px;
+  --qs-pdf-en-footer-co-mt: 8px;
+  --qs-pdf-en-sign-text-offset: calc(
+    var(--qs-pdf-en-stamp-slot-h) + var(--qs-pdf-en-sig-block-h) + var(--qs-pdf-en-footer-co-mt)
+  );
+  --qs-pdf-en-sign-block-min-h: 30mm;
+  --qs-pdf-en-sign-block-pad-bottom: 8mm;
+  --qs-pdf-cn-sign-block-pad-bottom: 8mm;
   width: 210mm;
   max-width: 210mm;
   min-height: 0;
   box-sizing: border-box;
-  padding: 12mm 14mm;
+  padding: 12mm 14mm 20mm;
   margin: 0 auto;
   background: #fff;
   color: #000;
@@ -2887,7 +2938,7 @@ thead th {
   padding-right: 8px;
 }
 
-/* 占「报价数量+单价」列：左侧对齐形成整齐右侧信息列 */
+/* 占「报价数量+单价」列：右侧信息块整块平移（固定 mm，避免 transform 百分比歧义） */
 .qs-pdf-meta-right-shifted {
   text-align: left;
   vertical-align: top;
@@ -2895,6 +2946,9 @@ thead th {
   padding-right: 6px;
   box-sizing: border-box;
   white-space: nowrap;
+  position: relative;
+  overflow: visible;
+  transform: translateX(var(--qs-pdf-meta-right-shift-x));
 }
 
 .qs-pdf-meta-right-shifted [data-pdf-lbl] {
@@ -2906,6 +2960,20 @@ thead th {
 
 .qs-pdf-root[data-pdf-lang="en"] .qs-pdf-meta-right-shifted [data-pdf-lbl] {
   min-width: 7.6em;
+  margin-right: 0;
+}
+
+.qs-pdf-root[data-pdf-lang="en"] .qs-pdf-meta-right-shifted [data-pdf-lbl="lbl_meta_quote_no"] {
+  display: inline;
+  min-width: 0;
+  width: auto;
+  margin-right: 0.12em;
+  padding-right: 0;
+}
+
+.qs-pdf-root[data-pdf-lang="en"] .qs-pdf-meta-right-shifted [data-pdf-lbl="lbl_meta_cust_phone"] {
+  min-width: 7.6em;
+  margin-right: 0;
 }
 
 .qs-pdf-meta-right-shifted .qs-pdf-meta-value {
@@ -2935,7 +3003,11 @@ thead th {
 }
 
 .qs-pdf-root[data-pdf-lang="en"] .qs-pdf-meta-right-shifted .qs-pdf-meta-value-quote-no {
-  max-width: calc(100% - 8em);
+  display: inline;
+  max-width: none;
+  margin-left: 0;
+  padding-left: 0;
+  vertical-align: baseline;
 }
 
 .qs-pdf-meta-note-gap {
@@ -3035,6 +3107,21 @@ thead th {
   overflow-wrap: break-word;
 }
 
+.qs-pdf-table tbody td.col-name {
+  white-space: normal;
+  line-height: 1.25;
+  font-size: 9pt;
+  overflow: hidden;
+  padding: 5px 3px;
+  vertical-align: middle;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  height: auto;
+  max-width: 0;
+  text-align: left;
+  hyphens: auto;
+}
+
 .qs-pdf-table tbody td.col-desc {
   white-space: normal;
   line-height: 1.25;
@@ -3103,6 +3190,44 @@ thead th {
 
 .qs-pdf-table .col-note {
   width: 7%;
+}
+
+.qs-pdf-root[data-pdf-note-col="0"] .qs-pdf-table col.col-note,
+.qs-pdf-root[data-pdf-note-col="0"] #pvThNoteColumn,
+.qs-pdf-root[data-pdf-note-col="0"] .qs-pdf-table tbody td.col-note {
+  display: none !important;
+}
+
+.qs-pdf-root[data-pdf-note-col="0"] .qs-pdf-table .col-img {
+  width: 12%;
+}
+
+.qs-pdf-root[data-pdf-note-col="0"] .qs-pdf-table .col-name {
+  width: 11%;
+}
+
+.qs-pdf-root[data-pdf-note-col="0"] .qs-pdf-table .col-size {
+  width: 15%;
+}
+
+.qs-pdf-root[data-pdf-note-col="0"] .qs-pdf-table .col-desc {
+  width: 17%;
+}
+
+.qs-pdf-root[data-pdf-note-col="0"] .qs-pdf-table .col-pack {
+  width: 10%;
+}
+
+.qs-pdf-root[data-pdf-note-col="0"] .qs-pdf-table .col-qty {
+  width: 13%;
+}
+
+.qs-pdf-root[data-pdf-note-col="0"] .qs-pdf-table .col-price {
+  width: 10%;
+}
+
+.qs-pdf-root[data-pdf-note-col="0"] .qs-pdf-table .col-total {
+  width: 12%;
 }
 
 .qs-pdf-prod-img {
@@ -3321,16 +3446,22 @@ thead th {
   width: 100%;
   margin-top: 6px;
   padding-left: 0;
+  padding-bottom: var(--qs-pdf-cn-sign-block-pad-bottom);
+  min-height: calc(var(--qs-pdf-stamp-shift-y-cn) + 38mm);
   box-sizing: border-box;
 }
 
 .qs-pdf-stamp-side {
   grid-column: 1;
+  align-self: end;
   min-width: 0;
-  margin-top: 12px;
+  margin-top: var(--qs-pdf-stamp-shift-y-cn);
   padding-left: var(--qs-pdf-footer-inset);
+  padding-bottom: 4mm;
   box-sizing: border-box;
   overflow: visible;
+  position: relative;
+  z-index: 2;
 }
 
 .qs-pdf-stamp-slot {
@@ -3375,6 +3506,10 @@ thead th {
   white-space: normal;
 }
 
+.qs-pdf-root:not([data-pdf-lang="en"]) .qs-pdf-footer-co {
+  margin-top: 8px;
+}
+
 .qs-pdf-bank {
   margin-top: 6px;
   font-size: 10pt;
@@ -3382,6 +3517,12 @@ thead th {
   text-align: left;
   overflow-wrap: anywhere;
   word-break: normal;
+}
+
+.qs-pdf-bank #pvBank.qs-pdf-bank-usd-block {
+  display: block;
+  white-space: pre-line;
+  line-height: 1.35;
 }
 
 .qs-pdf-bank #pvBank,
@@ -3403,27 +3544,43 @@ thead th {
   grid-column: 3;
   justify-self: start;
   align-self: end;
-  padding-bottom: 2px;
+  margin-top: var(--qs-pdf-cust-shift-y-cn);
+  padding-bottom: 4mm;
   text-align: left;
   font-size: 10pt;
   line-height: 1.55;
 }
 
 .qs-pdf-root[data-pdf-lang="en"] .qs-pdf-stamp-side {
-  margin-top: 18px;
+  align-self: end;
+  margin-top: var(--qs-pdf-stamp-shift-y-en);
+  padding-bottom: 4mm;
 }
 
 .qs-pdf-root[data-pdf-lang="en"] .qs-pdf-pay-wrap {
   grid-template-columns: minmax(0, 30%) minmax(0, 46%) minmax(52mm, 24%);
+  min-height: calc(
+    var(--qs-pdf-stamp-shift-y-en) + var(--qs-pdf-en-stamp-slot-h) + var(--qs-pdf-en-sign-block-min-h)
+  );
+  padding-bottom: var(--qs-pdf-en-sign-block-pad-bottom);
+  box-sizing: border-box;
 }
 
 .qs-pdf-root[data-pdf-lang="en"] .qs-pdf-stamp-slot {
-  min-height: 27mm;
+  min-height: var(--qs-pdf-en-stamp-slot-h);
+}
+
+.qs-pdf-root[data-pdf-lang="en"] .qs-pdf-sig-line {
+  margin: 2px 0 6px;
 }
 
 .qs-pdf-root[data-pdf-lang="en"] .qs-pdf-footer-co {
+  margin-top: var(--qs-pdf-en-footer-co-mt);
   max-width: 72mm;
   white-space: normal;
+  overflow: visible;
+  padding-bottom: 0.45em;
+  min-height: calc(2 * 1.55em + 0.45em);
 }
 
 .qs-pdf-root[data-pdf-lang="en"] .qs-pdf-cust-sign-side {
@@ -3432,7 +3589,9 @@ thead th {
   align-self: start;
   width: auto;
   min-width: 52mm;
-  margin-top: 35mm;
+  margin-top: calc(var(--qs-pdf-cust-shift-y-en) + var(--qs-pdf-en-sign-text-offset));
+  padding-top: 0.08em;
+  padding-bottom: 4mm;
   display: block;
   white-space: nowrap;
 }

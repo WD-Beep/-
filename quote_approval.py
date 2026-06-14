@@ -41,11 +41,8 @@ _RESERVED_REVIEWER_NAMES = frozenset({"admin", "administrator"})
 
 
 def normalize_reviewer_name(raw: object) -> str:
-    """业务审核人姓名（非后台登录账号）。"""
-    name = str(raw or "").strip()
-    if not name:
-        raise ValueError("请填写审核人姓名")
-    return name
+    """业务审核人姓名（非后台登录账号）；允许为空。"""
+    return str(raw or "").strip()
 
 
 def sanitize_public_reviewer_name(raw: object) -> str:
@@ -64,7 +61,7 @@ def display_reviewer_name(raw: object) -> str:
 
 def resolve_reviewer_name_from_request(body: dict[str, Any] | None) -> str:
     if not isinstance(body, dict):
-        raise ValueError("请填写审核人姓名")
+        raise ValueError("请求体无效")
     raw = body.get("reviewer_name")
     if raw is None:
         raw = body.get("approved_by_name")

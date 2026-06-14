@@ -2230,17 +2230,20 @@ def _backfill_amount_from_unit_price(row: dict[str, Any]) -> None:
 
     if eff_qty is not None and eff_qty > 0:
         row["amount"] = round(unit_price_value * eff_qty, 2)
-        row["amount_ai"] = True
+        if not _kb_hit_has_valid_unit_price(row):
+            row["amount_ai"] = True
         return
 
     if usage_quantity is not None:
         if usage_quantity <= 0:
             row["amount"] = 0.0
-            row["amount_ai"] = True
+            if not _kb_hit_has_valid_unit_price(row):
+                row["amount_ai"] = True
             return
         if _usage_price_numeric_compatible(unit_price_text, usage_raw):
             row["amount"] = round(unit_price_value * usage_quantity, 2)
-            row["amount_ai"] = True
+            if not _kb_hit_has_valid_unit_price(row):
+                row["amount_ai"] = True
             return
         return
 
@@ -2248,7 +2251,8 @@ def _backfill_amount_from_unit_price(row: dict[str, Any]) -> None:
         return
 
     row["amount"] = round(unit_price_value, 2)
-    row["amount_ai"] = True
+    if not _kb_hit_has_valid_unit_price(row):
+        row["amount_ai"] = True
 
 
 def _row_has_checkable_numeric_price_usage(row: dict[str, Any]) -> bool:
@@ -2400,11 +2404,11 @@ def _has_usable_unit_price(value: str) -> bool:
 
 
 def _kb_hit_has_valid_unit_price(row: dict[str, Any]) -> bool:
-    from price_source_resolver import PRICE_SOURCE_KB, infer_price_source
-
-    if infer_price_source(row) != PRICE_SOURCE_KB:
+    if not bool(row.get("kb_hit")):
         return False
-    return bool(row.get("kb_hit")) and _has_usable_unit_price(str(row.get("unit_price") or ""))
+    if _as_bool(row.get("unit_price_ai")):
+        return False
+    return _has_usable_unit_price(str(row.get("unit_price") or ""))
 
 
 MARKET_ESTIMATE_NOTE = "市场估算，需人工复核"
@@ -2487,18 +2491,22 @@ def _usage_from_structure_quantity_text(row: dict[str, Any]) -> str:
 def _ensure_market_estimate_usage(row: dict[str, Any]) -> None:
     if not _is_structure_or_split_market_candidate(row):
         return
+    kb_priced = _kb_hit_has_valid_unit_price(row)
     usage = str(row.get("usage") or "").strip()
     if usage and not _is_missing(usage):
         from material_inference import is_pending_inference_usage_text
 
         if re.fullmatch(r"1\s*套", usage, flags=re.I) or usage in {"一套", "1组", "一组"}:
             row["usage"] = _default_market_usage_for_row(row)
-            row["usage_ai"] = True
+            if not kb_priced:
+                row["usage_ai"] = True
         elif is_pending_inference_usage_text(usage):
-            row["usage_ai"] = True
+            if not kb_priced:
+                row["usage_ai"] = True
         return
     row["usage"] = _usage_from_structure_quantity_text(row) or _default_market_usage_for_row(row)
-    row["usage_ai"] = True
+    if not kb_priced:
+        row["usage_ai"] = True
 
 
 def _fallback_fill_and_mark_status(
@@ -2715,9 +2723,10 @@ def _format_price_text(value: float, unit: str) -> str:
 
 
 def _refresh_row_source(row: dict[str, Any]) -> None:
-    if _kb_hit_has_valid_unit_price(row) and not _as_bool(row.get("unit_price_ai")):
+    if _kb_hit_has_valid_unit_price(row):
         row["source"] = "kb"
         row["unit_price_ai"] = False
+        row["amount_ai"] = False
         return
     has_ai_fields = any(
         _as_bool(row.get(flag))

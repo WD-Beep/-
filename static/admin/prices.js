@@ -1210,6 +1210,224 @@ els.priceSearch.addEventListener("input", () => {
 });
 els.priceFormStatus.addEventListener("change", syncDeleteButtonState);
 
+async function loadPriceLearningSuggestions() {
+  const body = document.getElementById("priceLearningBody");
+  const empty = document.getElementById("priceLearningEmpty");
+  if (!body) return;
+  body.innerHTML = '<tr><td colspan="10" class="muted">加载中…</td></tr>';
+  const { ok, data } = await apiJson("/admin-api/price-learning/suggestions?status=pending");
+  if (!ok) {
+    if (data?.error === "forbidden") {
+      gotoLogin();
+      return;
+    }
+    body.innerHTML = `<tr><td colspan="10" class="muted">${escapeHtml(data?.message || "加载失败")}</td></tr>`;
+    return;
+  }
+  const items = Array.isArray(data?.items) ? data.items : [];
+  if (!items.length) {
+    body.innerHTML = "";
+    if (empty) empty.hidden = false;
+    return;
+  }
+  if (empty) empty.hidden = true;
+  body.innerHTML = items
+    .map((item) => {
+      const sid = escapeHtml(item.suggestion_id || "");
+      const name = escapeHtml(item.material_name || "—");
+      const spec = escapeHtml(item.spec || "—");
+      const samples = escapeHtml(String(item.sample_count ?? "—"));
+      const dev = escapeHtml(
+        item.avg_deviation_pct != null ? `${Number(item.avg_deviation_pct).toFixed(2)}%` : "—"
+      );
+      const lastSeen = escapeHtml(String(item.last_seen_at || "—").replace("T", " ").slice(0, 19));
+      const dealStats = escapeHtml(item.deal_stats_text || item.deal_summary || "—");
+      const dir = escapeHtml(item.suggested_direction || "—");
+      const price = escapeHtml(item.suggested_price || "—");
+      const evidence = escapeHtml(item.evidence || "");
+      const risk = escapeHtml(item.risk_note || "");
+      return `<tr data-suggestion-id="${sid}">
+        <td>${name}</td>
+        <td>${spec}</td>
+        <td>${samples}</td>
+        <td>${dev}</td>
+        <td>${lastSeen}</td>
+        <td>${dealStats}</td>
+        <td>${dir}</td>
+        <td>${price}</td>
+        <td><span class="muted small">${evidence}</span>${risk ? `<br><span class="badge badge-warn">${risk}</span>` : ""}</td>
+        <td class="table-actions">
+          <button type="button" class="btn btn-primary btn-sm btn-learning-approve" data-id="${sid}">批准</button>
+          <button type="button" class="btn btn-secondary btn-sm btn-learning-reject" data-id="${sid}">驳回</button>
+        </td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function dealStatusLabel(status) {
+  const key = String(status || "").trim().toLowerCase();
+  if (key === "deal") return "成交";
+  if (key === "lost") return "丢单";
+  if (key === "pending") return "待定";
+  return "未知";
+}
+
+async function loadPriceLearningRecords() {
+  const body = document.getElementById("priceLearningRecordsBody");
+  const empty = document.getElementById("priceLearningRecordsEmpty");
+  if (!body) return;
+  body.innerHTML = '<tr><td colspan="9" class="muted">加载中…</td></tr>';
+  const { ok, data } = await apiJson("/admin-api/price-learning/records?learning_status=candidate");
+  if (!ok) {
+    body.innerHTML = `<tr><td colspan="9" class="muted">${escapeHtml(data?.message || "加载失败")}</td></tr>`;
+    return;
+  }
+  const items = Array.isArray(data?.items) ? data.items : [];
+  if (!items.length) {
+    body.innerHTML = "";
+    if (empty) empty.hidden = false;
+    return;
+  }
+  if (empty) empty.hidden = true;
+  body.innerHTML = items
+    .map((item) => {
+      const rid = escapeHtml(item.record_id || "");
+      const name = escapeHtml(item.material_name || "—");
+      const sys = escapeHtml(item.system_price || "—");
+      const man = escapeHtml(item.manual_price || "—");
+      const dev = escapeHtml(
+        item.deviation_pct != null ? `${Number(item.deviation_pct).toFixed(2)}%` : "—"
+      );
+      const deal = escapeHtml(dealStatusLabel(item.deal_status));
+      const finalP = escapeHtml(item.final_price || "—");
+      const loss = escapeHtml(item.loss_reason || "—");
+      const at = escapeHtml(String(item.created_at || "—").replace("T", " ").slice(0, 19));
+      return `<tr data-record-id="${rid}">
+        <td>${name}</td>
+        <td>${sys}</td>
+        <td>${man}</td>
+        <td>${dev}</td>
+        <td>${deal}</td>
+        <td>${finalP}</td>
+        <td>${loss}</td>
+        <td>${at}</td>
+        <td class="table-actions">
+          <button type="button" class="btn btn-secondary btn-sm btn-learning-deal" data-id="${rid}">补录成交</button>
+          <button type="button" class="btn btn-secondary btn-sm btn-learning-exclude" data-id="${rid}">排除</button>
+        </td>
+      </tr>`;
+    })
+    .join("");
+}
+
+async function patchLearningRecordDeal(recordId) {
+  const operator = els.priceUpdatedBy?.value?.trim() || "admin";
+  const dealStatus = window.prompt("成交状态：deal / lost / pending / unknown", "unknown");
+  if (dealStatus == null) return;
+  const finalPrice = window.prompt("最终成交价（可空）：", "") ?? "";
+  const lossReason = window.prompt("丢单原因（可空）：", "") ?? "";
+  const { ok, data } = await apiJson("/admin-api/price-learning/update-deal", {
+    method: "POST",
+    body: JSON.stringify({
+      record_id: recordId,
+      deal_status: String(dealStatus).trim(),
+      final_price: String(finalPrice).trim(),
+      loss_reason: String(lossReason).trim(),
+      operator,
+    }),
+  });
+  if (!ok) {
+    window.alert(data?.message || data?.error || "补录失败");
+    return;
+  }
+  await loadPriceLearningRecords();
+  await loadPriceLearningSuggestions();
+}
+
+async function excludeLearningRecord(recordId) {
+  const operator = els.priceUpdatedBy?.value?.trim() || "admin";
+  if (!window.confirm("确认排除该学习样本？排除后不再参与统计建议。")) return;
+  const { ok, data } = await apiJson("/admin-api/price-learning/exclude-record", {
+    method: "POST",
+    body: JSON.stringify({ record_id: recordId, operator }),
+  });
+  if (!ok) {
+    window.alert(data?.message || data?.error || "排除失败");
+    return;
+  }
+  await loadPriceLearningRecords();
+  await loadPriceLearningSuggestions();
+}
+
+async function approveLearningSuggestion(suggestionId) {
+  const operator = els.priceUpdatedBy?.value?.trim() || "admin";
+  const row = document.querySelector(`tr[data-suggestion-id="${CSS.escape(suggestionId)}"]`);
+  const priceCell = row?.querySelector("td:nth-child(8)");
+  const suggested = priceCell?.textContent?.trim() || "";
+  const finalPrice = window.prompt("批准写入正式价库，确认单价：", suggested);
+  if (finalPrice == null || !String(finalPrice).trim()) return;
+  const { ok, data } = await apiJson("/admin-api/price-learning/approve", {
+    method: "POST",
+    body: JSON.stringify({
+      suggestion_id: suggestionId,
+      approved_by: operator,
+      final_price: String(finalPrice).trim(),
+    }),
+  });
+  if (!ok) {
+    window.alert(data?.message || data?.error || "批准失败");
+    return;
+  }
+  window.alert(`已批准：${data.price || finalPrice}（来源：${data.rule_source || "manual_approved_learning"}）`);
+  await loadPriceLearningSuggestions();
+  await loadList(true);
+}
+
+async function rejectLearningSuggestion(suggestionId) {
+  const operator = els.priceUpdatedBy?.value?.trim() || "admin";
+  const reason = window.prompt("驳回原因（可选）：", "") ?? "";
+  const { ok, data } = await apiJson("/admin-api/price-learning/reject", {
+    method: "POST",
+    body: JSON.stringify({ suggestion_id: suggestionId, operator, reason }),
+  });
+  if (!ok) {
+    window.alert(data?.message || data?.error || "驳回失败");
+    return;
+  }
+  await loadPriceLearningSuggestions();
+}
+
+document.getElementById("btnLearningRefresh")?.addEventListener("click", () => {
+  loadPriceLearningSuggestions();
+});
+document.getElementById("btnLearningRecordsRefresh")?.addEventListener("click", () => {
+  loadPriceLearningRecords();
+});
+document.getElementById("priceLearningBody")?.addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button");
+  if (!btn) return;
+  const id = btn.getAttribute("data-id");
+  if (!id) return;
+  if (btn.classList.contains("btn-learning-approve")) {
+    approveLearningSuggestion(id);
+  } else if (btn.classList.contains("btn-learning-reject")) {
+    rejectLearningSuggestion(id);
+  }
+});
+
+document.getElementById("priceLearningRecordsBody")?.addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button");
+  if (!btn) return;
+  const id = btn.getAttribute("data-id");
+  if (!id) return;
+  if (btn.classList.contains("btn-learning-deal")) {
+    patchLearningRecordDeal(id);
+  } else if (btn.classList.contains("btn-learning-exclude")) {
+    excludeLearningRecord(id);
+  }
+});
+
 (async () => {
   const ok = await guardAdminRoleOrRedirect();
   if (!ok) return;
@@ -1218,4 +1436,6 @@ els.priceFormStatus.addEventListener("change", syncDeleteButtonState);
   renderTableHead();
   await loadStats();
   await loadList(false);
+  await loadPriceLearningSuggestions();
+  await loadPriceLearningRecords();
 })();

@@ -230,7 +230,7 @@ class QuoteApprovalAdminRoutesTest(unittest.TestCase):
         self.assertEqual((detail.get("meta") or {}).get("approval_note"), "用量口径不一致")
         self.assertEqual((detail.get("meta") or {}).get("approved_by"), "李四")
 
-    def test_approval_missing_reviewer_returns_400(self) -> None:
+    def test_approval_empty_reviewer_succeeds(self) -> None:
         uid = f"http-approval-no-reviewer-{uuid.uuid4().hex[:10]}"
         save_quote_calculation(
             quote_uid=uid,
@@ -250,9 +250,15 @@ class QuoteApprovalAdminRoutesTest(unittest.TestCase):
             {"approval_status": "approved", "approval_note": "无审核人"},
             headers=_admin_headers(),
         )
-        self.assertEqual(code, 400)
-        self.assertEqual(body.get("error"), "invalid_request")
-        self.assertIn("审核人", body.get("message") or "")
+        self.assertEqual(code, 200)
+        self.assertEqual(body.get("approval_status"), "approved")
+        self.assertEqual(body.get("approval_note"), "无审核人")
+        self.assertEqual(body.get("approved_by"), "")
+
+        _, detail = self._get_json(f"/admin-api/quotes/{uid}", headers={"X-User-Role": "admin"})
+        self.assertEqual((detail.get("meta") or {}).get("approval_status"), "approved")
+        self.assertEqual((detail.get("meta") or {}).get("approval_note"), "无审核人")
+        self.assertEqual((detail.get("meta") or {}).get("approved_by"), "")
 
     def test_approval_missing_status_returns_400(self) -> None:
         uid = f"http-approval-bad-{uuid.uuid4().hex[:10]}"

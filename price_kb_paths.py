@@ -74,7 +74,7 @@ def official_kb_write_allowed(*, updated_by: str = "", source: str = "") -> bool
         return False
     if os.environ.get("ALLOW_OFFICIAL_KB_WRITE", "").strip().lower() in {"1", "true", "yes"}:
         return True
-    if src in {"admin_upsert", "admin_import", "admin_approve"}:
+    if src in {"admin_upsert", "admin_import", "admin_approve", "manual_approved_learning"}:
         return True
     if src == "quote_auto_learn" and os.environ.get(
         "ALLOW_OFFICIAL_KB_AUTO_LEARN", "0"

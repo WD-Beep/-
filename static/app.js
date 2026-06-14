@@ -145,6 +145,9 @@ function quoteFetch(path, options = {}) {
   return fetch(url, { credentials: "include", ...options });
 }
 
+window.quoteFetch = quoteFetch;
+window.quoteApiUrl = quoteApiUrl;
+
 function quoteFetchWithTimeout(path, options = {}, timeoutMs = QUOTE_FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -1904,6 +1907,7 @@ function buildQuoteCardInnerHtml(quote, fileName, msgId, cardOpts = {}) {
     }
     ${buildStructureGapHintsHtml(quote.structure_gap_hints, { compact: true })}
     ${buildAnomalyReviewHintsHtml(quote.anomaly_review_hints)}
+    ${buildQuoteParticipationSummaryHtml(quote.quote_participation_summary)}
     ${buildStructureChecklistPanelHtml(quote, detailRootKey, msgId)}
     <section class="table-section quote-detail-section" data-quote-detail-root="${escapeHtml(detailRootKey)}">
       <div class="quote-detail-toolbar">
@@ -2902,6 +2906,42 @@ function buildAnomalyReviewHintsHtml(anomalyHints) {
   return `<section class="anomaly-review-panel">
     <h4>人工复核提醒</h4>
     <ul class="anomaly-review-list">${rows}</ul>
+  </section>`;
+}
+
+function buildQuoteParticipationSummaryHtml(summary) {
+  if (!summary || typeof summary !== "object") return "";
+  const excluded = Array.isArray(summary.excluded) ? summary.excluded : [];
+  const includedCount = Number(summary.included_count) || 0;
+  const excludedCount = Number(summary.excluded_count) || excluded.length;
+  if (!excludedCount && !includedCount) return "";
+  const excludedRows = excluded
+    .slice(0, 40)
+    .map((row) => {
+      const name = escapeHtml(String(row?.name || "-"));
+      const reasons = Array.isArray(row?.reasons) ? row.reasons : [];
+      const reasonText = reasons.length
+        ? escapeHtml(reasons.join("；"))
+        : escapeHtml("未满足计价条件");
+      return `<li><strong>${name}</strong><span class="quote-participation-reason">${reasonText}</span></li>`;
+    })
+    .join("");
+  const excludedBlock = excludedCount
+    ? `<div class="quote-participation-block quote-participation-block--excluded">
+        <h5>未参与报价（${escapeHtml(String(excludedCount))} 项）</h5>
+        <ul class="quote-participation-list">${excludedRows || `<li class="muted">无</li>`}</ul>
+      </div>`
+    : "";
+  const includedNote =
+    includedCount > 0
+      ? `<p class="muted quote-participation-included-note">已参与报价 <strong>${escapeHtml(
+          String(includedCount),
+        )}</strong> 项（见下方明细数据表）。「待确认」仅作风险提示，不阻断计价。</p>`
+      : "";
+  return `<section class="quote-participation-panel">
+    <h4>物料计价参与情况</h4>
+    ${includedNote}
+    ${excludedBlock}
   </section>`;
 }
 

@@ -35,6 +35,9 @@ QUOTE_SHEET_META_KEYS: tuple[str, ...] = (
     "sample_required",
     "sample_fee",
     "sample_lead_time",
+    "payee_account_type",
+    "payee_account_id",
+    "payee_company_name",
 )
 
 _META_SAVED_ONLY_KEYS = frozenset({"sample_required", "sample_fee", "sample_lead_time"})

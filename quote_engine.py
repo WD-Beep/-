@@ -61,6 +61,10 @@ class LineItem:
     unit_price_ai: bool = False
     amount_ai: bool = False
     price_source: str = ""
+    rule_applied: str = ""
+    learning_rule_source: str = ""
+    override_id: str = ""
+    evidence: str = ""
     pricing_review_required: bool = False
     price_conflict_required: bool = False
     kb_matched_name: str = ""
@@ -102,6 +106,14 @@ class LineItem:
         }
         if self.price_source:
             out["price_source"] = self.price_source
+        if self.rule_applied:
+            out["rule_applied"] = self.rule_applied
+        if self.learning_rule_source:
+            out["learning_rule_source"] = self.learning_rule_source
+        if self.override_id:
+            out["override_id"] = self.override_id
+        if self.evidence:
+            out["evidence"] = self.evidence
         if self.pricing_review_required:
             out["pricing_review_required"] = True
         if self.price_conflict_required:
@@ -857,13 +869,24 @@ def parse_items(
         rec_status = str(row.get("recognition_status") or "").strip()
         if rec_status == "ignored":
             continue
-        if rec_status == "candidate_review" and not parse_bool(row.get("recognition_confirmed"), False):
-            continue
+        try:
+            from demand_parser import _looks_like_length_or_dimension_metadata
+
+            if _looks_like_length_or_dimension_metadata(name):
+                continue
+        except ImportError:
+            pass
         if is_reference_only_line_name(name):
             continue
 
         raw_spec = spec_for_amount_calc(row)
         raw_usage = usage_for_amount_recalc(row)
+        if raw_usage in ("", "-", "—"):
+            from material_row_validity import usage_from_calc_note_row
+
+            derived_usage = usage_from_calc_note_row(row)
+            if derived_usage:
+                raw_usage = derived_usage
         unit_price = str(row.get("unit_price", row.get("单价参考", "-"))).strip() or "-"
         from kb_data_quality import ACCESSORY_PRICE_OUTLIER_REASON, sanitize_accessory_unit_price
         from price_source_resolver import BUSINESS_PRICE_SOURCES, infer_price_source
@@ -897,15 +920,7 @@ def parse_items(
             row.get("source"),
             infer_source(spec_ai, usage_ai, unit_price_ai, amount_ai),
         )
-        auth_spec_res = resolve_spec_from_row(row)
-        spec_moved_to_usage = raw_usage == "-" and looks_like_dimension(
-            auth_spec_res.value or raw_spec
-        )
-
         spec, usage = normalize_spec_usage(raw_spec, raw_usage)
-        if spec_moved_to_usage:
-            usage_ai = spec_ai
-            spec_ai = False
         raw_usage_snapshot = usage
         raw_unit_price_snapshot = unit_price
         usage_unit_kind = _usage_unit_kind(usage)
@@ -956,6 +971,10 @@ def parse_items(
                 unit_price_ai=unit_price_ai,
                 amount_ai=amount_ai,
                 price_source=price_source,
+                rule_applied=str(row.get("rule_applied") or "").strip(),
+                learning_rule_source=str(row.get("learning_rule_source") or "").strip(),
+                override_id=str(row.get("override_id") or "").strip(),
+                evidence=str(row.get("evidence") or row.get("override_note") or "").strip(),
                 pricing_review_required=bool(row.get("pricing_review_required")),
                 price_conflict_required=bool(row.get("price_conflict_required")),
                 kb_matched_name=str(row.get("kb_matched_name") or ""),
@@ -982,8 +1001,10 @@ def parse_items(
 def normalize_spec_usage(spec: str, usage: str) -> tuple[str, str]:
     spec_value = spec.strip() or "-"
     usage_value = usage.strip() or "-"
-    if usage_value == "-" and looks_like_dimension(spec_value):
-        return "-", spec_value
+    if looks_like_dimension(usage_value):
+        if spec_value in ("", "-"):
+            return usage_value, "-"
+        return spec_value, "-"
     return spec_value, usage_value
 
 
@@ -1263,9 +1284,9 @@ def calculate_quote(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     stamp_trusted_bom_source_fields(payload.get("items"))
     rule_hits: list[Any] = []
     try:
-        from quote_correction_learning import apply_correction_rules_to_payload
+        from quote_correction_learning import apply_quote_applicable_rules_to_payload
 
-        rule_hits = apply_correction_rules_to_payload(payload)
+        rule_hits = apply_quote_applicable_rules_to_payload(payload)
     except Exception:
         rule_hits = []
     purge_dynamic_usage_placeholders(payload.get("items"))
@@ -1494,6 +1515,16 @@ def calculate_quote(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         "include_fob": include_fob,
     }
     result["markdown"] = render_markdown(result)
+    try:
+        from material_row_validity import build_quote_participation_summary
+
+        source_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        result["quote_participation_summary"] = build_quote_participation_summary(
+            source_items,
+            detail_rows,
+        )
+    except Exception:
+        pass
     for key in ("anomaly_scan", "anomaly_auto_fixes", "correction_rule_applications"):
         val = payload.get(key)
         if val:

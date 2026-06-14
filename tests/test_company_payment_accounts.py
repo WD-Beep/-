@@ -6,6 +6,9 @@ import unittest
 from pathlib import Path
 
 from company_payment_accounts import (
+    ACCOUNT_TYPE_CN,
+    ACCOUNT_TYPE_FOREIGN,
+    classify_account_bucket,
     find_exact_company_account,
     format_alipay_info_text,
     format_bank_info_text,
@@ -25,6 +28,14 @@ class CompanyPaymentAccountsTest(unittest.TestCase):
     def test_data_file_has_baibo_travel(self) -> None:
         names = [row["company_name"] for row in self.accounts]
         self.assertIn("深圳市栢博旅游用品有限公司", names)
+
+    def test_data_file_has_peboz_usd_account(self) -> None:
+        usd_rows = [row for row in self.accounts if str(row.get("currency") or "").upper() == "USD"]
+        self.assertGreaterEqual(len(usd_rows), 1)
+        hit = next(row for row in usd_rows if row.get("account_id") == "peboz-usd-boc")
+        self.assertEqual(hit["company_name_en"], "SHENZHEN PEBOZ PRODUCTS LIMITED")
+        self.assertEqual(hit["swift_code"], "BKCHCNBJ45A")
+        self.assertIn("7419", hit["bank_account"])
 
     def test_normalize_company_name_strips_spaces(self) -> None:
         self.assertEqual(normalize_company_name("  深圳市 栢博 旅游用品有限公司  "), "深圳市栢博旅游用品有限公司")
@@ -94,6 +105,30 @@ class CompanyPaymentAccountsTest(unittest.TestCase):
         names = [row["company_name"] for row in result["candidates"]]
         self.assertIn("长沙市多莱达科技有限公司", names)
         self.assertGreaterEqual(len(names), 2)
+
+    def test_search_usd_account_by_peboz(self) -> None:
+        result = search_company_accounts("PEBOZ")
+        names = [row.get("company_name_en") or row.get("company_name") for row in result["candidates"]]
+        self.assertTrue(any("PEBOZ" in str(name).upper() for name in names))
+
+    def test_exact_match_usd_company_name(self) -> None:
+        hit = find_exact_company_account("SHENZHEN PEBOZ PRODUCTS LIMITED（美金账户）")
+        self.assertIsNotNone(hit)
+        assert hit is not None
+        self.assertEqual(hit.get("currency"), "USD")
+        self.assertEqual(hit.get("account_type"), ACCOUNT_TYPE_FOREIGN)
+
+    def test_baibo_travel_classified_as_cn(self) -> None:
+        hit = find_exact_company_account("深圳市栢博旅游用品有限公司")
+        self.assertIsNotNone(hit)
+        assert hit is not None
+        self.assertEqual(classify_account_bucket(hit), ACCOUNT_TYPE_CN)
+        self.assertEqual(hit.get("account_type"), ACCOUNT_TYPE_CN)
+
+    def test_search_foreign_filter(self) -> None:
+        result = search_company_accounts("", limit=50, account_type=ACCOUNT_TYPE_FOREIGN)
+        self.assertGreaterEqual(len(result["candidates"]), 1)
+        self.assertTrue(all(row.get("account_type") == ACCOUNT_TYPE_FOREIGN for row in result["candidates"]))
 
 
 if __name__ == "__main__":

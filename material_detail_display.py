@@ -271,7 +271,8 @@ def _infer_usage_for_name(name: str, unit_price: str, *, structure_text: str) ->
         z = _count_in_structure(structure_text, (r"拉链\s*(\d+)", r"(\d+)\s*条拉链"), 1)
         return f"{max(1, z)}个"
     if any(k in clean for k in ("插扣", "梯扣", "猪鼻", "d扣", "d环", "调节扣", "扣具", "buckle")):
-        return f"{_count_in_structure(structure_text, (r"扣具\s*(\d+)", r"D环\s*(\d+)"), 2)}个"
+        hardware_count = _count_in_structure(structure_text, (r"扣具\s*(\d+)", r"D环\s*(\d+)"), 2)
+        return f"{hardware_count}个"
     if "挂钩" in clean or "hook" in blob:
         return "1个"
     if any(k in clean for k in ("织标", "布标", "唛", "贴标", "label")):

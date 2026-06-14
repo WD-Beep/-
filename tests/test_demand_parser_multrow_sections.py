@@ -128,5 +128,55 @@ class DemandParserB260178FixtureTest(unittest.TestCase):
         self.assertTrue(out.structure_gap_hints or out.structure_text.strip())
 
 
+class DemandParserStrapLengthMetadataTest(unittest.TestCase):
+    def test_strap_length_fragment_not_material_name(self) -> None:
+        rows = [
+            ["C. 材料与配件（标准名/编码）"],
+            ["肩带/织带类型", "肩带长度(cm)"],
+            ["1寸坑纹尼龙织带,约1.3m", "70"],
+        ]
+        out = parse_demand_from_rows(rows)
+        names = [m.name for m in out.materials]
+        self.assertIn("1寸坑纹尼龙织带", names)
+        self.assertFalse(any("约1.3m" in n or n.startswith("约") for n in names))
+        webbing = next(m for m in out.materials if "坑纹尼龙织带" in m.name)
+        self.assertIn("1.3", str(webbing.quoted_usage or ""))
+
+    def test_length_only_strap_cell_does_not_create_material(self) -> None:
+        from demand_parser import _extract_materials_from_section_c
+
+        materials = _extract_materials_from_section_c({"肩带/织带类型": "约1.3m"})
+        names = [m.name for m in materials]
+        self.assertEqual(names, [])
+
+    def test_strap_thickness_descriptor_not_material_name(self) -> None:
+        from demand_parser import _extract_materials_from_section_c
+
+        materials = _extract_materials_from_section_c(
+            {"肩带/织带类型": "25mm坑带,约0.8cm粗"}
+        )
+        names = [m.name for m in materials]
+        self.assertTrue(any("坑带" in n for n in names))
+        self.assertFalse(any("0.8cm" in n and "坑" not in n for n in names))
+        webbing = next(m for m in materials if "坑带" in m.name)
+        blob = f"{webbing.spec or ''} {webbing.quoted_usage or ''}"
+        self.assertIn("0.8", blob)
+
+    def test_spec_plus_material_name_not_filtered(self) -> None:
+        from demand_parser import _extract_materials_from_section_c, _looks_like_length_or_dimension_metadata
+
+        self.assertFalse(_looks_like_length_or_dimension_metadata("2-3mm EPE保温棉"))
+        self.assertFalse(_looks_like_length_or_dimension_metadata("3mm海绵"))
+        self.assertFalse(_looks_like_length_or_dimension_metadata("5#拉链"))
+        self.assertTrue(_looks_like_length_or_dimension_metadata("约1.3m"))
+        self.assertTrue(_looks_like_length_or_dimension_metadata("约---1.3m"))
+        self.assertTrue(_looks_like_length_or_dimension_metadata("约1.1-1.3m"))
+        self.assertTrue(_looks_like_length_or_dimension_metadata("约0.8cm粗"))
+
+        materials = _extract_materials_from_section_c({"里料(标准名/编码)": "2-3mm EPE保温棉"})
+        names = [m.name for m in materials]
+        self.assertIn("2-3mm EPE保温棉", names)
+
+
 if __name__ == "__main__":
     unittest.main()

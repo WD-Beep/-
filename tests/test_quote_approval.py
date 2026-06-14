@@ -23,10 +23,24 @@ class QuoteApprovalTest(unittest.TestCase):
         self.assertEqual(normalize_approval_status("合格"), "approved")
         self.assertEqual(normalize_approval_status("rejected"), "rejected")
 
-    def test_reviewer_name_required(self) -> None:
-        with self.assertRaises(ValueError):
-            normalize_reviewer_name("")
+    def test_reviewer_name_optional(self) -> None:
+        self.assertEqual(normalize_reviewer_name(""), "")
+        self.assertEqual(normalize_reviewer_name(None), "")
         self.assertEqual(normalize_reviewer_name("  Kelly "), "Kelly")
+
+    def test_approval_allows_empty_reviewer(self) -> None:
+        uid = self._seed_quote()
+        result = update_saved_quote_approval(
+            uid,
+            approval_status="approved",
+            approval_note="未填审核人",
+            reviewed_by="",
+        )
+        self.assertEqual(result["approval_status"], "approved")
+        self.assertEqual(result["approval_note"], "未填审核人")
+        self.assertEqual(result["approved_by"], "")
+        bundle = get_saved_quote_admin_bundle(uid)
+        self.assertEqual(bundle["meta"]["approved_by"], "")
 
     def _seed_quote(self, uid: str | None = None) -> str:
         qus.init_quote_storage()

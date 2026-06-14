@@ -186,11 +186,29 @@ class MaterialSpecUsageEnricherTests(unittest.TestCase):
         self.assertFalse(row.get("spec_ai"))
         self.assertFalse(row.get("usage_ai"))
 
-    def test_dimension_usage_keeps_spec_dash_on_display(self) -> None:
+    def test_dimension_stays_in_spec_on_display(self) -> None:
         row = {"name": "面料", "spec": "140*90CM", "usage": "-", "amount": 17.0}
         enrich_material_row(row)
-        self.assertEqual(row["spec"], "-")
-        self.assertIn("140", row["usage"])
+        self.assertEqual(row["spec"], "140*90CM")
+        self.assertNotEqual(row.get("usage"), "140*90CM")
+
+    def test_dimension_usage_not_billable_for_recalc(self) -> None:
+        row = {
+            "name": "盖内网袋",
+            "spec": "140*90CM",
+            "usage": "140*90CM",
+            "unit_price": "11.5元/码",
+            "amount": 2.0,
+        }
+        self.assertEqual(usage_for_amount_recalc(row), "-")
+
+    def test_usage_is_billable_rejects_dimension_and_length(self) -> None:
+        from material_spec_usage_enricher import usage_is_billable_quantity
+
+        self.assertFalse(usage_is_billable_quantity("140*90CM"))
+        self.assertFalse(usage_is_billable_quantity("约1.3m"))
+        self.assertTrue(usage_is_billable_quantity("0.11m²"))
+        self.assertTrue(usage_is_billable_quantity("2个"))
 
     def test_batch_enrich_no_dash(self) -> None:
         rows = enrich_material_rows(

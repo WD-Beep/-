@@ -9,7 +9,7 @@ import zipfile
 from xml.etree import ElementTree as ET
 
 import quote_sheet_images as qsi
-from quote_sheet_content import minimal_png_bytes
+from quote_sheet_content import minimal_png_bytes, product_like_png_bytes
 from quote_sheet_images import (
     extract_embedded_images_with_rows_from_xlsx_bytes,
     merge_product_images_by_priority,
@@ -44,7 +44,7 @@ def _minimal_xlsx_with_png() -> bytes:
             "[Content_Types].xml",
             '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>',
         )
-        zf.writestr("xl/media/image1.png", minimal_png_bytes(120, 140))
+        zf.writestr("xl/media/image1.png", product_like_png_bytes(120, 140))
     return buf.getvalue()
 
 
@@ -107,7 +107,7 @@ def _xlsx_with_drawing_anchors(row_numbers: list[int]) -> bytes:
         for idx in range(1, len(row_numbers) + 1):
             zf.writestr(
                 f"xl/media/image{idx}.png",
-                minimal_png_bytes(120 + idx * 12, 140 + idx * 10),
+                product_like_png_bytes(120 + idx * 12, 140 + idx * 10),
             )
     return buf.getvalue()
 
@@ -523,7 +523,7 @@ class QuoteSheetPrefillTest(unittest.TestCase):
         self.assertEqual(rows[1]["price"], "11")
 
     def test_single_product_row_image_from_marked_excel_embed(self) -> None:
-        b64 = base64.b64encode(minimal_png_bytes(140, 180)).decode()
+        b64 = base64.b64encode(product_like_png_bytes(140, 180)).decode()
         item = annotate_sheet_embed_image_item(
             {
                 "row_index": 8,

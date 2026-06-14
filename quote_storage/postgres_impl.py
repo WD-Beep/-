@@ -1436,6 +1436,9 @@ def save_admin_quote_feedback(
     correction_problem_types: list[str] | str | None = None,
     reviewed_by: str = "admin",
     notify_sales: bool = True,
+    deal_status: str = "",
+    final_price: str = "",
+    loss_reason: str = "",
 ) -> dict[str, Any]:
     from admin_correction_inbox import normalize_correction_problem_types
     from psycopg.rows import dict_row
@@ -1482,6 +1485,23 @@ def save_admin_quote_feedback(
             meta = dict(meta_row) if meta_row else {}
     if notify_sales:
         _record_admin_correction_chat_notification(q_uid, note, actor, now)
+    if deal_status or final_price or loss_reason:
+        try:
+            from quote_price_auto_learning import patch_quote_learning_deal_info
+
+            patch_quote_learning_deal_info(
+                q_uid,
+                deal_status=deal_status,
+                final_price=final_price,
+                loss_reason=loss_reason,
+                operator=actor,
+            )
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "patch quote learning deal info skipped", exc_info=True
+            )
     files = list_quote_files_for_quote(q_uid)
     return {
         "ok": True,

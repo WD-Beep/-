@@ -237,6 +237,16 @@
                 <fieldset class="qs-fieldset">
                   <legend>收款信息</legend>
                   <div class="qs-payee-wrap">
+                    <div class="qs-payee-type-row" role="radiogroup" aria-label="收款账户类型">
+                      <label class="qs-payee-type-option">
+                        <input type="radio" name="qsPayeeAccountType" value="cn" checked />
+                        <span>中国账户</span>
+                      </label>
+                      <label class="qs-payee-type-option">
+                        <input type="radio" name="qsPayeeAccountType" value="foreign" />
+                        <span>美金账户</span>
+                      </label>
+                    </div>
                     <label class="qs-label qs-payee-label"
                       >收款公司
                       <div class="qs-payee-combobox">
@@ -272,15 +282,24 @@
                     <p id="qsPayeeStatus" class="qs-payee-status" aria-live="polite"></p>
                     <div id="qsPayeePreview" class="qs-payee-preview" hidden>
                       <div class="qs-payee-preview-row">
-                        <span class="qs-payee-preview-label">公司名称：</span><span id="qsPayeePreviewName"></span>
+                        <span id="qsPayeePreviewNameLabel" class="qs-payee-preview-label">公司名称：</span><span id="qsPayeePreviewName"></span>
                       </div>
                       <div class="qs-payee-preview-row">
-                        <span class="qs-payee-preview-label">对公开户行：</span><span id="qsPayeePreviewBankName"></span>
+                        <span id="qsPayeePreviewBankNameLabel" class="qs-payee-preview-label">对公开户行：</span><span id="qsPayeePreviewBankName"></span>
                       </div>
                       <div class="qs-payee-preview-row">
-                        <span class="qs-payee-preview-label">对公银行账号：</span><span id="qsPayeePreviewBankAccount"></span>
+                        <span id="qsPayeePreviewBankAccountLabel" class="qs-payee-preview-label">对公银行账号：</span><span id="qsPayeePreviewBankAccount"></span>
                       </div>
-                      <div class="qs-payee-preview-row">
+                      <div class="qs-payee-preview-row" id="qsPayeePreviewSwiftRow" hidden>
+                        <span class="qs-payee-preview-label">SWIFT Code：</span><span id="qsPayeePreviewSwift"></span>
+                      </div>
+                      <div class="qs-payee-preview-row" id="qsPayeePreviewBankAddrRow" hidden>
+                        <span class="qs-payee-preview-label">Bank Address：</span><span id="qsPayeePreviewBankAddr"></span>
+                      </div>
+                      <div class="qs-payee-preview-row" id="qsPayeePreviewNoteRow" hidden>
+                        <span class="qs-payee-preview-label">NOTE：</span><span id="qsPayeePreviewNote"></span>
+                      </div>
+                      <div class="qs-payee-preview-row" id="qsPayeePreviewAlipayRow">
                         <span class="qs-payee-preview-label">企业支付宝：</span><span id="qsPayeePreviewAlipay"></span>
                       </div>
                     </div>
@@ -561,6 +580,6 @@
         </div>
       </div>
     </div>
-    <script src="/static/quote_sheet.js?v=quote-pdf-remark-empty"></script>
+    <script src="/static/quote_sheet.js?v=quote-pdf-sign-fix-cn"></script>
   </body>
 </html>

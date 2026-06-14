@@ -240,6 +240,12 @@ _ROW_LEARNING_META_KEYS = (
     "_anomaly_flags",
     "_anomaly_suggested_usage",
     "_anomaly_auto_fixed",
+    "price_source",
+    "rule_applied",
+    "learning_rule_source",
+    "override_id",
+    "evidence",
+    "override_hit",
 )
 
 
@@ -330,6 +336,24 @@ def _clean_display_value(text: object) -> str:
 
 def looks_like_dimension(text: str) -> bool:
     return bool(_DIM_RE.match(str(text or "").strip()))
+
+
+def usage_is_billable_quantity(text: str) -> bool:
+    """用量是否可作为数量×单价参与计价（排除纯尺寸/长度描述）。"""
+    val = str(text or "").strip()
+    if is_missing_spec_usage_value(val):
+        return False
+    if looks_like_dimension(val):
+        return False
+    if re.match(r"^约", val):
+        try:
+            from demand_parser import _looks_like_length_or_dimension_metadata
+
+            if _looks_like_length_or_dimension_metadata(val):
+                return False
+        except ImportError:
+            pass
+    return True
 
 
 def _first_from_keys(row: dict[str, Any], keys: tuple[str, ...]) -> str:
@@ -432,27 +456,18 @@ def row_has_valid_amount(row: dict[str, Any]) -> bool:
 def spec_for_amount_calc(row: dict[str, Any]) -> str:
     """计价路径使用的规格；不采用展示推断值。"""
     res = resolve_spec_from_row(row)
-    spec = res.value
-    usage_res = resolve_usage_from_row(row)
-    if is_missing_spec_usage_value(usage_res.value) and looks_like_dimension(spec):
-        return "-"
-    return spec or "-"
+    return res.value or "-"
 
 
 def usage_for_amount_recalc(row: dict[str, Any]) -> str:
     """计价重算用量×单价时使用的用量；推断补齐不参与重算。"""
-    spec_res = resolve_spec_from_row(row)
     usage_res = resolve_usage_from_row(row)
-    spec = spec_res.value
     usage = usage_res.value
 
-    if is_missing_spec_usage_value(usage) and looks_like_dimension(spec):
-        usage = spec
-        spec = ""
-        usage_res = ResolvedField(usage, spec_res.tier if spec_res.tier != TIER_MISSING else TIER_PRIMARY)
-
     if is_usage_trusted_for_calc(usage_res.tier) and usage:
-        return usage
+        if usage_is_billable_quantity(usage):
+            return usage
+        return "-"
 
     if row_has_valid_amount(row):
         return "-"
@@ -674,9 +689,7 @@ def _merge_display_spec_usage(
     usage_inferred = False
 
     if is_missing_spec_usage_value(usage) and looks_like_dimension(spec):
-        usage = spec
-        spec = ""
-        return "-", usage.strip(), False, False
+        return spec.strip() or "-", "-", False, False
 
     if usage_holds_dimension_with_empty_spec(auth_spec, usage):
         return "-", usage.strip(), False, False

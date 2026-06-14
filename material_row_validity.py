@@ -236,13 +236,14 @@ def _apply_cost_flags(row: dict[str, Any], status: str) -> None:
     if status == RECOGNITION_IGNORED:
         row["exclude_from_cost"] = True
         row["amount_in_cost"] = False
-    elif status == RECOGNITION_CANDIDATE:
-        row["exclude_from_cost"] = True
-        row["amount_in_cost"] = False
-        row["kb_auto_learned"] = False
-    elif status == RECOGNITION_SPLIT:
-        row["exclude_from_cost"] = True
-        row["amount_in_cost"] = False
+    elif status in {RECOGNITION_CANDIDATE, RECOGNITION_SPLIT}:
+        if row_is_quotable_for_cost(row):
+            row["exclude_from_cost"] = False
+            row["amount_in_cost"] = True
+        else:
+            row["exclude_from_cost"] = True
+            row["amount_in_cost"] = False
+            row["kb_auto_learned"] = False
     else:
         row.setdefault("exclude_from_cost", False)
         row.setdefault("amount_in_cost", True)
@@ -267,12 +268,7 @@ def apply_material_validity_layer(items: list[dict[str, Any]]) -> list[dict[str,
                 "recognition_reason",
                 "包类结构清单提取的待补成本项，需由模型或人工补齐单价后参与报价",
             )
-            if nr.get("recognition_confirmed"):
-                nr["exclude_from_cost"] = False
-                nr["amount_in_cost"] = True
-            else:
-                nr["exclude_from_cost"] = True
-                nr["amount_in_cost"] = False
+            _apply_cost_flags(nr, str(nr.get("recognition_status") or RECOGNITION_CANDIDATE))
             out.append(nr)
             continue
         split_names = split_concatenated_material_name(name)
@@ -337,7 +333,7 @@ def apply_material_validity_layer(items: list[dict[str, Any]]) -> list[dict[str,
 
 def confirm_material_candidates_for_quote(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """用户确认结构后，待确认项可参与正式报价（已忽略项仍排除）。"""
-    out: list[dict[str, Any]] = []
+    staged: list[dict[str, Any]] = []
     for row in items:
         if not isinstance(row, dict):
             continue
@@ -348,10 +344,14 @@ def confirm_material_candidates_for_quote(items: list[dict[str, Any]]) -> list[d
             nr["amount_in_cost"] = False
         elif status in {RECOGNITION_CANDIDATE, RECOGNITION_SPLIT}:
             nr["recognition_confirmed"] = True
-            nr["exclude_from_cost"] = False
-            nr["amount_in_cost"] = True
-        out.append(nr)
-    return out
+            if row_is_quotable_for_cost(nr):
+                nr["exclude_from_cost"] = False
+                nr["amount_in_cost"] = True
+            else:
+                nr["exclude_from_cost"] = True
+                nr["amount_in_cost"] = False
+        staged.append(nr)
+    return promote_quotable_rows_for_quote(staged)
 
 
 def should_skip_knowledge_learn_row(row: dict[str, Any]) -> bool:
@@ -416,6 +416,180 @@ def row_has_ai_estimate_pricing(row: dict[str, Any]) -> bool:
     if not has_ai_flag and not bool(row.get("pricing_review_required")):
         return False
     return structure_gap_row_ready_for_cost(row)
+
+
+def row_has_valid_unit_price_for_quote(row: dict[str, Any]) -> bool:
+    return looks_like_valid_unit_price_text(str(row.get("unit_price") or ""))
+
+
+def row_has_valid_usage_for_quote(row: dict[str, Any]) -> bool:
+    return not is_missing_quote_field_text(row.get("usage"))
+
+
+def row_has_persisted_amount(row: dict[str, Any]) -> bool:
+    try:
+        val = float(row.get("amount") or 0)
+    except (TypeError, ValueError):
+        return False
+    return val > 0.001
+
+
+def usage_from_calc_note_row(row: dict[str, Any]) -> str:
+    """从 calc_note / calc_method 提取可计价用量片段。"""
+    from material_spec_usage_enricher import _QTY_UNIT_RE, _parse_calc_note_fields
+
+    calc = str(row.get("calc_note") or row.get("calc_method") or "").strip()
+    if not calc:
+        return ""
+    _, cn_usage = _parse_calc_note_fields(calc)
+    if cn_usage and not is_missing_quote_field_text(cn_usage):
+        return cn_usage.strip()
+    hits = _QTY_UNIT_RE.findall(calc)
+    if hits:
+        n, u = hits[-1]
+        return f"{n}{u}".strip()
+    return ""
+
+
+def _row_name_is_length_metadata(name: str) -> bool:
+    from demand_parser import _looks_like_length_or_dimension_metadata
+
+    return _looks_like_length_or_dimension_metadata(str(name or "").strip())
+
+
+def row_usage_derivable_for_quote(row: dict[str, Any]) -> bool:
+    derived = usage_from_calc_note_row(row)
+    if not derived:
+        return False
+    from material_spec_usage_enricher import usage_is_billable_quantity
+
+    return usage_is_billable_quantity(derived)
+
+
+def row_is_quotable_for_cost(row: dict[str, Any]) -> bool:
+    """具备有效单价，且有用量/小计/可解析 calc 用量 → 可参与物料合计。"""
+    if not isinstance(row, dict) or bool(row.get("deleted")):
+        return False
+    name = str(row.get("name") or "").strip()
+    if not name or _row_name_is_length_metadata(name):
+        return False
+    status = str(row.get("recognition_status") or "").strip()
+    if status == RECOGNITION_IGNORED:
+        return False
+    if not row_has_valid_unit_price_for_quote(row):
+        return False
+    if row_has_valid_usage_for_quote(row):
+        from material_spec_usage_enricher import usage_is_billable_quantity
+
+        usage = str(row.get("usage") or "").strip()
+        if usage_is_billable_quantity(usage):
+            return True
+    if row_has_persisted_amount(row):
+        return True
+    return row_usage_derivable_for_quote(row)
+
+
+def row_exclusion_reasons_for_quote(row: dict[str, Any]) -> list[str]:
+    """未参与物料合计的原因（用于结果页提示，不阻断待确认展示）。"""
+    if not isinstance(row, dict) or bool(row.get("deleted")):
+        return ["已删除"]
+    name = str(row.get("name") or "").strip()
+    if not name:
+        return ["缺少物料名"]
+    if _row_name_is_length_metadata(name):
+        return ["长度/尺寸描述，非独立物料"]
+    status = str(row.get("recognition_status") or "").strip()
+    if status == RECOGNITION_IGNORED:
+        return [str(row.get("recognition_reason") or "已忽略")]
+    if row_is_quotable_for_cost(row):
+        return []
+    reasons: list[str] = []
+    if status in _PENDING_RECOGNITION_STATUSES:
+        reasons.append("待确认")
+    if not row_has_valid_unit_price_for_quote(row):
+        reasons.append("缺少单价")
+    if not row_has_persisted_amount(row):
+        if not row_has_valid_usage_for_quote(row):
+            reasons.append("缺少用量")
+        else:
+            from material_spec_usage_enricher import usage_is_billable_quantity
+
+            usage = str(row.get("usage") or "").strip()
+            if not usage_is_billable_quantity(usage):
+                reasons.append("用量不可用（如尺寸被误当数量）")
+        if not row_usage_derivable_for_quote(row) and not row_has_valid_usage_for_quote(row):
+            if "缺少用量" not in reasons:
+                reasons.append("计算方式无法解析用量")
+    if not reasons:
+        reasons.append("未满足计价条件")
+    return reasons
+
+
+def parse_bool_local(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "y", "on"}
+
+
+def promote_quotable_rows_for_quote(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """结构确认后：可计价行参与合计；待确认仅作风险提示。"""
+    out: list[dict[str, Any]] = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        status = str(row.get("recognition_status") or "").strip()
+        if status == RECOGNITION_IGNORED:
+            row["exclude_from_cost"] = True
+            row["amount_in_cost"] = False
+        elif row_is_quotable_for_cost(row):
+            row["exclude_from_cost"] = False
+            row["amount_in_cost"] = True
+            if status in _PENDING_RECOGNITION_STATUSES or status == RECOGNITION_SPLIT:
+                row["recognition_confirmed"] = True
+        out.append(row)
+    return out
+
+
+def build_quote_participation_summary(
+    source_items: list[dict[str, Any]],
+    detail_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """对比源 BOM 与已计价明细，列出参与/未参与及原因。"""
+    included_keys: set[str] = set()
+    included: list[dict[str, str]] = []
+    for dr in detail_rows:
+        if not isinstance(dr, dict):
+            continue
+        name = str(dr.get("name") or "").strip()
+        if not name:
+            continue
+        key = normalize_text(name)
+        included_keys.add(key)
+        included.append({"name": name, "status": "已参与报价"})
+
+    excluded: list[dict[str, Any]] = []
+    for raw in source_items:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "").strip()
+        if not name:
+            continue
+        key = normalize_text(name)
+        if key in included_keys:
+            continue
+        reasons = row_exclusion_reasons_for_quote(raw)
+        if not reasons:
+            continue
+        excluded.append({"name": name, "reasons": reasons})
+
+    return {
+        "included_count": len(included),
+        "excluded_count": len(excluded),
+        "included": included[:80],
+        "excluded": excluded[:80],
+    }
 
 
 def summarize_structure_quote_gaps(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

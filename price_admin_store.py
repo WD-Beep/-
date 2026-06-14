@@ -2417,6 +2417,11 @@ def sync_quote_detail_rows_to_price_kb(
         x for x in exceptions_to_save if not is_test_price_exception_record(x)
     ]
     saved_exceptions = _append_price_exceptions(exceptions_to_save, _exc_target(exception_path))
+    if saved_exceptions:
+        summary["suggestions_queued"] = int(summary.get("suggestions_queued") or 0) + len(saved_exceptions)
+        legacy_suggestions = quote_sync_suggestions_path()
+        legacy_suggestions.parent.mkdir(parents=True, exist_ok=True)
+        legacy_suggestions.touch(exist_ok=True)
     for entry in saved_exceptions:
         summary["items"].append(
             {

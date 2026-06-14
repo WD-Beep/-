@@ -7,6 +7,7 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import mimetypes
 import re
 import sqlite3
@@ -25,6 +26,7 @@ from quote_storage.backend import (
 )
 
 ROOT = Path(__file__).resolve().parent
+logger = logging.getLogger(__name__)
 DATA_DIR = ROOT / "data"
 UPLOADS_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "quotes.db"
@@ -1169,6 +1171,9 @@ def save_admin_quote_feedback(
     correction_problem_types: list[str] | str | None = None,
     reviewed_by: str = "admin",
     notify_sales: bool = True,
+    deal_status: str = "",
+    final_price: str = "",
+    loss_reason: str = "",
 ) -> dict[str, Any]:
     """保存管理员修正说明并标记已反馈业务员。"""
     from admin_correction_inbox import normalize_correction_problem_types
@@ -1183,6 +1188,9 @@ def save_admin_quote_feedback(
             correction_problem_types=correction_problem_types,
             reviewed_by=reviewed_by,
             notify_sales=notify_sales,
+            deal_status=deal_status,
+            final_price=final_price,
+            loss_reason=loss_reason,
         )
     q_uid = str(quote_uid or "").strip()
     actor = str(reviewed_by or "admin").strip() or "admin"
@@ -1225,6 +1233,19 @@ def save_admin_quote_feedback(
             conn.close()
     if notify_sales:
         _record_admin_correction_chat_notification(q_uid, note, actor, now)
+    if deal_status or final_price or loss_reason:
+        try:
+            from quote_price_auto_learning import patch_quote_learning_deal_info
+
+            patch_quote_learning_deal_info(
+                q_uid,
+                deal_status=deal_status,
+                final_price=final_price,
+                loss_reason=loss_reason,
+                operator=actor,
+            )
+        except Exception:
+            logger.debug("patch quote learning deal info skipped", exc_info=True)
     files = list_quote_files_for_quote(q_uid)
     return {
         "ok": True,

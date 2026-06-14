@@ -861,22 +861,55 @@ def _looks_like_fabric_name_not_descriptor(chunk: str) -> bool:
     return True
 
 
-def _looks_like_strap_spec_descriptor(chunk: str) -> bool:
-    """肩带/织带单元格逗号后的粗细/尺寸片段（如「约0.8cm粗」），不是第二种物料。"""
+_PURE_LENGTH_OR_DIM_METADATA = re.compile(
+    r"^(?:约|大约|≈)?[-─—~～]*"
+    r"\d+(?:\.\d+)?"
+    r"(?:\s*[-~]\s*\d+(?:\.\d+)?)?"
+    r"\s*(?:cm|mm|CM|MM|厘米|毫米|m|M|米|码|yd|YD)?"
+    r"(?:粗|宽|厚|直径|径|长)?$",
+    re.I,
+)
+_PURE_PLANAR_DIM_METADATA = re.compile(
+    r"^\d+(\.\d+)?\s*[*xX×]\s*\d+(\.\d+)?\s*(CM|MM|M|米|码|码²)?$",
+    re.I,
+)
+
+
+def _chunk_has_material_substance(chunk: str) -> bool:
+    """片段除尺寸/长度外是否仍含可计价物料称谓（如 EPE保温棉、5#拉链）。"""
     c = str(chunk or "").strip()
     if not c:
         return False
-    if re.fullmatch(
-        r"(?:约|大约|≈)?\s*\d+(?:\.\d+)?\s*(?:cm|mm|CM|MM|厘米|毫米)(?:粗|宽|厚|直径|径)?",
-        c,
-    ):
+    if any(kw in c for kw in _NAME_KEYWORDS_HINTING_FULL_DESCRIPTION):
         return True
-    if re.search(r"\d+(?:\.\d+)?\s*(?:cm|mm|CM|MM|厘米|毫米)", c):
-        if len(c) <= 18 and not any(
-            kw in c for kw in ("提手", "织带", "肩带", "绳", "带", "扣", "拉链", "圆绳", "坑带")
-        ):
+    if re.search(r"\d+\s*#|\d+\s*号", c):
+        return True
+    if _DENIER_OR_THREAD_LEAD.match(c) or _THREAD_T_LEAD.match(c):
+        return True
+    if re.search(r"\b(?:EPE|EVA|PEVA|XPE)\b", c, re.I):
+        return True
+    return False
+
+
+def _looks_like_length_or_dimension_metadata(chunk: str) -> bool:
+    """纯长度/尺寸描述，不能作为独立材料名（如 约1.3m、约---1.3m、140*90CM）。"""
+    c = str(chunk or "").strip()
+    if not c:
+        return False
+    if _chunk_has_material_substance(c):
+        return False
+    compact = re.sub(r"\s+", "", c)
+    for candidate in (compact, c):
+        if _PURE_LENGTH_OR_DIM_METADATA.fullmatch(candidate):
+            return True
+        if _PURE_PLANAR_DIM_METADATA.fullmatch(candidate):
             return True
     return False
+
+
+def _looks_like_strap_spec_descriptor(chunk: str) -> bool:
+    """肩带/织带单元格逗号后的粗细/长度片段（如「约0.8cm粗」「约1.3m」），不是第二种物料。"""
+    return _looks_like_length_or_dimension_metadata(chunk)
 
 
 def _section_c_strap_spec_from_value(role: str, raw_value: str) -> str:
@@ -889,6 +922,16 @@ def _section_c_strap_spec_from_value(role: str, raw_value: str) -> str:
         _name, spec, *_rest = _split_name_spec_inline(part)
         if spec:
             return spec
+    return ""
+
+
+def _section_c_strap_length_from_value(role: str, raw_value: str) -> str:
+    """从肩带/织带/绳带单元格提取长度描述，写入 quoted_usage。"""
+    if role not in ("肩带", "织带", "绳带"):
+        return ""
+    for part in _split_multi_value(raw_value):
+        if _looks_like_length_or_dimension_metadata(part):
+            return part.strip()
     return ""
 
 
@@ -951,7 +994,11 @@ def _inject_shoulder_strap_length_from_section_c(
     lr = (section_c.get("肩带长度") or section_c.get("肩带长度cm") or "").strip()
     if not lr:
         return
-    if not re.search(r"(cm|CM|毫米|mm|MM|米|码|YD|yd|Y)", lr, re.I):
+    if not re.search(
+        r"(?:cm|mm|毫米|厘米|米|(?<![a-z])m(?![a-z])|码|yd|y)\b",
+        lr,
+        re.I,
+    ):
         lr = f"{lr}cm"
     for m in materials:
         if m.role != "肩带":
@@ -1022,9 +1069,12 @@ def _extract_materials_from_section_c(section_c: dict[str, str]) -> list[Materia
         chunks = _split_section_c_material_chunks(role, raw_value)
         trailing_desc = _section_c_trailing_descriptors(role, raw_value)
         strap_extra_spec = _section_c_strap_spec_from_value(role, raw_value)
+        strap_inline_length = _section_c_strap_length_from_value(role, raw_value)
         for chunk in chunks:
             name, spec, note, inline = _split_name_spec_inline(chunk)
             if not name:
+                continue
+            if _looks_like_length_or_dimension_metadata(name):
                 continue
             if _is_excel_error_value(name):
                 continue
@@ -1047,7 +1097,7 @@ def _extract_materials_from_section_c(section_c: dict[str, str]) -> list[Materia
                     note=eff_note,
                     inline_price=inline,
                     source="demand_form",
-                    quoted_usage=q_piece or "",
+                    quoted_usage=q_piece or strap_inline_length or "",
                 )
             )
         if trailing_desc and materials and materials[-1].role == role:
@@ -1337,6 +1387,9 @@ def _is_spurious_structure_inline_name(name: str) -> bool:
     compact = re.sub(r"\s+", "", n)
 
     if _DIM_ONLY_STRUCTURE_INLINE.match(compact):
+        return True
+
+    if _looks_like_length_or_dimension_metadata(compact):
         return True
 
     # 仅从「括号价」断层里切出的「+)配件」拼接头

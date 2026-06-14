@@ -14,11 +14,13 @@ from typing import Any
 from xml.etree import ElementTree as ET
 
 from quote_sheet_content import (
+    IMAGE_TYPE_PRODUCT,
     annotate_sheet_embed_image_item,
     filter_product_image_items,
     filter_product_image_url_map,
     is_acceptable_product_image_bytes,
     is_quote_sheet_display_image_url,
+    product_image_score,
 )
 from xlsx_rich_context import _mime_for_media_path, list_embedded_images_from_xlsx_bytes
 
@@ -100,6 +102,41 @@ def _anchor_extent_ok(aspect: float | None) -> bool:
     return True
 
 
+def _finalize_sheet_embed_candidates(
+    raw: list[tuple[int, str, bytes]],
+) -> list[dict[str, Any]]:
+    """全部候选图先标注类型，再筛 product_photo 并按得分排序。"""
+    annotated: list[dict[str, Any]] = []
+    for row_ix, path, blob in raw:
+        mime = _mime_for_media_path(path)
+        if mime == "application/octet-stream":
+            continue
+        item = annotate_sheet_embed_image_item(
+            {
+                "row_index": row_ix,
+                "sheet_row": row_ix,
+                "mime_type": mime,
+                "data_base64": base64.b64encode(blob).decode("ascii"),
+                "source_path": path,
+            }
+        )
+        annotated.append(item)
+
+    product_items = [
+        item
+        for item in annotated
+        if item.get("image_type") == IMAGE_TYPE_PRODUCT or item.get("product_image") is True
+    ]
+    product_items = filter_product_image_items(product_items)
+    product_items.sort(
+        key=lambda x: (
+            -product_image_score(x),
+            int(x.get("sheet_row", x.get("row_index")) or 0),
+        )
+    )
+    return product_items[:_MAX_IMAGES]
+
+
 def extract_embedded_images_with_rows_from_xlsx_bytes(
     file_bytes: bytes,
 ) -> list[dict[str, Any]]:
@@ -147,8 +184,6 @@ def extract_embedded_images_with_rows_from_xlsx_bytes(
                 continue
             if not blob or len(blob) > _MAX_IMAGE_BYTES:
                 continue
-            if not is_acceptable_product_image_bytes(blob, source_path=media_rel):
-                continue
             sheet_row = row_ix if row_ix is not None else len(picked)
             picked.append((sheet_row, media_rel, blob))
 
@@ -161,42 +196,15 @@ def extract_embedded_images_with_rows_from_xlsx_bytes(
                 continue
             seen.add(key)
             uniq.append((row_ix, path, blob))
-        return [
-            annotate_sheet_embed_image_item(
-                {
-                    "row_index": row_ix,
-                    "sheet_row": row_ix,
-                    "mime_type": _mime_for_media_path(path),
-                    "data_base64": base64.b64encode(blob).decode("ascii"),
-                    "source_path": path,
-                }
-            )
-            for row_ix, path, blob in uniq[:_MAX_IMAGES]
-            if _mime_for_media_path(path) != "application/octet-stream"
-        ]
+        return _finalize_sheet_embed_candidates(uniq)
 
     fallback = list_embedded_images_from_xlsx_bytes(file_bytes)
-    out: list[dict[str, Any]] = []
-    for seq, (path, blob) in enumerate(fallback[:_MAX_IMAGES]):
+    raw_fallback: list[tuple[int, str, bytes]] = []
+    for seq, (path, blob) in enumerate(fallback[: _MAX_IMAGES * 3]):
         if len(blob) > _MAX_IMAGE_BYTES:
             continue
-        if not is_acceptable_product_image_bytes(blob, source_path=path):
-            continue
-        mime = _mime_for_media_path(path)
-        if mime == "application/octet-stream":
-            continue
-        out.append(
-            annotate_sheet_embed_image_item(
-                {
-                    "row_index": seq,
-                    "sheet_row": seq,
-                    "mime_type": mime,
-                    "data_base64": base64.b64encode(blob).decode("ascii"),
-                    "source_path": path,
-                }
-            )
-        )
-    return out
+        raw_fallback.append((seq, path, blob))
+    return _finalize_sheet_embed_candidates(raw_fallback)
 
 
 def _manifest_path(quote_uid: str, role: str) -> Path:
@@ -321,10 +329,18 @@ def load_sheet_product_images(quote_uid: str, role: str) -> list[dict[str, Any]]
             "product_image",
             "sheet_embed_product_detected",
             "image_source",
+            "image_type",
         ):
             if item.get(key) is not None:
                 row_meta[key] = item[key]
-        out.append(annotate_sheet_embed_image_item(row_meta))
+        annotated = annotate_sheet_embed_image_item(row_meta)
+        if annotated.get("image_type") not in (None, IMAGE_TYPE_PRODUCT) and not annotated.get(
+            "product_image"
+        ):
+            continue
+        if not filter_product_image_items([annotated]):
+            continue
+        out.append(annotated)
     return sorted(out, key=lambda x: int(x.get("sheet_row", x.get("row_index")) or 0))
 
 

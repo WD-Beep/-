@@ -62,6 +62,7 @@ from material_row_dedupe import (
 from material_row_validity import (
     apply_material_validity_layer,
     confirm_material_candidates_for_quote,
+    promote_quotable_rows_for_quote,
     should_skip_knowledge_learn_row,
     structure_gap_row_ready_for_cost,
     summarize_structure_quote_gaps,
@@ -323,6 +324,7 @@ from company_payment_accounts import (
     reload_company_payment_accounts,
     search_company_accounts,
 )
+from quote_sheet_export_validate import validate_quote_sheet_export_payload
 from quote_sheet_i18n import (
     get_quote_sheet_terms_public,
     reload_quote_sheet_terms,
@@ -621,7 +623,9 @@ def merge_structure_confirmation_user_items(
                 hid = str(entry.get("structure_gap_hint_id") or row.get("structure_gap_hint_id") or "").strip()
                 if hid:
                     row["structure_gap_hint_id"] = hid
-                row["source"] = "structure_confirmed"
+                if str(row.get("source") or "").strip().lower() != "ai":
+                    if not str(row.get("source") or "").strip():
+                        row["source"] = "structure_confirmed"
                 if structure_gap_row_ready_for_cost(row):
                     row["exclude_from_cost"] = False
                     row["amount_in_cost"] = True
@@ -642,7 +646,8 @@ def merge_structure_confirmation_user_items(
                 row.pop("exclude_from_cost", None)
                 row.setdefault("amount_in_cost", True)
             appended.append(row)
-    return [row for row in out + appended if not row.get("_structure_deleted")]
+    merged = [row for row in out + appended if not row.get("_structure_deleted")]
+    return promote_quotable_rows_for_quote(merged)
 
 
 def build_structure_confirmation_payload(
@@ -1809,6 +1814,38 @@ class QuoteHandler(BaseHTTPRequestHandler):
             self.write_json({"page": page, "page_size": page_size, "total": total, "items": items})
             return
 
+        if req_path == "/admin-api/price-learning/suggestions":
+            if not admin_http_access_ok(self.headers):
+                self.write_json({"error": "forbidden", "message": "需要管理员权限。"}, status=403)
+                return
+            qs = parse_qs(parsed_req.query)
+            status = (qs.get("status", ["pending"])[0] or "pending").strip()
+            try:
+                from quote_price_auto_learning import list_learning_suggestions
+
+                items = list_learning_suggestions(status=status, limit=200)
+            except Exception as exc:
+                self.write_json({"error": "price_learning_unavailable", "message": str(exc)}, status=500)
+                return
+            self.write_json({"items": items, "total": len(items)})
+            return
+
+        if req_path == "/admin-api/price-learning/records":
+            if not admin_http_access_ok(self.headers):
+                self.write_json({"error": "forbidden", "message": "需要管理员权限。"}, status=403)
+                return
+            qs = parse_qs(parsed_req.query)
+            status = (qs.get("learning_status", [""])[0] or "").strip()
+            try:
+                from quote_price_auto_learning import list_learning_records
+
+                items = list_learning_records(learning_status=status, limit=200)
+            except Exception as exc:
+                self.write_json({"error": "price_learning_unavailable", "message": str(exc)}, status=500)
+                return
+            self.write_json({"items": items, "total": len(items)})
+            return
+
         if req_path == "/admin-api/prices":
             if not admin_http_access_ok(self.headers):
                 self.write_json({"error": "forbidden", "message": "需要管理员权限。"}, status=403)
@@ -2501,11 +2538,18 @@ class QuoteHandler(BaseHTTPRequestHandler):
             qs_pay = parse_qs(parsed_pay.query)
             query = (qs_pay.get("q") or qs_pay.get("query") or [""])[0]
             limit_raw = (qs_pay.get("limit") or ["12"])[0]
+            account_type = (qs_pay.get("account_type") or qs_pay.get("type") or [""])[0]
             try:
                 limit = max(1, min(100, int(str(limit_raw).strip())))
             except (TypeError, ValueError):
                 limit = 12
-            self.write_json(search_company_accounts(query, limit=limit))
+            self.write_json(
+                search_company_accounts(
+                    query,
+                    limit=limit,
+                    account_type=str(account_type or "").strip(),
+                )
+            )
             return
         if self.path == "/api/auth/status" or self.path.startswith("/api/auth/status?"):
             sales_uid, sales_name, ok = _resolve_front_sales_identity(self)
@@ -3043,6 +3087,19 @@ class QuoteHandler(BaseHTTPRequestHandler):
                     correction_note=correction_note,
                     correction_problem_types=problem_types_raw,
                     reviewed_by=actor or "admin",
+                    deal_status=str(body.get("deal_status") or body.get("learning_deal_status") or ""),
+                    final_price=str(
+                        body.get("final_price")
+                        or body.get("deal_final_price")
+                        or body.get("learning_final_price")
+                        or ""
+                    ),
+                    loss_reason=str(
+                        body.get("loss_reason")
+                        or body.get("deal_loss_reason")
+                        or body.get("learning_loss_reason")
+                        or ""
+                    ),
                 )
             except ValueError as exc:
                 msg = str(exc)
@@ -3315,6 +3372,122 @@ class QuoteHandler(BaseHTTPRequestHandler):
                 return
             self.write_json(result)
             return
+        if path == "/admin-api/price-learning/approve":
+            if not admin_http_access_ok(self.headers):
+                self.write_json({"error": "forbidden", "message": "需要管理员权限。"}, status=403)
+                return
+            body = self.read_json()
+            if not isinstance(body, dict):
+                self.write_json({"error": "invalid_request", "message": "JSON 对象。"}, status=400)
+                return
+            try:
+                from quote_price_auto_learning import approve_learning_suggestion
+
+                result = approve_learning_suggestion(
+                    str(body.get("suggestion_id") or ""),
+                    approved_by=str(body.get("approved_by") or body.get("operator") or "admin"),
+                    final_price=str(body.get("final_price") or body.get("price") or ""),
+                )
+            except ValueError as exc:
+                self.write_json({"error": "invalid_request", "message": str(exc)}, status=400)
+                return
+            except Exception as exc:
+                self.write_json({"error": "price_learning_approve_failed", "message": str(exc)}, status=500)
+                return
+            self.write_json(result)
+            return
+
+        if path == "/admin-api/price-learning/reject":
+            if not admin_http_access_ok(self.headers):
+                self.write_json({"error": "forbidden", "message": "需要管理员权限。"}, status=403)
+                return
+            body = self.read_json()
+            if not isinstance(body, dict):
+                self.write_json({"error": "invalid_request", "message": "JSON 对象。"}, status=400)
+                return
+            try:
+                from quote_price_auto_learning import reject_learning_suggestion
+
+                result = reject_learning_suggestion(
+                    str(body.get("suggestion_id") or ""),
+                    operator=str(body.get("operator") or body.get("updated_by") or "admin"),
+                    reason=str(body.get("reason") or body.get("note") or ""),
+                )
+            except ValueError as exc:
+                self.write_json({"error": "invalid_request", "message": str(exc)}, status=400)
+                return
+            self.write_json(result)
+            return
+
+        if path == "/admin-api/price-learning/exclude-record":
+            if not admin_http_access_ok(self.headers):
+                self.write_json({"error": "forbidden", "message": "需要管理员权限。"}, status=403)
+                return
+            body = self.read_json()
+            if not isinstance(body, dict):
+                self.write_json({"error": "invalid_request", "message": "JSON 对象。"}, status=400)
+                return
+            try:
+                from quote_price_auto_learning import exclude_learning_record
+
+                result = exclude_learning_record(
+                    str(body.get("record_id") or ""),
+                    operator=str(body.get("operator") or body.get("updated_by") or "admin"),
+                )
+            except ValueError as exc:
+                self.write_json({"error": "invalid_request", "message": str(exc)}, status=400)
+                return
+            self.write_json(result)
+            return
+
+        if path == "/admin-api/price-learning/update-deal":
+            if not admin_http_access_ok(self.headers):
+                self.write_json({"error": "forbidden", "message": "需要管理员权限。"}, status=403)
+                return
+            body = self.read_json()
+            if not isinstance(body, dict):
+                self.write_json({"error": "invalid_request", "message": "JSON 对象。"}, status=400)
+                return
+            try:
+                from quote_price_auto_learning import (
+                    patch_learning_record_deal_info,
+                    patch_quote_learning_deal_info,
+                )
+
+                record_id = str(body.get("record_id") or "").strip()
+                quote_uid = str(body.get("quote_uid") or "").strip()
+                operator = str(body.get("operator") or body.get("updated_by") or "admin")
+                deal_status = str(body.get("deal_status") or "")
+                final_price = str(body.get("final_price") or body.get("deal_final_price") or "")
+                loss_reason = str(body.get("loss_reason") or body.get("deal_loss_reason") or "")
+                if record_id:
+                    result = patch_learning_record_deal_info(
+                        record_id,
+                        deal_status=deal_status,
+                        final_price=final_price,
+                        loss_reason=loss_reason,
+                        operator=operator,
+                    )
+                elif quote_uid:
+                    result = patch_quote_learning_deal_info(
+                        quote_uid,
+                        deal_status=deal_status,
+                        final_price=final_price,
+                        loss_reason=loss_reason,
+                        operator=operator,
+                    )
+                else:
+                    self.write_json(
+                        {"error": "invalid_request", "message": "需提供 record_id 或 quote_uid。"},
+                        status=400,
+                    )
+                    return
+            except ValueError as exc:
+                self.write_json({"error": "invalid_request", "message": str(exc)}, status=400)
+                return
+            self.write_json(result)
+            return
+
         if path == "/admin-api/price-exceptions/exclude":
             if not admin_http_access_ok(self.headers):
                 self.write_json({"error": "forbidden", "message": "需要管理员权限。"}, status=403)
@@ -3718,6 +3891,19 @@ class QuoteHandler(BaseHTTPRequestHandler):
             out["labels"] = labels
             out["fixed"] = fixed
             self.write_json(out)
+            return
+        if self.path == "/api/quote-sheet/validate-export":
+            payload = self.read_json()
+            if not isinstance(payload, dict):
+                self.write_json(
+                    {"error": "invalid_request", "message": "JSON 对象。"},
+                    status=400,
+                )
+                return
+            export_lang = str(payload.get("export_lang") or "cn").strip().lower()
+            bundle = payload.get("bundle") if isinstance(payload.get("bundle"), dict) else {}
+            result = validate_quote_sheet_export_payload(export_lang=export_lang, bundle=bundle)
+            self.write_json(result)
             return
         if self.path == "/api/quote-sheet/terms/reload":
             reload_quote_sheet_terms()
@@ -4402,7 +4588,7 @@ class QuoteHandler(BaseHTTPRequestHandler):
                     )
                     return
                 payload["items"] = confirm_material_candidates_for_quote(
-                    apply_material_validity_layer(list(payload["items"]))
+                    promote_quotable_rows_for_quote(list(payload["items"]))
                 )
                 _log_quote_stage(
                     self,

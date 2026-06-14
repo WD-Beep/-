@@ -60,6 +60,47 @@ class QuoteCorrectionLearningTest(unittest.TestCase):
         ).fetchone()
         self.assertIsNotNone(rule)
         self.assertEqual(rule["corrected_value"], "2个")
+        self.assertEqual(int(rule["enabled"]), 0)
+        keys = rule.keys()
+        if "rule_status" in keys:
+            self.assertEqual(str(rule["rule_status"]), qcl.RULE_STATUS_PENDING)
+
+    def test_learned_rule_not_applied_until_admin_approval(self) -> None:
+        for _ in range(2):
+            qcl.record_correction(
+                quote_uid="uid-learn-guard",
+                material_name="测试织带A",
+                field_name="usage",
+                old_value="1套",
+                new_value="3米",
+                corrected_by="admin",
+                structure_text="",
+            )
+        payload = {
+            "product_name": "测试包",
+            "structure_text": "",
+            "items": [
+                {
+                    "name": "测试织带A",
+                    "spec": "-",
+                    "usage": "1套",
+                    "unit_price": "2元/米",
+                    "amount": 2.0,
+                    "usage_ai": True,
+                }
+            ],
+            "quantities": [500],
+            "gross_margin_rate": 0.35,
+        }
+        qcl.apply_quote_applicable_rules_to_payload(payload)
+        self.assertEqual(payload["items"][0]["usage"], "1套")
+        rule = self._conn.execute(
+            "SELECT rule_id FROM quote_correction_rules WHERE rule_id LIKE 'learned-generic%' LIMIT 1"
+        ).fetchone()
+        self.assertIsNotNone(rule)
+        qcl.approve_correction_rule(str(rule["rule_id"]), approved_by="admin_tester")
+        qcl.apply_quote_applicable_rules_to_payload(payload)
+        self.assertEqual(payload["items"][0]["usage"], "3米")
 
     def test_buckle_rule_applies_for_dual_shoulder(self) -> None:
         payload = {

@@ -14,7 +14,17 @@ class QuoteSheetPdfLayoutTest(unittest.TestCase):
         block_start = css.index(".qs-pdf-meta-right-shifted")
         block = css[block_start : block_start + 420]
         self.assertIn("text-align: left", block)
+        self.assertIn("transform: translateX(var(--qs-pdf-meta-right-shift-x))", block)
         self.assertNotIn("padding-right: 42%", block)
+        self.assertIn("--qs-pdf-meta-right-left: 108mm", css)
+        self.assertIn("--qs-pdf-meta-right-shift-x: 27mm", css)
+
+    def test_doc_title_stays_centered(self) -> None:
+        css = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+        title_start = css.index(".qs-pdf-doc-title {")
+        title_block = css[title_start : title_start + 220]
+        self.assertIn("text-align: center", title_block)
+        self.assertNotIn("padding-left: var(--qs-pdf-header-right-anchor)", title_block)
 
     def test_meta_labels_and_values_present_in_html(self) -> None:
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
@@ -32,6 +42,20 @@ class QuoteSheetPdfLayoutTest(unittest.TestCase):
         block = css[block_start : block_start + 220]
         self.assertIn("white-space: nowrap", block)
         self.assertIn("text-overflow: ellipsis", block)
+        self.assertIn('[data-pdf-lbl="lbl_meta_cust_phone"]', css)
+        self.assertIn('[data-pdf-lbl="lbl_meta_quote_no"]', css)
+        en_quote_no_lbl_start = css.index(
+            '[data-pdf-lbl="lbl_meta_quote_no"]'
+        )
+        en_quote_no_lbl_block = css[en_quote_no_lbl_start : en_quote_no_lbl_start + 160]
+        self.assertIn("min-width: 0", en_quote_no_lbl_block)
+        self.assertIn("margin-right: 0.12em", en_quote_no_lbl_block)
+        en_quote_no_start = css.index(
+            '.qs-pdf-root[data-pdf-lang="en"] .qs-pdf-meta-right-shifted .qs-pdf-meta-value-quote-no'
+        )
+        en_quote_no_block = css[en_quote_no_start : en_quote_no_start + 160]
+        self.assertIn("display: inline", en_quote_no_block)
+        self.assertIn("max-width: none", en_quote_no_block)
 
     def test_sample_meta_fields_present_in_html(self) -> None:
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
@@ -87,11 +111,17 @@ class QuoteSheetPdfLayoutTest(unittest.TestCase):
     def test_pdf_note_column_header_dynamic(self) -> None:
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
         js = (ROOT / "static" / "quote_sheet.js").read_text(encoding="utf-8")
+        css = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
         self.assertIn('id="pvThNoteColumn"', html)
         self.assertIn("setPdfNoteColumnHeader", js)
+        self.assertIn("shouldRenderPdfNoteColumn", js)
+        self.assertIn("syncPdfNoteColumnLayout", js)
         self.assertIn("resolvePdfNoteColumnValue", js)
         self.assertIn('th.textContent = "含税价"', js)
         self.assertIn('th.innerHTML = "FOB价格<br />USD"', js)
+        self.assertIn('lang === "en" && forFobUsdExport', js)
+        self.assertIn('data-pdf-note-col="0"', css)
+        self.assertIn(".qs-pdf-root[data-pdf-note-col=\"0\"] .qs-pdf-table .col-total", css)
 
     def test_sample_meta_text_value_css(self) -> None:
         css = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
@@ -144,8 +174,19 @@ class QuoteSheetPdfLayoutTest(unittest.TestCase):
     def test_pdf_footer_layout_spacing_in_css(self) -> None:
         css = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
         root_start = css.index(".qs-pdf-root {")
-        root_block = css[root_start : root_start + 320]
+        root_block = css[root_start : root_start + 1500]
         self.assertIn("--qs-pdf-footer-inset: 6px", root_block)
+        self.assertIn("--qs-pdf-meta-right-left: 108mm", root_block)
+        self.assertIn("--qs-pdf-meta-right-shift-x: 27mm", root_block)
+        self.assertIn("--qs-pdf-signature-shift-y: calc(35pt + 10mm)", root_block)
+        self.assertIn("--qs-pdf-signature-shift-y-cn-bump: 5mm", root_block)
+        self.assertIn("--qs-pdf-signature-shift-y-en-bump: 10mm", root_block)
+        self.assertIn("--qs-pdf-signature-shift-y-extra: 20mm", root_block)
+        self.assertIn("--qs-pdf-stamp-shift-y-en: calc(", root_block)
+        self.assertIn("--qs-pdf-cust-shift-y-en: calc(", root_block)
+        self.assertIn("var(--qs-pdf-signature-shift-y-extra)", root_block)
+        self.assertIn("--qs-pdf-en-sign-text-offset:", root_block)
+        self.assertIn("--qs-pdf-en-sign-block-min-h: 30mm", root_block)
 
         sample_start = css.index(".qs-pdf-sample-meta")
         sample_block = css[sample_start : sample_start + 220]
@@ -159,9 +200,12 @@ class QuoteSheetPdfLayoutTest(unittest.TestCase):
         self.assertIn("46%", pay_block)
         self.assertIn("padding-left: 0", pay_block)
 
-        stamp_start = css.index(".qs-pdf-stamp-side")
-        stamp_block = css[stamp_start : stamp_start + 200]
+        stamp_start = css.index(".qs-pdf-stamp-side {")
+        stamp_block = css[stamp_start : stamp_start + 360]
         self.assertIn("padding-left: var(--qs-pdf-footer-inset)", stamp_block)
+        self.assertIn("align-self: end", stamp_block)
+        self.assertIn("margin-top: var(--qs-pdf-stamp-shift-y-cn)", stamp_block)
+        self.assertNotIn("transform: translateY(var(--qs-pdf-stamp-shift-y-cn))", stamp_block)
 
         pay_inner_start = css.index(".qs-pdf-pay-inner")
         pay_inner_block = css[pay_inner_start : pay_inner_start + 320]
@@ -185,6 +229,49 @@ class QuoteSheetPdfLayoutTest(unittest.TestCase):
         self.assertIn("margin-top: 20px", footer_block)
         self.assertIn("overflow: visible", footer_block)
 
+        sign_start = css.index(".qs-pdf-cust-sign-side {")
+        sign_block = css[sign_start : sign_start + 260]
+        self.assertIn("margin-top: var(--qs-pdf-cust-shift-y-cn)", sign_block)
+        self.assertNotIn("transform: translateY(var(--qs-pdf-cust-shift-y-cn))", sign_block)
+
+        en_sign_start = css.index('.qs-pdf-root[data-pdf-lang="en"] .qs-pdf-cust-sign-side')
+        en_sign_block = css[en_sign_start : en_sign_start + 420]
+        self.assertIn("align-self: start", en_sign_block)
+        self.assertIn("margin-top: calc(var(--qs-pdf-cust-shift-y-en) + var(--qs-pdf-en-sign-text-offset))", en_sign_block)
+        self.assertNotIn("transform: translateY(var(--qs-pdf-cust-shift-y-en))", en_sign_block)
+
+        en_pay_start = css.index('.qs-pdf-root[data-pdf-lang="en"] .qs-pdf-pay-wrap')
+        en_pay_block = css[en_pay_start : en_pay_start + 420]
+        self.assertIn("--qs-pdf-en-sign-block-min-h)", en_pay_block)
+        self.assertIn("--qs-pdf-en-sign-block-pad-bottom)", en_pay_block)
+
+        en_footer_start = css.index('.qs-pdf-root[data-pdf-lang="en"] .qs-pdf-footer-co')
+        en_footer_block = css[en_footer_start : en_footer_start + 320]
+        self.assertIn("min-height: calc(2 * 1.55em + 0.45em)", en_footer_block)
+        self.assertIn("padding-bottom: 0.45em", en_footer_block)
+
+    def test_pdf_export_onclone_keeps_meta_right_shift(self) -> None:
+        js = (ROOT / "static" / "quote_sheet.js").read_text(encoding="utf-8")
+        self.assertIn('const PDF_META_RIGHT_SHIFT_X = "27mm"', js)
+        self.assertIn("translateX(${PDF_META_RIGHT_SHIFT_X})", js)
+        self.assertIn('.qs-pdf-cust-sign-side").forEach', js)
+        self.assertIn("--qs-pdf-cn-sign-block-pad-bottom", js)
+        self.assertIn('footerCo.style.setProperty("min-height"', js)
+        self.assertNotIn("PDF_HEADER_RIGHT_ANCHOR", js)
+        self.assertNotIn('cell.style.setProperty("padding-left", "45pt", "important")', js)
+        self.assertNotIn('node.style.setProperty("overflow", "hidden", "important")', js)
+
+    def test_pdf_name_column_wraps_in_css(self) -> None:
+        css = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+        js = (ROOT / "static" / "quote_sheet.js").read_text(encoding="utf-8")
+        block_start = css.index(".qs-pdf-table tbody td.col-name")
+        block = css[block_start : block_start + 320]
+        self.assertIn("white-space: normal", block)
+        self.assertIn("overflow-wrap: anywhere", block)
+        self.assertIn("max-width: 0", block)
+        self.assertIn('textCell("col-name", true', js)
+        self.assertIn("td.col-name", js)
+
     def test_pdf_bank_account_split_in_quote_sheet_js(self) -> None:
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
         js = (ROOT / "static" / "quote_sheet.js").read_text(encoding="utf-8")
@@ -194,9 +281,10 @@ class QuoteSheetPdfLayoutTest(unittest.TestCase):
         self.assertIn('setText("pvBankAccount", bankAccountText)', js)
         self.assertIn('el("pvBankAccountLine")', js)
         self.assertIn('QUOTE_ISSUER_COMPANY_NAME = "深圳市栢博旅游用品有限公司"', js)
+        self.assertIn('QUOTE_PDF_HEADER_COMPANY_NAME_EN = "Shenzhen Peboz Products Limited"', js)
         self.assertIn("syncQuoteIssuerCompanyNameForPdf", js)
-        self.assertIn('setText("pvCoTitle", QUOTE_ISSUER_COMPANY_NAME)', js)
-        self.assertIn('setText("pvFooterCo", QUOTE_ISSUER_COMPANY_NAME)', js)
+        self.assertIn('setText("pvCoTitle", resolvePdfHeaderCompanyName(lang))', js)
+        self.assertIn('setText("pvFooterCo", resolveFooterCompanyNameForPdf(lang))', js)
         self.assertIn("resolveAuthorizedPayeeCompanyForPdf", js)
         self.assertIn("syncAuthorizedPayeePdfPreview", js)
         self.assertNotIn("metaEn?.co_name ?? coTitle", js)

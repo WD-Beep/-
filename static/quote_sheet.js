@@ -12,6 +12,14 @@
 
   /** 客户 PDF 页眉/签章公司名：固定为报价出具方，不随表单公司名或收款公司变化。 */
   const QUOTE_ISSUER_COMPANY_NAME = "深圳市栢博旅游用品有限公司";
+  /** 英文 PDF 页眉标题（顶部 Quotation 上方公司名）。 */
+  const QUOTE_PDF_HEADER_COMPANY_NAME_EN = "Shenzhen Peboz Products Limited";
+  /** 英文 PDF 页脚签章/默认收款主体等公司名（与页眉可不同）。 */
+  const QUOTE_ISSUER_COMPANY_NAME_EN = "Shenzhen Baibo Travel Products Co., Ltd.";
+  const QUOTE_ISSUER_ADDRESS_EN =
+    "Unit 6A01, Building A, Baoneng Zhichuang Valley, Pinghu Street, Longgang District, Shenzhen, Guangdong, China";
+  const EN_EXPORT_FALLBACK = "To be confirmed";
+  const CJK_TEXT_RE = /[\u4e00-\u9fff]/;
 
   const defaults = {
     coName: QUOTE_ISSUER_COMPANY_NAME,
@@ -19,12 +27,19 @@
     coAddr: "广东省深圳市龙岗区平湖街道宝能智创谷B栋A单元6A01",
   };
 
+  const PDF_META_RIGHT_SHIFT_X = "27mm";
+  const PDF_SIGNATURE_SHIFT_Y = "35pt";
   const PAYEE_NOT_FOUND_MSG = "未找到该公司的收款信息，请检查公司名或联系管理员维护账户资料";
   const PAYEE_SELECT_REQUIRED_MSG = "请选择一个收款公司";
   const PAYEE_CANDIDATE_EMPTY_MSG = "未找到匹配收款公司";
+  const PAYEE_EMPTY_CN_MSG = "暂无中国账户，请先在后台维护人民币收款账户";
+  const PAYEE_EMPTY_FOREIGN_MSG = "暂无美金账户，请先在后台维护美元收款账户";
+  const PAYEE_ACCOUNT_TYPE_CN = "cn";
+  const PAYEE_ACCOUNT_TYPE_FOREIGN = "foreign";
   const PAYEE_LIST_LIMIT = 30;
 
   const payeeState = {
+    accountType: PAYEE_ACCOUNT_TYPE_CN,
     selected: null,
     searching: false,
     searchToken: 0,
@@ -36,33 +51,264 @@
     inflight: false,
     preflightDialogPromise: null,
   };
+
+  function quoteSheetFetch(path, options = {}) {
+    const fn = typeof window !== "undefined" ? window.quoteFetch : null;
+    if (typeof fn === "function") {
+      return fn(path, options);
+    }
+    const p = String(path || "").startsWith("/") ? path : `/${path || ""}`;
+    return window.fetch(p, { credentials: "include", ...options });
+  }
+
+  function quoteSheetStatus(message, level = "busy") {
+    if (typeof window.setComposerStatusLine === "function") {
+      window.setComposerStatusLine(message, level);
+    }
+  }
+
+  async function waitForQuotePdfReady() {
+    if (typeof window.switchWorkspaceView === "function") {
+      window.switchWorkspaceView("quoteSheet");
+    } else {
+      switchView("quote");
+    }
+    const pane = document.getElementById("workspaceQuote");
+    if (pane) {
+      pane.hidden = false;
+      pane.classList.add("workspace-pane-visible");
+    }
+    syncAllPreview();
+    await new Promise((resolve) => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(resolve);
+      });
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 320));
+    const imgs = document.querySelectorAll("#quotePdfRoot .qs-pdf-prod-img");
+    await Promise.all(
+      Array.from(imgs).map(
+        (img) =>
+          new Promise((resolve) => {
+            if (!(img instanceof HTMLImageElement) || img.complete) {
+              resolve();
+              return;
+            }
+            const done = () => resolve();
+            img.addEventListener("load", done, { once: true });
+            img.addEventListener("error", done, { once: true });
+            window.setTimeout(done, 1500);
+          }),
+      ),
+    );
+  }
   let payeeSearchTimer = null;
 
   function normalizePayeeCompanyName(raw) {
     return String(raw || "")
       .trim()
+      .replace(/[（(]\s*(美金账户|中国账户|美元账户)\s*[）)]/gi, "")
       .replace(/\s+/g, "");
   }
 
-  function buildBankNamePdfText(account) {
-    if (!account || typeof account !== "object") {
-      return "";
-    }
-    return String(account.bank_name || "").trim();
+  function stripPayeeAccountTypeSuffix(text) {
+    return String(text || "")
+      .trim()
+      .replace(/[（(]\s*(美金账户|中国账户|美元账户)\s*[）)]/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
-  function buildBankAccountPdfText(account) {
+  function payeeInputLabel(account) {
     if (!account || typeof account !== "object") {
       return "";
     }
-    return String(account.bank_account || "").trim();
+    if (isForeignPayeeAccount(account)) {
+      return (
+        stripPayeeAccountTypeSuffix(account.company_name_en) ||
+        stripPayeeAccountTypeSuffix(account.company_name)
+      );
+    }
+    const display = String(account.display_label_cn || "").trim();
+    const withoutPrefix = display.includes("·") ? display.split("·").pop().trim() : display;
+    return (
+      stripPayeeAccountTypeSuffix(account.company_name) ||
+      stripPayeeAccountTypeSuffix(withoutPrefix)
+    );
   }
 
-  function buildAlipayPdfText(account) {
+  function readPayeeAccountType() {
+    const selected = document.querySelector('input[name="qsPayeeAccountType"]:checked');
+    const value = String(selected?.value || PAYEE_ACCOUNT_TYPE_CN).trim().toLowerCase();
+    return value === PAYEE_ACCOUNT_TYPE_FOREIGN ? PAYEE_ACCOUNT_TYPE_FOREIGN : PAYEE_ACCOUNT_TYPE_CN;
+  }
+
+  function payeeEmptyMessageForType(accountType = readPayeeAccountType()) {
+    return accountType === PAYEE_ACCOUNT_TYPE_FOREIGN ? PAYEE_EMPTY_FOREIGN_MSG : PAYEE_EMPTY_CN_MSG;
+  }
+
+  const FOREIGN_PAYEE_CURRENCIES = new Set(["USD", "USDT", "HKD", "EUR", "GBP", "JPY", "AUD", "CAD", "SGD"]);
+
+  function isForeignPayeeAccount(account) {
+    if (!account || typeof account !== "object") {
+      return false;
+    }
+    const bucket = String(account.account_type || "").trim().toLowerCase();
+    if (bucket === PAYEE_ACCOUNT_TYPE_FOREIGN) {
+      return true;
+    }
+    if (bucket === PAYEE_ACCOUNT_TYPE_CN) {
+      return false;
+    }
+    const currency = String(account.currency || "").trim().toUpperCase();
+    if (FOREIGN_PAYEE_CURRENCIES.has(currency)) {
+      return true;
+    }
+    const variant = String(account.account_variant || "").trim().toLowerCase();
+    if (variant === "usd" || variant === "foreign" || variant === "intl") {
+      return true;
+    }
+    if (String(account.swift_code || "").trim()) {
+      return true;
+    }
+    const bankEn = String(account.bank_name_en || "").trim();
+    const bankCn = String(account.bank_name || "").trim();
+    return Boolean(bankEn && !bankCn);
+  }
+
+  function isUsdPayeeAccount(account) {
+    return isForeignPayeeAccount(account);
+  }
+
+  function accountMatchesSelectedType(account) {
+    if (!account || typeof account !== "object") {
+      return false;
+    }
+    const bucket = String(account.account_type || "").trim().toLowerCase();
+    if (bucket) {
+      return bucket === readPayeeAccountType();
+    }
+    return readPayeeAccountType() === PAYEE_ACCOUNT_TYPE_CN
+      ? !isForeignPayeeAccount(account)
+      : isForeignPayeeAccount(account);
+  }
+
+  function payeeDisplayName(account) {
     if (!account || typeof account !== "object") {
       return "";
     }
-    return String(account.alipay || "").trim();
+    return (
+      String(account.display_label_cn || "").trim() ||
+      String(account.company_name || "").trim()
+    );
+  }
+
+  function payeeInputMatchesSelection(query, selected) {
+    if (!selected) {
+      return false;
+    }
+    const q = normalizePayeeCompanyName(query);
+    if (!q) {
+      return false;
+    }
+    const keys = [
+      selected.company_name,
+      selected.display_label_cn,
+      selected.company_name_en,
+      selected.account_id,
+    ]
+      .map((item) => normalizePayeeCompanyName(item))
+      .filter(Boolean);
+    return keys.includes(q);
+  }
+
+  function clonePayeeAccount(account) {
+    if (!account || typeof account !== "object") {
+      return null;
+    }
+    return {
+      account_id: String(account.account_id || "").trim(),
+      display_label_cn: String(account.display_label_cn || "").trim(),
+      company_name: String(account.company_name || "").trim(),
+      company_name_en: String(account.company_name_en || "").trim(),
+      currency: String(account.currency || "CNY").trim().toUpperCase() || "CNY",
+      account_type: String(account.account_type || "").trim().toLowerCase(),
+      account_type_label: String(account.account_type_label || "").trim(),
+      account_variant: String(account.account_variant || "").trim(),
+      bank_name: String(account.bank_name || "").trim(),
+      bank_name_en: String(account.bank_name_en || "").trim(),
+      bank_account: String(account.bank_account || "").trim(),
+      bank_address_en: String(account.bank_address_en || "").trim(),
+      swift_code: String(account.swift_code || "").trim(),
+      bank_note_en: String(account.bank_note_en || "").trim(),
+      bank_block_text: String(account.bank_block_text || "").trim(),
+      is_usd_account: String(account.is_usd_account || "").trim(),
+      alipay: String(account.alipay || "").trim(),
+    };
+  }
+
+  function formatUsdBankBlockEn(account) {
+    const row = clonePayeeAccount(account);
+    if (!row) {
+      return "";
+    }
+    if (row.bank_block_text) {
+      return row.bank_block_text;
+    }
+    const lines = ["Bank Information:"];
+    const name = row.company_name_en || row.company_name;
+    if (name) {
+      lines.push(`NAME: ${name}`);
+    }
+    if (row.bank_account) {
+      lines.push(`A/C: ${row.bank_account}`);
+    }
+    if (row.bank_name_en || row.bank_name) {
+      lines.push(`BANK NAME: ${row.bank_name_en || row.bank_name}`);
+    }
+    if (row.swift_code) {
+      lines.push(`SWIFT CODE: ${row.swift_code}`);
+    }
+    if (row.bank_address_en) {
+      lines.push(`ADD: ${row.bank_address_en}`);
+    }
+    if (row.bank_note_en) {
+      lines.push(`NOTE: ${row.bank_note_en}`);
+    }
+    return lines.join("\n");
+  }
+
+  function buildBankPdfPresentation(account, lang = currentPdfLang) {
+    const row = clonePayeeAccount(account);
+    if (!row) {
+      return { mode: "empty", bankLine: "", accountLine: "", alipayLine: "" };
+    }
+    if (lang === "en" && !useChinesePayeePresentationForPdf() && (row.bank_block_text || isForeignPayeeAccount(row))) {
+      return {
+        mode: "usd_block",
+        bankLine: row.bank_block_text || formatUsdBankBlockEn(row),
+        accountLine: "",
+        alipayLine: "",
+      };
+    }
+    return {
+      mode: "standard",
+      bankLine: String(row.bank_name || row.bank_name_en || "").trim(),
+      accountLine: String(row.bank_account || "").trim(),
+      alipayLine: String(row.alipay || "").trim(),
+    };
+  }
+
+  function buildBankNamePdfText(account, lang = currentPdfLang) {
+    return buildBankPdfPresentation(account, lang).bankLine;
+  }
+
+  function buildBankAccountPdfText(account, lang = currentPdfLang) {
+    return buildBankPdfPresentation(account, lang).accountLine;
+  }
+
+  function buildAlipayPdfText(account, lang = currentPdfLang) {
+    return buildBankPdfPresentation(account, lang).alipayLine;
   }
 
   function setPayeeStatus(text, level = STATUS_LEVELS.idle) {
@@ -81,43 +327,89 @@
     }
   }
 
+  function syncPayeePreviewLabels(accountType = readPayeeAccountType()) {
+    const foreign = accountType === PAYEE_ACCOUNT_TYPE_FOREIGN;
+    setText("qsPayeePreviewNameLabel", foreign ? "Beneficiary Name：" : "公司名称：");
+    setText("qsPayeePreviewBankNameLabel", foreign ? "Bank Name：" : "对公开户行：");
+    setText("qsPayeePreviewBankAccountLabel", foreign ? "Account No.：" : "对公银行账号：");
+  }
+
   function renderPayeePreview(account) {
     const wrap = el("qsPayeePreview");
     if (!wrap) {
       return;
     }
+    const accountType = readPayeeAccountType();
+    syncPayeePreviewLabels(accountType);
+    const swiftRow = el("qsPayeePreviewSwiftRow");
+    const bankAddrRow = el("qsPayeePreviewBankAddrRow");
+    const noteRow = el("qsPayeePreviewNoteRow");
+    const alipayRow = el("qsPayeePreviewAlipayRow");
     if (!account) {
       wrap.hidden = true;
       setText("qsPayeePreviewName", "");
       setText("qsPayeePreviewBankName", "");
       setText("qsPayeePreviewBankAccount", "");
+      setText("qsPayeePreviewSwift", "");
+      setText("qsPayeePreviewBankAddr", "");
+      setText("qsPayeePreviewNote", "");
       setText("qsPayeePreviewAlipay", "");
+      if (swiftRow) swiftRow.hidden = true;
+      if (bankAddrRow) bankAddrRow.hidden = true;
+      if (noteRow) noteRow.hidden = true;
+      if (alipayRow) alipayRow.hidden = false;
       return;
     }
     wrap.hidden = false;
-    setText("qsPayeePreviewName", account.company_name || "");
+    const foreign = isForeignPayeeAccount(account) || accountType === PAYEE_ACCOUNT_TYPE_FOREIGN;
+    const nameText = foreign
+      ? account.company_name_en || account.company_name || payeeDisplayName(account)
+      : payeeDisplayName(account) || account.company_name || "";
+    setText("qsPayeePreviewName", nameText || "—");
+    if (foreign) {
+      setText("qsPayeePreviewBankName", account.bank_name_en || account.bank_name || "—");
+      setText("qsPayeePreviewBankAccount", account.bank_account || "—");
+      setText("qsPayeePreviewSwift", account.swift_code || "—");
+      setText("qsPayeePreviewBankAddr", account.bank_address_en || "—");
+      setText("qsPayeePreviewNote", account.bank_note_en || "—");
+      if (swiftRow) swiftRow.hidden = false;
+      if (bankAddrRow) bankAddrRow.hidden = false;
+      if (noteRow) noteRow.hidden = !String(account.bank_note_en || "").trim();
+      if (alipayRow) alipayRow.hidden = true;
+      return;
+    }
     setText("qsPayeePreviewBankName", account.bank_name || "—");
     setText("qsPayeePreviewBankAccount", account.bank_account || "—");
     setText("qsPayeePreviewAlipay", account.alipay || "—");
+    setText("qsPayeePreviewSwift", "");
+    setText("qsPayeePreviewBankAddr", "");
+    setText("qsPayeePreviewNote", "");
+    if (swiftRow) swiftRow.hidden = true;
+    if (bankAddrRow) bankAddrRow.hidden = true;
+    if (noteRow) noteRow.hidden = true;
+    if (alipayRow) alipayRow.hidden = false;
   }
 
   function formatPayeeCandidateSummary(account) {
     if (!account || typeof account !== "object") {
       return "";
     }
-    const parts = [];
-    const bankName = String(account.bank_name || "").trim();
+    const typeLabel = account.account_type_label || (isForeignPayeeAccount(account) ? "美金账户" : "中国账户");
+    const currency = String(account.currency || (isForeignPayeeAccount(account) ? "USD" : "CNY")).trim().toUpperCase();
+    const bankName = String(
+      isForeignPayeeAccount(account) ? account.bank_name_en || account.bank_name : account.bank_name,
+    ).trim();
     const bankAccount = String(account.bank_account || "").replace(/\s+/g, "");
-    if (bankName || bankAccount) {
-      const bankLabel = bankName.length > 14 ? `${bankName.slice(0, 14)}…` : bankName;
-      const tail = bankAccount.length > 4 ? `尾号${bankAccount.slice(-4)}` : bankAccount;
-      parts.push([bankLabel, tail].filter(Boolean).join(" "));
+    const bankLabel = bankName.length > 14 ? `${bankName.slice(0, 14)}…` : bankName;
+    const tail = bankAccount.length > 4 ? `尾号${bankAccount.slice(-4)}` : bankAccount;
+    return [typeLabel, currency, bankLabel, tail].filter(Boolean).join("｜");
+  }
+
+  function formatPayeeCandidateTitle(account) {
+    if (!account || typeof account !== "object") {
+      return "";
     }
-    const alipay = String(account.alipay || "").trim();
-    if (alipay) {
-      parts.push(alipay.length > 22 ? `${alipay.slice(0, 20)}…` : alipay);
-    }
-    return parts.join(" · ") || "暂无银行/支付宝信息";
+    return payeeInputLabel(account) || payeeDisplayName(account) || account.company_name || "";
   }
 
   function setPayeeDropdownOpen(open) {
@@ -165,7 +457,7 @@
       if (options.showEmpty) {
         const li = document.createElement("li");
         li.className = "qs-payee-candidates-empty";
-        li.textContent = PAYEE_CANDIDATE_EMPTY_MSG;
+        li.textContent = options.emptyMessage || PAYEE_CANDIDATE_EMPTY_MSG;
         list.appendChild(li);
         setPayeeDropdownOpen(true);
       } else {
@@ -182,7 +474,7 @@
       btn.dataset.index = String(index);
       const nameNode = document.createElement("span");
       nameNode.className = "qs-payee-candidate-name";
-      nameNode.textContent = row.company_name || "";
+      nameNode.textContent = formatPayeeCandidateTitle(row);
       const metaNode = document.createElement("span");
       metaNode.className = "qs-payee-candidate-meta";
       metaNode.textContent = formatPayeeCandidateSummary(row);
@@ -219,18 +511,24 @@
       syncAllPreview();
       return false;
     }
-    payeeState.selected = {
-      company_name: String(account.company_name || "").trim(),
-      bank_name: String(account.bank_name || "").trim(),
-      bank_account: String(account.bank_account || "").trim(),
-      alipay: String(account.alipay || "").trim(),
-    };
+    if (!accountMatchesSelectedType(account)) {
+      setPayeeStatus("所选账户与当前账户类型不一致，请重新选择。", STATUS_LEVELS.error);
+      return false;
+    }
+    payeeState.selected = clonePayeeAccount(account);
+    payeeState.accountType = readPayeeAccountType();
     const input = el("qsPayeeCompany");
     if (input) {
-      input.value = payeeState.selected.company_name;
+      input.value = payeeInputLabel(payeeState.selected);
     }
     renderPayeePreview(payeeState.selected);
-    setPayeeStatus("已匹配收款账户，导出 PDF 时将写入对应银行与支付宝信息。", STATUS_LEVELS.success);
+    const currency = payeeState.selected.currency || "CNY";
+    setPayeeStatus(
+      isForeignPayeeAccount(payeeState.selected)
+        ? `已选择美金账户（${currency}），英文报价单将写入完整 Bank Information。`
+        : "已匹配中国账户，导出 PDF 时将写入中文银行与支付宝信息。",
+      STATUS_LEVELS.success,
+    );
     setPayeeDropdownOpen(false);
     markEnglishSnapshotDirty();
     syncAllPreview();
@@ -264,8 +562,10 @@
     }
     try {
       const limit = text ? PAYEE_LIST_LIMIT : PAYEE_LIST_LIMIT;
-      const resp = await window.fetch(
-        `/api/quote-sheet/payment-accounts/search?q=${encodeURIComponent(text)}&limit=${limit}`,
+      const accountType = readPayeeAccountType();
+      payeeState.accountType = accountType;
+      const resp = await quoteSheetFetch(
+        `/api/quote-sheet/payment-accounts/search?q=${encodeURIComponent(text)}&limit=${limit}&account_type=${encodeURIComponent(accountType)}`,
       );
       const payload = await resp.json().catch(() => ({}));
       if (token !== payeeState.searchToken) {
@@ -275,20 +575,28 @@
         throw new Error(payload?.message || payload?.error || "search_failed");
       }
       const exact = payload.exact && typeof payload.exact === "object" ? payload.exact : null;
-      const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
-      if (exact && autoSelectExact) {
+      const candidates = (Array.isArray(payload.candidates) ? payload.candidates : []).filter((row) =>
+        accountMatchesSelectedType(row),
+      );
+      if (exact && autoSelectExact && accountMatchesSelectedType(exact)) {
         setPayeeDropdownOpen(false);
         return selectPayeeAccount(exact) ? exact : null;
       }
       if (!text) {
-        renderPayeeCandidates(candidates, { showEmpty: !candidates.length });
-        setPayeeStatus("");
+        renderPayeeCandidates(candidates, {
+          showEmpty: !candidates.length,
+          emptyMessage: payeeEmptyMessageForType(accountType),
+        });
+        setPayeeStatus(candidates.length ? "" : payeeEmptyMessageForType(accountType), candidates.length ? STATUS_LEVELS.idle : STATUS_LEVELS.warn);
         return null;
       }
       clearPayeeSelection();
       if (!candidates.length) {
         if (showDropdown) {
-          renderPayeeCandidates([], { showEmpty: true });
+          renderPayeeCandidates([], {
+            showEmpty: true,
+            emptyMessage: payeeEmptyMessageForType(accountType),
+          });
         } else {
           setPayeeDropdownOpen(false);
         }
@@ -340,24 +648,128 @@
     return payeeState.selected;
   }
 
-  function resolveQuoteCompanyNameForPdf() {
+  function useChinesePayeePresentationForPdf() {
+    return readPayeeAccountType() === PAYEE_ACCOUNT_TYPE_CN;
+  }
+
+  function shouldPreservePayeeChineseInEnglishPdf(node) {
+    if (!useChinesePayeePresentationForPdf() || !node || typeof node.closest !== "function") {
+      return false;
+    }
+    return Boolean(
+      node.closest("#pvAuthorizedPayeeLine") ||
+      node.closest(".qs-pdf-pay-inner") ||
+      node.id === "pvAuthorizedPayee" ||
+      node.id === "pvBank" ||
+      node.id === "pvBankAccount" ||
+      node.id === "pvAlipay",
+    );
+  }
+
+  function resolveIssuerCompanyName(lang = currentPdfLang) {
+    if (lang === "en") {
+      return (
+        enState.fixed?.default_company_name ||
+        enState.meta?.co_name ||
+        QUOTE_ISSUER_COMPANY_NAME_EN
+      );
+    }
     return QUOTE_ISSUER_COMPANY_NAME;
   }
 
-  function resolveFooterCompanyNameForPdf() {
+  function resolvePdfHeaderCompanyName(lang = currentPdfLang) {
+    if (lang === "en") {
+      return QUOTE_PDF_HEADER_COMPANY_NAME_EN;
+    }
     return QUOTE_ISSUER_COMPANY_NAME;
   }
 
-  function syncQuoteIssuerCompanyNameForPdf() {
-    setText("pvCoTitle", QUOTE_ISSUER_COMPANY_NAME);
-    setText("pvFooterCo", QUOTE_ISSUER_COMPANY_NAME);
+  function resolveFooterCompanyName(lang = currentPdfLang) {
+    return resolveIssuerCompanyName(lang);
   }
 
-  function resolveAuthorizedPayeeCompanyForPdf() {
-    const payee = currentPayeeAccountForPdf();
+  function resolveFooterCompanyNameForPdf(lang = currentPdfLang) {
+    return resolveFooterCompanyName(lang);
+  }
+
+  function syncQuoteIssuerCompanyNameForPdf(lang = currentPdfLang) {
+    setText("pvCoTitle", resolvePdfHeaderCompanyName(lang));
+    setText("pvFooterCo", resolveFooterCompanyNameForPdf(lang));
+  }
+
+  function resolvePayeeAccountForPdf(lang = currentPdfLang) {
+    const raw = currentPayeeAccountForPdf();
+    if (useChinesePayeePresentationForPdf()) {
+      return raw;
+    }
+    if (lang === "en" && enState.payee && typeof enState.payee === "object") {
+      return enState.payee;
+    }
+    return raw;
+  }
+
+  function sanitizeEnglishExportText(raw, fallback = EN_EXPORT_FALLBACK) {
+    let s = String(raw ?? "")
+      .replace(/\s*\[UNTRANSLATED\]\s*/gi, "")
+      .trim();
+    if (!s || s === "-" || s === "—") {
+      return "";
+    }
+    if (CJK_TEXT_RE.test(s)) {
+      return fallback;
+    }
+    return s;
+  }
+
+  function scrubEnglishPdfDom(root) {
+    if (!root || currentPdfLang !== "en") {
+      return;
+    }
+    root.querySelectorAll("#quotePdfRoot, #quotePdfRoot *").forEach((node) => {
+      if (shouldPreservePayeeChineseInEnglishPdf(node)) {
+        return;
+      }
+      if (node.tagName === "SCRIPT" || node.tagName === "STYLE") {
+        return;
+      }
+      if (node.childNodes.length === 1 && node.childNodes[0].nodeType === Node.TEXT_NODE) {
+        const cleaned = sanitizeEnglishExportText(node.textContent, "");
+        if (cleaned !== node.textContent) {
+          node.textContent = cleaned || EN_EXPORT_FALLBACK;
+        }
+        return;
+      }
+      if (
+        node.childNodes.length === 0 &&
+        node.textContent &&
+        CJK_TEXT_RE.test(node.textContent)
+      ) {
+        node.textContent = sanitizeEnglishExportText(node.textContent);
+      }
+    });
+  }
+
+  function resolveAuthorizedPayeeCompanyForPdf(lang = currentPdfLang) {
+    const payee = resolvePayeeAccountForPdf(lang);
+    if (useChinesePayeePresentationForPdf() && payee) {
+      const cnName =
+        payeeInputLabel(payee) ||
+        stripPayeeAccountTypeSuffix(payee.company_name) ||
+        payeeDisplayName(payee);
+      if (cnName) {
+        return cnName;
+      }
+    }
     const fromSelected = String(payee?.company_name || "").trim();
     if (fromSelected) {
       return fromSelected;
+    }
+    if (lang === "en") {
+      return (
+        enState.fixed?.default_authorized_payee ||
+        enState.fixed?.default_company_name ||
+        QUOTE_ISSUER_COMPANY_NAME_EN
+      );
     }
     return String(el("qsPayeeCompany")?.value || "").trim();
   }
@@ -365,43 +777,168 @@
   const EXPORT_MISSING_FIELDS = {
     payee_company: {
       key: "payee_company",
+      shortLabel: "收款账户",
       message: "请先选择收款公司",
       focusId: "qsPayeeCompany",
       scrollTarget: ".qs-payee-wrap",
     },
     payee_account: {
       key: "payee_account",
+      shortLabel: "收款账户",
       message: "请确认收款账户信息已匹配",
+      focusId: "qsPayeeCompany",
+      scrollTarget: ".qs-payee-wrap",
+    },
+    payee_language: {
+      key: "payee_language",
+      shortLabel: "收款账户语言",
+      message: "收款公司与报价单导出语言不一致，请切换账户或导出语言。",
+      focusId: "qsPayeeCompany",
+      scrollTarget: ".qs-payee-wrap",
+    },
+    payee_swift: {
+      key: "payee_swift",
+      shortLabel: "SWIFT Code",
+      message: "美金账户缺少 SWIFT Code，请补充后再生成。",
       focusId: "qsPayeeCompany",
       scrollTarget: ".qs-payee-wrap",
     },
     sample_fee: {
       key: "sample_fee",
+      shortLabel: "打样费",
       message: "请填写打样费",
       focusId: "qsSampleFee",
       scrollTarget: "#qsSampleDetailFields",
     },
     sample_lead_time: {
       key: "sample_lead_time",
+      shortLabel: "打样时间",
       message: "请填写打样时间",
       focusId: "qsSampleLeadTime",
       scrollTarget: "#qsSampleDetailFields",
     },
+    cust_name: {
+      key: "cust_name",
+      shortLabel: "客户名称",
+      message: "请填写客户名称",
+      focusId: "qsCustName",
+      scrollTarget: "#qsCustName",
+    },
+    product_rows: {
+      key: "product_rows",
+      shortLabel: "报价产品/物料明细",
+      message: "请至少填写一行产品名称",
+      focusId: "qsFormProductBody",
+      scrollTarget: ".qs-form-products-wrap",
+    },
+    quote_currency: {
+      key: "quote_currency",
+      shortLabel: "报价币种",
+      message: "产品行缺少有效报价金额，请先完成报价计算",
+      focusId: "qsFormProductBody",
+      scrollTarget: ".qs-form-products-wrap",
+    },
   };
 
-  async function inspectPayeeForExport() {
+  const EXPORT_BTN_LABELS = {
+    rmb: "下载 PDF（人民币）",
+    fobUsd: "导出 PDF（FOB·美金）",
+  };
+
+  function inspectPayeeForExportSync() {
     const input = el("qsPayeeCompany");
     const query = String(input?.value || "").trim();
     if (!query) {
       return { ok: false, missingKey: "payee_company" };
     }
     const selected = payeeState.selected;
-    if (
-      selected &&
-      normalizePayeeCompanyName(selected.company_name) === normalizePayeeCompanyName(query)
-    ) {
+    if (selected && payeeInputMatchesSelection(query, selected) && accountMatchesSelectedType(selected)) {
       return { ok: true };
     }
+    if (payeeState.searching) {
+      return { ok: false, missingKey: "payee_account" };
+    }
+    return { ok: false, missingKey: "payee_account" };
+  }
+
+  function inspectCustNameForExport() {
+    if (!trimMetaText(el("qsCustName")?.value ?? "")) {
+      return { ok: false, missingKey: "cust_name" };
+    }
+    return { ok: true };
+  }
+
+  function inspectProductRowsForExport() {
+    const body = selFormBody();
+    if (!body) {
+      return { ok: false, missingKey: "product_rows" };
+    }
+    const hasNamedRow = Array.from(body.querySelectorAll("tr")).some((row) => {
+      const inputs = Array.from(row.querySelectorAll("input:not(.qs-img-file), textarea"));
+      const name = trimMetaText(inputs[0]?.value ?? "");
+      return Boolean(name);
+    });
+    if (!hasNamedRow) {
+      return { ok: false, missingKey: "product_rows" };
+    }
+    return { ok: true };
+  }
+
+  function rowHasQuotePrice(row, asFobUsdPdf = false) {
+    if (!row) {
+      return false;
+    }
+    if (asFobUsdPdf) {
+      const usd = parseMoneyNumber(row.dataset.fobPriceUsd);
+      const usdText = trimMetaText(row.dataset.fobPriceUsdText);
+      if (usd > 0) {
+        return true;
+      }
+      return Boolean(usdText) && parseMoneyNumber(usdText) > 0;
+    }
+    const taxed = parseMoneyNumber(row.dataset.taxedPrice);
+    const taxedText = trimMetaText(row.dataset.taxedPriceText);
+    if (taxed > 0) {
+      return true;
+    }
+    if (taxedText && parseMoneyNumber(taxedText) > 0) {
+      return true;
+    }
+    const numberInputs = row.querySelectorAll("input.qs-input-mini[type='number']");
+    const priceInput = numberInputs.length >= 2 ? numberInputs[1] : numberInputs[0];
+    const price = parseMoneyNumber(priceInput?.value);
+    return Number.isFinite(price) && price > 0;
+  }
+
+  function inspectQuoteCurrencyForExport(asFobUsdPdf = false) {
+    const body = selFormBody();
+    if (!body) {
+      return { ok: false, missingKey: "quote_currency" };
+    }
+    const namedRows = Array.from(body.querySelectorAll("tr")).filter((row) => {
+      const inputs = Array.from(row.querySelectorAll("input:not(.qs-img-file), textarea"));
+      return Boolean(trimMetaText(inputs[0]?.value ?? ""));
+    });
+    if (!namedRows.length) {
+      return { ok: true };
+    }
+    const hasQuote = namedRows.some((row) => rowHasQuotePrice(row, asFobUsdPdf));
+    if (!hasQuote) {
+      return { ok: false, missingKey: "quote_currency" };
+    }
+    return { ok: true };
+  }
+
+  async function inspectPayeeForExport() {
+    const sync = inspectPayeeForExportSync();
+    if (sync.ok) {
+      return sync;
+    }
+    if (sync.missingKey === "payee_company") {
+      return sync;
+    }
+    const input = el("qsPayeeCompany");
+    const query = String(input?.value || "").trim();
     const matched = await fetchPayeeAccounts(query, {
       autoSelectExact: true,
       autoSelectUnique: true,
@@ -428,25 +965,168 @@
     return missing;
   }
 
-  async function validateBeforeExport() {
-    await saveQuoteSheetMeta({ silent: true, forExport: true });
+  function collectExportMissingFieldsSync(options = {}) {
+    const asFobUsdPdf = Boolean(options.asFobUsdPdf);
     const missingKeys = [];
-    const payee = await inspectPayeeForExport();
-    if (!payee.ok && payee.missingKey) {
-      missingKeys.push(payee.missingKey);
-    }
-    inspectSampleFieldsForExport().forEach((key) => {
-      if (!missingKeys.includes(key)) {
-        missingKeys.push(key);
+    const pushKey = (key) => {
+      if (!key || missingKeys.includes(key)) {
+        return;
       }
-    });
-    const missing = missingKeys
+      if (key === "payee_account" && missingKeys.includes("payee_company")) {
+        return;
+      }
+      if (key === "payee_company" && missingKeys.includes("payee_account")) {
+        const idx = missingKeys.indexOf("payee_account");
+        if (idx >= 0) {
+          missingKeys.splice(idx, 1);
+        }
+      }
+      missingKeys.push(key);
+    };
+
+    const payee = inspectPayeeForExportSync();
+    if (!payee.ok && payee.missingKey) {
+      pushKey(payee.missingKey);
+    }
+    inspectSampleFieldsForExport().forEach(pushKey);
+    const cust = inspectCustNameForExport();
+    if (!cust.ok && cust.missingKey) {
+      pushKey(cust.missingKey);
+    }
+    const products = inspectProductRowsForExport();
+    if (!products.ok && products.missingKey) {
+      pushKey(products.missingKey);
+    }
+    const currency = inspectQuoteCurrencyForExport(asFobUsdPdf);
+    if (!currency.ok && currency.missingKey) {
+      pushKey(currency.missingKey);
+    }
+    return missingKeys;
+  }
+
+  function validationResultFromMissingKeys(missingKeys) {
+    const missing = (Array.isArray(missingKeys) ? missingKeys : [])
       .map((key) => EXPORT_MISSING_FIELDS[key])
       .filter(Boolean);
     return {
       complete: missing.length === 0,
       missing,
+      missingKeys: Array.isArray(missingKeys) ? missingKeys : [],
     };
+  }
+
+  function runExportSyncPreflight(options = {}) {
+    return validationResultFromMissingKeys(collectExportMissingFieldsSync(options));
+  }
+
+  function formatExportMissingSummary(missingItems) {
+    const labels = [];
+    const seen = new Set();
+    (Array.isArray(missingItems) ? missingItems : []).forEach((item) => {
+      const label = String(item?.shortLabel || item?.message || "").trim();
+      if (!label || seen.has(label)) {
+        return;
+      }
+      seen.add(label);
+      labels.push(label);
+    });
+    return labels.length ? `请先补充：${labels.join("、")}` : "请先补充必填项";
+  }
+
+  function handleExportSyncPreflightFailure(validation) {
+    const summary = formatExportMissingSummary(validation?.missing);
+    quoteSheetStatus(summary, STATUS_LEVELS.error);
+    window.alert(summary);
+    focusFirstMissingField(validation?.missing?.[0]);
+    return false;
+  }
+
+  function setExportButtonsLoading(loading, statusText = "") {
+    const exportBtn = el("qsExportPdfBtn");
+    const exportUsdBtn = el("qsExportPdfFobUsdBtn");
+    if (loading) {
+      quoteSheetStatus(statusText || "正在生成 PDF…", STATUS_LEVELS.busy);
+      if (exportBtn) {
+        exportBtn.disabled = true;
+        if (!exportBtn.dataset.exportLabel) {
+          exportBtn.dataset.exportLabel = exportBtn.textContent || EXPORT_BTN_LABELS.rmb;
+        }
+        exportBtn.textContent = "正在生成 PDF…";
+      }
+      if (exportUsdBtn) {
+        exportUsdBtn.disabled = true;
+        if (!exportUsdBtn.dataset.exportLabel) {
+          exportUsdBtn.dataset.exportLabel = exportUsdBtn.textContent || EXPORT_BTN_LABELS.fobUsd;
+        }
+        exportUsdBtn.textContent = "正在生成 PDF…";
+      }
+      return;
+    }
+    quoteSheetStatus("", STATUS_LEVELS.idle);
+    if (exportBtn) {
+      exportBtn.disabled = false;
+      exportBtn.textContent = exportBtn.dataset.exportLabel || EXPORT_BTN_LABELS.rmb;
+    }
+    if (exportUsdBtn) {
+      exportUsdBtn.disabled = false;
+      exportUsdBtn.textContent = exportUsdBtn.dataset.exportLabel || EXPORT_BTN_LABELS.fobUsd;
+    }
+  }
+
+  async function validateBeforeExport(options = {}) {
+    return runExportSyncPreflight(options);
+  }
+
+  async function inspectPayeeLanguageForExport(lang) {
+    try {
+      const resp = await quoteSheetFetch("/api/quote-sheet/validate-export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          export_lang: lang,
+          bundle: buildQuoteBundleFromForm(),
+        }),
+      });
+      const payload = await resp.json();
+      if (!resp.ok || !payload || payload.ok === false) {
+        const issues = Array.isArray(payload?.blocking_issues)
+          ? payload.blocking_issues
+          : Array.isArray(payload?.issues)
+            ? payload.issues
+            : [];
+        const messages = issues
+          .map((item) => String(item?.message || "").trim())
+          .filter(Boolean);
+        return {
+          ok: false,
+          missingKey: "payee_language",
+          messages: messages.length
+            ? messages
+            : ["收款公司与报价单导出语言不一致，请切换账户或导出语言。"],
+        };
+      }
+      return { ok: true };
+    } catch (err) {
+      return {
+        ok: false,
+        missingKey: "payee_language",
+        messages: [`收款语言校验失败：${err?.message || "未知错误"}`],
+      };
+    }
+  }
+
+  async function ensurePayeeLanguageReadyForExport(lang) {
+    const result = await inspectPayeeLanguageForExport(lang);
+    if (result.ok) {
+      return true;
+    }
+    window.alert(result.messages.join("\n\n"));
+    focusFirstMissingField(EXPORT_MISSING_FIELDS.payee_language);
+    return false;
+  }
+
+  function scheduleExportMetaSave() {
+    void saveQuoteSheetMeta({ silent: true, forExport: true });
   }
 
   function focusFirstMissingField(item) {
@@ -527,17 +1207,16 @@
     return exportGuard.preflightDialogPromise;
   }
 
-  async function ensureExportPreflight() {
-    const validation = await validateBeforeExport();
-    if (validation.complete) {
-      return true;
+  async function ensureExportPreflight(options = {}) {
+    const validation = runExportSyncPreflight(options);
+    if (!validation.complete) {
+      if (Boolean(options.autoProceed)) {
+        return handleExportSyncPreflightFailure(validation);
+      }
+      return handleExportSyncPreflightFailure(validation);
     }
-    const action = await showExportPreflightDialog(validation.missing);
-    if (action === "fill") {
-      focusFirstMissingField(validation.missing[0]);
-      return false;
-    }
-    return action === "proceed";
+    scheduleExportMetaSave();
+    return true;
   }
 
   async function ensurePayeeAccountReadyForExport() {
@@ -552,8 +1231,45 @@
       }
       return false;
     }
+    if (payee.missingKey === "payee_swift") {
+      window.alert(EXPORT_MISSING_FIELDS.payee_swift.message);
+      focusFirstMissingField(EXPORT_MISSING_FIELDS.payee_swift);
+      return false;
+    }
     window.alert(PAYEE_NOT_FOUND_MSG);
     return false;
+  }
+
+  function resetPayeeSelectionForTypeChange() {
+    const input = el("qsPayeeCompany");
+    payeeState.accountType = readPayeeAccountType();
+    clearPayeeSelection();
+    if (input) {
+      input.value = "";
+    }
+    setPayeeDropdownOpen(false);
+    renderPayeeCandidates([], { showEmpty: false });
+    syncPayeePreviewLabels(payeeState.accountType);
+    markEnglishSnapshotDirty();
+    void fetchPayeeAccounts("", {
+      autoSelectExact: false,
+      autoSelectUnique: false,
+      showDropdown: false,
+      silent: true,
+    });
+  }
+
+  function bindPayeeAccountTypeField() {
+    document.querySelectorAll('input[name="qsPayeeAccountType"]').forEach((node) => {
+      node.addEventListener("change", () => {
+        if (String(node.value || "").trim().toLowerCase() === payeeState.accountType) {
+          return;
+        }
+        resetPayeeSelectionForTypeChange();
+      });
+    });
+    payeeState.accountType = readPayeeAccountType();
+    syncPayeePreviewLabels(payeeState.accountType);
   }
 
   function bindPayeeCompanyField() {
@@ -565,8 +1281,7 @@
     }
     input.addEventListener("input", () => {
       if (
-        payeeState.selected &&
-        normalizePayeeCompanyName(input.value) !== normalizePayeeCompanyName(payeeState.selected.company_name)
+        payeeState.selected && !payeeInputMatchesSelection(input.value, payeeState.selected)
       ) {
         clearPayeeSelection();
       }
@@ -705,6 +1420,7 @@
     translatedAt: "",
     meta: null,
     rows: null,
+    payee: null,
     labels: null,
     fixed: null,
     untranslatedFields: [],
@@ -1082,6 +1798,64 @@
     return false;
   }
 
+  function looksLikeTableOrTextDocumentFromImage(img) {
+    const w = img.naturalWidth || 0;
+    const h = img.naturalHeight || 0;
+    if (w < 8 || h < 8) {
+      return false;
+    }
+    const canvas = document.createElement("canvas");
+    const tw = Math.min(96, w);
+    const th = Math.min(96, h);
+    canvas.width = tw;
+    canvas.height = th;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) {
+      return false;
+    }
+    ctx.drawImage(img, 0, 0, tw, th);
+    let pixels;
+    try {
+      pixels = ctx.getImageData(0, 0, tw, th).data;
+    } catch {
+      return false;
+    }
+    const luma = [];
+    for (let i = 0; i < pixels.length; i += 4) {
+      luma.push(0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2]);
+    }
+    const total = tw * th;
+    let white = 0;
+    let textRows = 0;
+    for (let r = 0; r < th; r += 1) {
+      let dark = 0;
+      let edge = 0;
+      for (let c = 0; c < tw; c += 1) {
+        const v = luma[r * tw + c];
+        if (v >= 228) {
+          white += 1;
+        }
+        if (v <= 145) {
+          dark += 1;
+        }
+        if (c > 0 && Math.abs(v - luma[r * tw + c - 1]) >= 28) {
+          edge += 1;
+        }
+      }
+      const darkRatio = dark / tw;
+      const edgeRatio = edge / Math.max(1, tw - 1);
+      if (darkRatio >= 0.05 && darkRatio <= 0.42 && edgeRatio >= 0.07) {
+        textRows += 1;
+      }
+    }
+    const whiteRatio = white / total;
+    const textRowRatio = textRows / th;
+    if (whiteRatio >= 0.4 && textRowRatio >= 0.1 && textRows >= 8) {
+      return true;
+    }
+    return whiteRatio >= 0.48 && textRowRatio >= 0.18;
+  }
+
   function isAcceptableProductImageDataUrl(dataUrl, done, options = {}) {
     if (options.userUploaded) {
       done(true);
@@ -1104,6 +1878,7 @@
         long / Math.max(short, 1) <= 3.8 &&
         !(long <= 110 && url.length < 28000) &&
         !looksLikeDocumentScreenshot(w, h) &&
+        !looksLikeTableOrTextDocumentFromImage(img) &&
         looksLikeBagProductPhoto(w, h);
       done(ok);
     };
@@ -1153,8 +1928,21 @@
     return "";
   }
 
+  function isSampleFeeFilled(raw) {
+    const text = trimMetaText(raw ?? "");
+    if (!text) {
+      return false;
+    }
+    const amount = parseMoneyNumber(text);
+    if (Number.isFinite(amount) && amount <= 0) {
+      return false;
+    }
+    return true;
+  }
+
   function readSampleFeeFromForm() {
-    return trimMetaText(el("qsSampleFee")?.value ?? "");
+    const text = trimMetaText(el("qsSampleFee")?.value ?? "");
+    return isSampleFeeFilled(text) ? text : "";
   }
 
   function readSampleLeadTimeFromForm() {
@@ -1217,11 +2005,11 @@
     }
     setText("pvSampleFee", fee);
     setText("pvSampleLeadTime", lead);
-    syncAuthorizedPayeePdfPreview();
+    syncAuthorizedPayeePdfPreview(lang);
   }
 
-  function syncAuthorizedPayeePdfPreview() {
-    const name = resolveAuthorizedPayeeCompanyForPdf();
+  function syncAuthorizedPayeePdfPreview(lang = currentPdfLang) {
+    const name = resolveAuthorizedPayeeCompanyForPdf(lang);
     const line = el("pvAuthorizedPayeeLine");
     if (line) {
       line.hidden = !name;
@@ -1230,9 +2018,8 @@
   }
 
   async function ensureSampleExportReady({ lang = "cn" } = {}) {
-    const saved = await saveQuoteSheetMeta({ silent: true, forExport: true });
     syncSamplePdfPreview(lang);
-    return { ok: true, saved, sample_required: readSampleRequiredFromForm() };
+    return { ok: true, saved: { ok: true, skipped: true }, sample_required: readSampleRequiredFromForm() };
   }
 
   function formatPdfAddress(value, lang) {
@@ -1424,6 +2211,29 @@
     setPdfNoteColumnHeader(fobUsdMode, lang);
   }
 
+  function shouldRenderPdfNoteColumn(lang = currentPdfLang, forFobUsdExport = false) {
+    return !(lang === "en" && forFobUsdExport);
+  }
+
+  function syncPdfNoteColumnLayout(forFobUsdExport = false, lang = currentPdfLang) {
+    const showNoteCol = shouldRenderPdfNoteColumn(lang, forFobUsdExport);
+    const pdfRoot = el("quotePdfRoot");
+    if (pdfRoot) {
+      pdfRoot.setAttribute("data-pdf-note-col", showNoteCol ? "1" : "0");
+    }
+    const th = el("pvThNoteColumn");
+    if (th) {
+      th.hidden = !showNoteCol;
+    }
+    document.querySelectorAll(".qs-pdf-table col.col-note").forEach((col) => {
+      col.hidden = !showNoteCol;
+    });
+    const yellowCell = document.querySelector("#pvValidityYellowRow td");
+    if (yellowCell) {
+      yellowCell.colSpan = showNoteCol ? 9 : 8;
+    }
+  }
+
   function setPdfNoteColumnHeader(fobUsdMode, lang = currentPdfLang) {
     const th = el("pvThNoteColumn");
     if (!th) {
@@ -1524,7 +2334,7 @@
 
       function textCell(cls, multiline, value) {
         const td = document.createElement("td");
-        td.className = `${cls} qs-pdf-cn`;
+        td.className = `${cls} ${lang === "en" ? "qs-pdf-arial" : "qs-pdf-cn"}`;
         td.style.textAlign = "left";
         if (multiline) {
           td.innerHTML = escapeHtml(value || "").replaceAll("\n", "<br />");
@@ -1535,7 +2345,7 @@
       }
 
       const translatedRow = lang === "en" && Array.isArray(enState.rows) ? enState.rows[rowIndex] : null;
-      textCell("col-name", false, translatedRow?.name ?? nameEl?.value ?? "");
+      textCell("col-name", true, translatedRow?.name ?? nameEl?.value ?? "");
       textCell(
         "col-size",
         true,
@@ -1647,24 +2457,27 @@
       totTd.textContent = totalDisp;
       tr.appendChild(totTd);
 
-      const noteTd = document.createElement("td");
-      noteTd.className = "col-note qs-pdf-cn qs-pdf-arial";
-      noteTd.style.textAlign = "center";
-      noteTd.textContent = resolvePdfNoteColumnValue({
-        forFobUsdExport,
-        lang,
-        row,
-        translatedRow,
-        priceEl,
-        rate,
-        fobYuanPc,
-      });
-      tr.appendChild(noteTd);
+      if (shouldRenderPdfNoteColumn(lang, forFobUsdExport)) {
+        const noteTd = document.createElement("td");
+        noteTd.className = "col-note qs-pdf-cn qs-pdf-arial";
+        noteTd.style.textAlign = "center";
+        noteTd.textContent = resolvePdfNoteColumnValue({
+          forFobUsdExport,
+          lang,
+          row,
+          translatedRow,
+          priceEl,
+          rate,
+          fobYuanPc,
+        });
+        tr.appendChild(noteTd);
+      }
 
       body.appendChild(tr);
     });
 
     setPdfPriceHeaders(Boolean(forFobUsdExport), lang);
+    syncPdfNoteColumnLayout(Boolean(forFobUsdExport), lang);
     refreshAddDisabled();
   }
 
@@ -1685,11 +2498,18 @@
   }
 
   function syncAllPreview() {
-    const metaEn = currentPdfLang === "en" && enState.meta ? enState.meta : null;
+    const lang = currentPdfLang;
+    const metaEn = lang === "en" && enState.meta ? enState.meta : null;
 
-    syncQuoteIssuerCompanyNameForPdf();
+    syncQuoteIssuerCompanyNameForPdf(lang);
     setText("pvCoPhone", metaEn?.co_phone ?? el("qsCoPhone")?.value ?? "");
-    setText("pvCoAddr", formatPdfAddress(metaEn?.co_addr ?? el("qsCoAddr")?.value ?? "", currentPdfLang));
+    const coAddr =
+      lang === "en"
+        ? metaEn?.co_addr ||
+          enState.fixed?.default_company_address ||
+          QUOTE_ISSUER_ADDRESS_EN
+        : metaEn?.co_addr ?? el("qsCoAddr")?.value ?? "";
+    setText("pvCoAddr", formatPdfAddress(coAddr, lang));
     setText(
       "pvQuoteNo",
       normalizeQuoteNoForPdf(metaEn?.quote_no ?? el("qsQuoteNo")?.value ?? ""),
@@ -1699,26 +2519,37 @@
     setText("pvCustName", metaEn?.cust_name ?? el("qsCustName")?.value ?? "");
     setText("pvCustContact", metaEn?.cust_contact ?? el("qsCustContact")?.value ?? "");
     setText("pvCustPhone", metaEn?.cust_phone ?? el("qsCustPhone")?.value ?? "");
-    setText("pvCustAddr", formatPdfAddress(metaEn?.cust_addr ?? el("qsCustAddr")?.value ?? "", currentPdfLang));
+    setText("pvCustAddr", formatPdfAddress(metaEn?.cust_addr ?? el("qsCustAddr")?.value ?? "", lang));
     const d = el("qsQuoteDate")?.value;
-    setText("pvQuoteDate", formatQuoteDateByLang(metaEn?.quote_date_iso ?? (d || ""), currentPdfLang));
-    syncSamplePdfPreview(currentPdfLang);
-    syncPdfBottomRemark(currentPdfLang);
+    setText("pvQuoteDate", formatQuoteDateByLang(metaEn?.quote_date_iso ?? (d || ""), lang));
+    syncSamplePdfPreview(lang);
+    syncPdfBottomRemark(lang);
     syncPdfValidityRemark();
 
-    const payeeAccount = currentPayeeAccountForPdf();
-    const bankNameText = buildBankNamePdfText(payeeAccount);
-    const bankAccountText = buildBankAccountPdfText(payeeAccount);
-    const alipayText = buildAlipayPdfText(payeeAccount);
-    setText("pvBank", bankNameText);
-    setText("pvBankAccount", bankAccountText);
+    const payeeAccount = resolvePayeeAccountForPdf(lang);
+    const bankPresentation = buildBankPdfPresentation(payeeAccount, lang);
+    const bankNameNode = el("pvBank");
+    const bankNameLine = bankNameNode?.closest(".qs-pdf-bank-name-line");
+    const bankPrefixNode = bankNameLine?.querySelector('[data-pdf-lbl="foot_bank_prefix"]');
+    if (bankNameNode) {
+      bankNameNode.textContent = bankPresentation.bankLine || "";
+      bankNameNode.classList.toggle("qs-pdf-bank-usd-block", bankPresentation.mode === "usd_block");
+    }
+    if (bankPrefixNode) {
+      bankPrefixNode.hidden = bankPresentation.mode === "usd_block";
+    }
+    setText("pvBankAccount", bankPresentation.accountLine);
     const bankAccountLine = el("pvBankAccountLine");
     if (bankAccountLine) {
-      bankAccountLine.hidden = !bankAccountText;
+      bankAccountLine.hidden = !bankPresentation.accountLine;
     }
-    setText("pvAlipay", alipayText);
+    const alipayLine = el("pvAlipay")?.closest(".qs-pdf-bank-alipay-line");
+    if (alipayLine) {
+      alipayLine.hidden = bankPresentation.mode === "usd_block";
+    }
+    setText("pvAlipay", bankPresentation.alipayLine);
 
-    syncProductPreview(false, currentPdfLang);
+    syncProductPreview(false, lang);
   }
 
   function applyDefaultsToForm() {
@@ -2007,7 +2838,32 @@
       });
     }
 
-    return { meta, rows };
+    return {
+      meta,
+      rows,
+      payee: serializePayeeForTranslate(),
+      selected_bank_account_type: readPayeeAccountType(),
+      selected_bank_account_id: String(payeeState.selected?.account_id || "").trim(),
+    };
+  }
+
+  function serializePayeeForTranslate() {
+    const payee = currentPayeeAccountForPdf();
+    if (payee && typeof payee === "object") {
+      return clonePayeeAccount(payee) || {
+        company_name: payee.company_name || "",
+        company_name_en: payee.company_name_en || "",
+        bank_name: payee.bank_name || "",
+        bank_name_en: payee.bank_name_en || "",
+        bank_account: payee.bank_account || "",
+        alipay: payee.alipay || "",
+      };
+    }
+    const company = String(el("qsPayeeCompany")?.value || "").trim();
+    if (!company) {
+      return null;
+    }
+    return { company_name: company, bank_name: "", bank_account: "", alipay: "" };
   }
 
   async function requestTranslateEnglish() {
@@ -2020,7 +2876,7 @@
     updateTranslateStatus("正在翻译英文内容...", STATUS_LEVELS.busy);
 
     try {
-      const resp = await window.fetch("/api/quote-sheet/translate-en", {
+      const resp = await quoteSheetFetch("/api/quote-sheet/translate-en", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ bundle: buildQuoteBundleFromForm() }),
@@ -2032,27 +2888,31 @@
 
       enState.meta = payload.meta_en || {};
       enState.rows = Array.isArray(payload.rows_en) ? payload.rows_en : [];
+      enState.payee = payload.payee_en && typeof payload.payee_en === "object" ? payload.payee_en : null;
       enState.labels = payload.labels || {};
       enState.fixed = payload.fixed || {};
-      enState.untranslatedFields = Array.isArray(payload.untranslated_fields)
-        ? payload.untranslated_fields
-        : [];
-      enState.ready = true;
-      enState.translatedAt = new Date().toISOString();
+      enState.untranslatedFields = Array.isArray(payload.english_warnings)
+        ? payload.english_warnings
+        : Array.isArray(payload.untranslated_fields)
+          ? payload.untranslated_fields
+          : [];
 
       if (enState.untranslatedFields.length > 0) {
         updateTranslateStatus(
-          `翻译完成，${enState.untranslatedFields.length} 个字段未翻译，已保留原文并标记 [UNTRANSLATED]。`,
+          `Translation complete. ${enState.untranslatedFields.length} field(s) used English fallback (To be confirmed).`,
           STATUS_LEVELS.warn
         );
       } else {
-        updateTranslateStatus("翻译完成，可导出英文 PDF。", STATUS_LEVELS.success);
+        updateTranslateStatus("Translation complete. English PDF export is ready.", STATUS_LEVELS.success);
       }
+      enState.ready = true;
+      enState.translatedAt = new Date().toISOString();
       return true;
     } catch (err) {
       enState.ready = false;
       enState.meta = null;
       enState.rows = null;
+      enState.payee = null;
       enState.labels = null;
       enState.fixed = null;
       enState.untranslatedFields = [];
@@ -2215,6 +3075,11 @@
       sample_required: readSampleRequiredFromForm(),
       sample_fee: trimMetaText(el("qsSampleFee")?.value ?? ""),
       sample_lead_time: trimMetaText(el("qsSampleLeadTime")?.value ?? ""),
+      payee_account_type: readPayeeAccountType(),
+      payee_account_id: String(payeeState.selected?.account_id || "").trim(),
+      payee_company_name: String(
+        payeeState.selected?.company_name || el("qsPayeeCompany")?.value || "",
+      ).trim(),
     };
   }
 
@@ -2258,6 +3123,9 @@
     const meta = collectMetaBundle();
     const quoteNoManual = Boolean(String(meta.quote_no || "").trim());
     if (metaSaveInflight) {
+      if (nonBlocking) {
+        return metaSaveInflight;
+      }
       try {
         await metaSaveInflight;
       } catch {
@@ -2267,8 +3135,7 @@
     if (!options.silent) {
       updateMetaSaveStatus("正在保存客户资料…", STATUS_LEVELS.busy);
     }
-    const task = window
-      .fetch(`/api/my/quotes/${encodeURIComponent(uid)}/quote-sheet-meta`, {
+    const task = quoteSheetFetch(`/api/my/quotes/${encodeURIComponent(uid)}/quote-sheet-meta`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ meta, quote_no_manual: quoteNoManual }),
@@ -2421,12 +3288,21 @@
     enState.ready = false;
     enState.meta = null;
     enState.rows = null;
+    enState.payee = null;
     markEnglishSnapshotDirty();
     applyLabelsForLang("cn");
-    void (async () => {
-      await bootstrapPayeeFromCompanyName(meta.co_name || el("qsCoName")?.value || defaults.coName);
-      syncAllPreview();
-    })();
+    syncAllPreview();
+    return true;
+  }
+
+  async function applyPrefillAsync(prefill) {
+    const ok = applyPrefill(prefill);
+    if (!ok) {
+      return false;
+    }
+    const meta = prefill.meta && typeof prefill.meta === "object" ? prefill.meta : {};
+    await bootstrapPayeeFromCompanyName(meta.co_name || el("qsCoName")?.value || defaults.coName);
+    syncAllPreview();
     return true;
   }
 
@@ -2446,27 +3322,48 @@
     exportOptions = {},
   ) {
     const isPrimaryExport = !exportOptions.preflightSkipped;
-    if (isPrimaryExport) {
-      if (exportGuard.inflight) {
-        return;
+    if (isPrimaryExport && exportGuard.inflight) {
+      quoteSheetStatus("正在导出 PDF，请稍候…", STATUS_LEVELS.busy);
+      return false;
+    }
+    if (!exportOptions.preflightSkipped) {
+      const validation = runExportSyncPreflight({ asFobUsdPdf, lang });
+      if (!validation.complete) {
+        return handleExportSyncPreflightFailure(validation);
       }
+      scheduleExportMetaSave();
+      exportOptions = { ...exportOptions, preflightSkipped: true };
+    }
+    if (isPrimaryExport) {
       exportGuard.inflight = true;
+      setExportButtonsLoading(true);
     }
     try {
-      if (!exportOptions.preflightSkipped) {
-        const preflightOk = await ensureExportPreflight();
-        if (!preflightOk) {
-          return;
-        }
-        exportOptions = { ...exportOptions, preflightSkipped: true };
-      }
-      await runExportPdfBody(asFobUsdPdf, lang, customFilenameStem, skipConfirm, exportOptions);
+      const exported = await runExportPdfBody(
+        asFobUsdPdf,
+        lang,
+        customFilenameStem,
+        skipConfirm,
+        exportOptions,
+      );
+      return Boolean(exported);
+    } catch (err) {
+      window.alert(
+        lang === "en"
+          ? `PDF export failed: ${err?.message || err}`
+          : `PDF 导出失败：${err?.message || err}`,
+      );
+      return false;
     } finally {
       if (isPrimaryExport) {
         exportGuard.inflight = false;
+        setExportButtonsLoading(false);
       }
     }
   }
+
+  const PDF_EXPORT_HTML2CANVAS_SCALE = 1.5;
+  const PDF_EXPORT_JPEG_QUALITY = 0.9;
 
   async function runExportPdfBody(
     asFobUsdPdf = false,
@@ -2477,17 +3374,21 @@
   ) {
     const sampleReady = await ensureSampleExportReady(lang);
     if (!sampleReady.ok) {
-      return;
+      return false;
     }
-    if (sampleReady.saved?.ok) {
-      updateMetaSaveStatus("客户资料已保存", STATUS_LEVELS.success);
-    } else {
-      updateMetaSaveStatus(
-        "客户资料未保存，本次将使用页面当前填写内容导出。",
+    if (lang === "en") {
+      const enReady = await ensureEnglishSnapshotReady();
+      if (!enReady) {
+        window.alert("英文翻译未完成，请先点击「翻译成英文版」。");
+        return false;
+      }
+    }
+    if (lang === "en" && useChinesePayeePresentationForPdf()) {
+      quoteSheetStatus(
+        "当前选择的是中国账户，收款信息将保留中文显示；如需英文收款信息请切换为美金账户。",
         STATUS_LEVELS.warn,
       );
     }
-    await inspectPayeeForExport();
     applyLabelsForLang(lang);
     syncAllPreview();
     if (asFobUsdPdf) {
@@ -2516,17 +3417,16 @@
       : `确认下载报价单 PDF（${kind}）？浏览器将把文件保存到默认下载目录。`;
     if (!skipConfirm && !window.confirm(confirmMsg)) {
       restoreLangAfterExport();
-      return;
+      return false;
     }
 
     const stem = customFilenameStem || fileStemByLang(lang);
     const filename = asFobUsdPdf ? `${stem}_FOB_USD.pdf` : `${stem}.pdf`;
     const rootEl = el("quotePdfRoot");
-    const exportBtn = el("qsExportPdfBtn");
-    const exportUsdBtn = el("qsExportPdfFobUsdBtn");
     if (!rootEl) {
       restoreLangAfterExport();
-      return;
+      window.alert("未找到 PDF 模板节点，请刷新页面后重试。");
+      return false;
     }
 
     const prevTitle = document.title;
@@ -2536,22 +3436,6 @@
       document.title = prevTitle;
     };
 
-    const unlock = () => {
-      if (exportBtn) {
-        exportBtn.disabled = false;
-      }
-      if (exportUsdBtn) {
-        exportUsdBtn.disabled = false;
-      }
-    };
-
-    if (exportBtn) {
-      exportBtn.disabled = true;
-    }
-    if (exportUsdBtn) {
-      exportUsdBtn.disabled = true;
-    }
-
     if (typeof window.html2pdf !== "function") {
       window.alert(
         isEn
@@ -2560,9 +3444,8 @@
       );
       printFallback();
       document.title = prevTitle;
-      unlock();
       restoreLangAfterExport();
-      return;
+      return true;
     }
 
     document.title = filename.replace(/\.pdf$/i, "");
@@ -2570,11 +3453,12 @@
     const pdfOpt = {
         margin: [0, 0, 0, 0],
         filename,
-        image: { type: "jpeg", quality: 0.94 },
+        image: { type: "jpeg", quality: PDF_EXPORT_JPEG_QUALITY },
         html2canvas: {
-          scale: 2,
+          scale: PDF_EXPORT_HTML2CANVAS_SCALE,
           useCORS: true,
           logging: false,
+          backgroundColor: "#ffffff",
           scrollY: 0,
           scrollX: 0,
           onclone: (doc) => {
@@ -2609,6 +3493,49 @@
             doc.querySelectorAll(".qs-pdf-table col.col-desc").forEach((col) => {
               col.style.setProperty("width", "16%", "important");
             });
+            const hidePdfNoteCol = rootNode?.getAttribute("data-pdf-note-col") === "0";
+            if (hidePdfNoteCol) {
+              doc.querySelectorAll(".qs-pdf-table col.col-note").forEach((col) => {
+                col.style.setProperty("width", "0", "important");
+                col.hidden = true;
+              });
+              const noteTh = doc.getElementById("pvThNoteColumn");
+              if (noteTh) {
+                noteTh.hidden = true;
+                noteTh.style.setProperty("display", "none", "important");
+              }
+              doc.querySelectorAll(".qs-pdf-table td.col-note").forEach((cell) => {
+                cell.style.setProperty("display", "none", "important");
+              });
+              doc.querySelectorAll(".qs-pdf-table col.col-img").forEach((col) => {
+                col.style.setProperty("width", "12%", "important");
+              });
+              doc.querySelectorAll(".qs-pdf-table col.col-name").forEach((col) => {
+                col.style.setProperty("width", "11%", "important");
+              });
+              doc.querySelectorAll(".qs-pdf-table col.col-size").forEach((col) => {
+                col.style.setProperty("width", "15%", "important");
+              });
+              doc.querySelectorAll(".qs-pdf-table col.col-desc").forEach((col) => {
+                col.style.setProperty("width", "17%", "important");
+              });
+              doc.querySelectorAll(".qs-pdf-table col.col-pack").forEach((col) => {
+                col.style.setProperty("width", "10%", "important");
+              });
+              doc.querySelectorAll(".qs-pdf-table col.col-qty").forEach((col) => {
+                col.style.setProperty("width", "13%", "important");
+              });
+              doc.querySelectorAll(".qs-pdf-table col.col-price").forEach((col) => {
+                col.style.setProperty("width", "10%", "important");
+              });
+              doc.querySelectorAll(".qs-pdf-table col.col-total").forEach((col) => {
+                col.style.setProperty("width", "12%", "important");
+              });
+              const yellowCell = doc.querySelector("#pvValidityYellowRow td");
+              if (yellowCell) {
+                yellowCell.colSpan = 8;
+              }
+            }
             doc.querySelectorAll(".qs-pdf-table th.col-size, .qs-pdf-table th.col-desc, .qs-pdf-table th.col-pack").forEach((cell) => {
               cell.style.setProperty("white-space", "normal", "important");
               cell.style.setProperty("overflow", "visible", "important");
@@ -2622,6 +3549,19 @@
               cell.style.setProperty("line-height", "1.25", "important");
               cell.style.setProperty("height", "auto", "important");
               cell.style.setProperty("max-width", "none", "important");
+              cell.style.setProperty("padding", "5px 3px", "important");
+              cell.style.setProperty("vertical-align", "middle", "important");
+              cell.style.setProperty("border", "1px solid #000", "important");
+            });
+            doc.querySelectorAll(".qs-pdf-table td.col-name").forEach((cell) => {
+              cell.style.setProperty("display", "table-cell", "important");
+              cell.style.setProperty("white-space", "normal", "important");
+              cell.style.setProperty("overflow", "hidden", "important");
+              cell.style.setProperty("word-break", "break-word", "important");
+              cell.style.setProperty("overflow-wrap", "anywhere", "important");
+              cell.style.setProperty("line-height", "1.25", "important");
+              cell.style.setProperty("height", "auto", "important");
+              cell.style.setProperty("max-width", "0", "important");
               cell.style.setProperty("padding", "5px 3px", "important");
               cell.style.setProperty("vertical-align", "middle", "important");
               cell.style.setProperty("border", "1px solid #000", "important");
@@ -2678,27 +3618,115 @@
               cell.style.setProperty("text-align", "left", "important");
               cell.style.setProperty("padding-right", "6px", "important");
               cell.style.setProperty("padding-left", "0", "important");
+              cell.style.setProperty("overflow", "visible", "important");
+              cell.style.setProperty("transform", `translateX(${PDF_META_RIGHT_SHIFT_X})`, "important");
               cell.style.setProperty("white-space", "nowrap", "important");
             });
             doc.querySelectorAll(".qs-pdf-meta-right-shifted .qs-pdf-meta-value").forEach((node) => {
-              node.style.setProperty("display", "inline-block", "important");
-              node.style.setProperty("overflow", "hidden", "important");
-              node.style.setProperty("text-overflow", "ellipsis", "important");
+              node.style.setProperty("overflow", "visible", "important");
               node.style.setProperty("line-height", "1.2", "important");
               if (node.classList.contains("qs-pdf-meta-value-quote-no")) {
+                node.style.setProperty("display", "inline", "important");
                 node.style.setProperty("white-space", "nowrap", "important");
                 node.style.setProperty("word-break", "keep-all", "important");
                 node.style.setProperty("max-height", "none", "important");
+                node.style.setProperty("max-width", "none", "important");
+                node.style.setProperty("margin-left", "0", "important");
+                node.style.setProperty("padding-left", "0", "important");
                 node.style.setProperty("font-size", "9pt", "important");
               } else {
+                node.style.setProperty("display", "inline-block", "important");
                 node.style.setProperty("word-break", "break-all", "important");
                 node.style.setProperty("max-height", "2.4em", "important");
               }
             });
+            const quoteNoLbl = doc.querySelector(
+              '.qs-pdf-meta-right-shifted [data-pdf-lbl="lbl_meta_quote_no"]',
+            );
+            if (quoteNoLbl) {
+              quoteNoLbl.style.setProperty("display", "inline", "important");
+              quoteNoLbl.style.setProperty("min-width", "0", "important");
+              quoteNoLbl.style.setProperty("width", "auto", "important");
+              quoteNoLbl.style.setProperty("margin-right", "0.12em", "important");
+              quoteNoLbl.style.setProperty("padding-right", "0", "important");
+            }
             const metaTable = doc.querySelector(".qs-pdf-meta-table");
             if (metaTable) {
               metaTable.style.setProperty("width", "100%", "important");
               metaTable.style.setProperty("table-layout", "fixed", "important");
+            }
+            doc.querySelectorAll(".qs-pdf-stamp-side").forEach((node) => {
+              node.style.setProperty("overflow", "visible", "important");
+              node.style.setProperty("z-index", "2", "important");
+              node.style.setProperty("transform", "none", "important");
+            });
+            doc.querySelectorAll(".qs-pdf-cust-sign-side").forEach((node) => {
+              node.style.setProperty("overflow", "visible", "important");
+              node.style.setProperty("visibility", "visible", "important");
+              node.style.setProperty("display", "block", "important");
+              node.style.setProperty("transform", "none", "important");
+            });
+            const payWrap = doc.querySelector(".qs-pdf-pay-wrap");
+            if (payWrap) {
+              payWrap.style.setProperty("overflow", "visible", "important");
+              if (lang === "en") {
+                payWrap.style.setProperty(
+                  "min-height",
+                  "calc(var(--qs-pdf-stamp-shift-y-en) + var(--qs-pdf-en-stamp-slot-h) + var(--qs-pdf-en-sign-block-min-h))",
+                  "important",
+                );
+                payWrap.style.setProperty(
+                  "padding-bottom",
+                  "var(--qs-pdf-en-sign-block-pad-bottom)",
+                  "important",
+                );
+              } else {
+                payWrap.style.setProperty(
+                  "min-height",
+                  "calc(var(--qs-pdf-stamp-shift-y-cn) + 38mm)",
+                  "important",
+                );
+                payWrap.style.setProperty(
+                  "padding-bottom",
+                  "var(--qs-pdf-cn-sign-block-pad-bottom)",
+                  "important",
+                );
+              }
+            }
+            const footerCo = doc.getElementById("pvFooterCo");
+            if (footerCo) {
+              footerCo.style.setProperty("display", "block", "important");
+              footerCo.style.setProperty("visibility", "visible", "important");
+              footerCo.style.setProperty("color", "#000", "important");
+              footerCo.style.setProperty("overflow", "visible", "important");
+              footerCo.style.setProperty("height", "auto", "important");
+              footerCo.style.setProperty("max-height", "none", "important");
+              if (lang === "en") {
+                footerCo.style.setProperty("padding-bottom", "0.45em", "important");
+                footerCo.style.setProperty("min-height", "calc(2 * 1.55em + 0.45em)", "important");
+              }
+              if (!String(footerCo.textContent || "").trim()) {
+                footerCo.textContent = resolveFooterCompanyNameForPdf(lang);
+              }
+            }
+            if (lang === "en") {
+              const stampSide = doc.querySelector(".qs-pdf-stamp-side");
+              if (stampSide) {
+                stampSide.style.setProperty("padding-bottom", "4mm", "important");
+                stampSide.style.setProperty("overflow", "visible", "important");
+              }
+              doc.querySelectorAll(".qs-pdf-cust-sign-side").forEach((node) => {
+                node.style.setProperty("align-self", "start", "important");
+                node.style.setProperty(
+                  "margin-top",
+                  "calc(var(--qs-pdf-cust-shift-y-en) + var(--qs-pdf-en-sign-text-offset))",
+                  "important",
+                );
+                node.style.setProperty("padding-bottom", "4mm", "important");
+              });
+            }
+            if (lang === "en") {
+              scrubEnglishPdfDom(doc);
             }
           },
         },
@@ -2710,14 +3738,15 @@
 
     const finish = () => {
       document.title = prevTitle;
-      unlock();
       restoreLangAfterExport();
+      quoteSheetStatus("PDF 已生成", STATUS_LEVELS.success);
     };
 
     if (worker && typeof worker.then === "function") {
       try {
         await worker;
         finish();
+        return true;
       } catch {
         window.alert(
           isEn
@@ -2726,16 +3755,27 @@
         );
         printFallback();
         finish();
+        return true;
       }
-      return;
     }
     finish();
+    return true;
   }
 
   async function exportByScope(asFobUsdPdf = false, skipConfirm = false) {
+    if (exportGuard.inflight) {
+      quoteSheetStatus("正在导出 PDF，请稍候…", STATUS_LEVELS.busy);
+      return;
+    }
+    const syncValidation = runExportSyncPreflight({ asFobUsdPdf });
+    if (!syncValidation.complete) {
+      handleExportSyncPreflightFailure(syncValidation);
+      return;
+    }
+
     const scope = readExportScope();
     const lang = resolveExportLang(scope);
-    const preflightOpts = { preflightSkipped: false };
+    const preflightOpts = { preflightSkipped: true };
     if (lang === "cn") {
       await exportPdf(asFobUsdPdf, "cn", "", skipConfirm, preflightOpts);
       return;
@@ -2765,48 +3805,51 @@
 
   async function exportDirect(options = {}) {
     const opts = options && typeof options === "object" ? options : {};
-    switchView("quote");
-    syncAllPreview();
-    await new Promise((resolve) => window.setTimeout(resolve, 150));
     const fobUsd = Boolean(opts.fobUsd);
+    const syncValidation = runExportSyncPreflight({ asFobUsdPdf: fobUsd });
+    if (!syncValidation.complete) {
+      handleExportSyncPreflightFailure(syncValidation);
+      return false;
+    }
+    await waitForQuotePdfReady();
     const langOpt = String(opts.lang || "").trim().toLowerCase();
     const lang =
       langOpt === "en" || langOpt === "cn"
         ? langOpt
         : resolveExportLang(opts.langScope || readExportScope());
     const skipConfirm = Boolean(opts.skipConfirm);
-    const preflightOpts = { preflightSkipped: false };
-    const preflightSkipped = { preflightSkipped: true };
+    const preflightOpts = {
+      preflightSkipped: true,
+      autoProceedPreflight: Boolean(opts.autoProceedPreflight),
+      fromListExport: Boolean(opts.fromListExport),
+    };
+    const preflightSkipped = { preflightSkipped: true, autoProceedPreflight: true, fromListExport: true };
     if (lang === "en" || opts.langScope === "en") {
       const ok = await ensureEnglishSnapshotReady();
       if (!ok) {
+        window.alert(
+          lang === "en"
+            ? "English translation is not ready. Please click “Translate to English” first."
+            : "英文翻译未完成，请先点击「翻译成英文版」。",
+        );
         return false;
       }
-      await exportPdf(fobUsd, "en", opts.filenameStem || "", skipConfirm, preflightOpts);
-      return true;
+      return exportPdf(fobUsd, "en", opts.filenameStem || "", skipConfirm, preflightOpts);
     }
     if (opts.langScope === "both") {
       const ok = await ensureEnglishSnapshotReady();
       if (!ok) {
+        window.alert("英文翻译未完成，无法执行中英双导出。");
         return false;
       }
-      await exportPdf(fobUsd, "cn", opts.filenameStem || "", skipConfirm, preflightOpts);
+      const cnOk = await exportPdf(fobUsd, "cn", opts.filenameStem || "", skipConfirm, preflightOpts);
       window.setTimeout(
         () => void exportPdf(fobUsd, "en", opts.filenameStem || "", skipConfirm, preflightSkipped),
         260,
       );
-      return true;
+      return cnOk;
     }
-    if (lang === "en") {
-      const ok = await ensureEnglishSnapshotReady();
-      if (!ok) {
-        return false;
-      }
-      await exportPdf(fobUsd, "en", opts.filenameStem || "", skipConfirm, preflightOpts);
-      return true;
-    }
-    await exportPdf(fobUsd, "cn", opts.filenameStem || "", skipConfirm, preflightOpts);
-    return true;
+    return exportPdf(fobUsd, "cn", opts.filenameStem || "", skipConfirm, preflightOpts);
   }
 
   async function openFromQuoteRecord(seriesUid, options = {}) {
@@ -2815,8 +3858,12 @@
       return false;
     }
     const source = String(options.source || "record").trim() || "record";
+    const exporting = options.exportMode === "pdf_rmb" || options.exportMode === "pdf_fob";
     try {
-      const resp = await window.fetch(
+      if (exporting) {
+        quoteSheetStatus("正在加载报价单…", "busy");
+      }
+      const resp = await quoteSheetFetch(
         `/api/my/quotes/${encodeURIComponent(uid)}/quote-sheet-prefill?source=${encodeURIComponent(source)}`,
       );
       const payload = await resp.json().catch(() => ({}));
@@ -2824,17 +3871,52 @@
         throw new Error(payload?.message || payload?.error || `HTTP ${resp.status}`);
       }
       switchView("quote");
-      applyPrefill(mapQuoteRecordToQuotationForm(payload));
+      const prefilled = await applyPrefillAsync(mapQuoteRecordToQuotationForm(payload));
+      if (!prefilled) {
+        throw new Error("报价单预填失败");
+      }
       activeQuoteSeriesUid = uid;
       if (options.exportMode === "pdf_rmb") {
-        await exportDirect({ fobUsd: false, skipConfirm: true });
+        const exported = await exportDirect({
+          fobUsd: false,
+          skipConfirm: true,
+          lang: "cn",
+          fromListExport: true,
+          autoProceedPreflight: false,
+        });
+        if (!exported) {
+          quoteSheetStatus(
+            "请先补全打样费、打样时间与收款银行信息，确认无误后再点「下载 PDF」。",
+            "err",
+          );
+        } else {
+          quoteSheetStatus("PDF 已生成，请查看浏览器下载目录。", "ok");
+        }
       } else if (options.exportMode === "pdf_fob") {
-        await exportDirect({ fobUsd: true, skipConfirm: true });
+        const exported = await exportDirect({
+          fobUsd: true,
+          skipConfirm: true,
+          lang: "cn",
+          fromListExport: true,
+          autoProceedPreflight: false,
+        });
+        if (!exported) {
+          quoteSheetStatus(
+            "请先补全打样费、打样时间与收款银行信息，确认无误后再点「导出 PDF（FOB·美金）」。",
+            "err",
+          );
+        } else {
+          quoteSheetStatus("PDF 已生成，请查看浏览器下载目录。", "ok");
+        }
       }
       return true;
     } catch (err) {
       window.alert(`加载报价单数据失败：${err?.message || err}`);
       return false;
+    } finally {
+      if (exporting) {
+        window.setTimeout(() => quoteSheetStatus("", "idle"), 2400);
+      }
     }
   }
 
@@ -2842,6 +3924,7 @@
     applyDefaultsToForm();
     applyLabelsForLang("cn");
     bindStaticFields();
+    bindPayeeAccountTypeField();
     bindPayeeCompanyField();
     updateSampleFieldsUi();
     const tbody = selFormBody();
@@ -2898,6 +3981,7 @@
 
   window.QuoteSheetBridge = {
     applyPrefill,
+    applyPrefillAsync,
     saveQuoteSheetMeta,
     trySaveQuoteSheetMetaForExport,
     collectMetaBundle,
@@ -2911,6 +3995,11 @@
     syncAllPreview,
     ensurePayeeAccountReadyForExport,
     validateBeforeExport,
+    runExportSyncPreflight,
+    collectExportMissingFieldsSync,
+    formatExportMissingSummary,
+    handleExportSyncPreflightFailure,
+    setExportButtonsLoading,
     ensureExportPreflight,
     selectPayeeAccount,
     normalizeSampleRequired,
