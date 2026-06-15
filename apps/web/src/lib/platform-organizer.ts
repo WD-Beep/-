@@ -1,8 +1,13 @@
 import { platformLabel } from "@/lib/labels";
 
 export const PRIMARY_PLATFORMS = ["tiktok", "youtube", "instagram", "facebook"] as const;
+export const LINK_IMPORT_STAT_PLATFORMS = ["pinterest", "ltk", "shopmy"] as const;
 
-export type PlatformFilterKey = "all" | (typeof PRIMARY_PLATFORMS)[number] | "other";
+export type PlatformFilterKey =
+  | "all"
+  | (typeof PRIMARY_PLATFORMS)[number]
+  | (typeof LINK_IMPORT_STAT_PLATFORMS)[number]
+  | "other";
 
 export type PlatformStatCounts = {
   total: number;
@@ -22,8 +27,13 @@ export const PLATFORM_FILTER_LABELS: Record<PlatformFilterKey, string> = {
   youtube: "YouTube",
   instagram: "Instagram",
   facebook: "Facebook",
+  pinterest: "Pinterest",
+  ltk: "LTK",
+  shopmy: "ShopMy",
   other: "其他平台",
 };
+
+export const URL_ONLY_PLATFORM_STAT_HINT = "主要通过链接导入或外链发现，站内关键词搜索暂未接入";
 
 export const PLATFORM_ACCENT: Record<
   PlatformFilterKey,
@@ -59,6 +69,24 @@ export const PLATFORM_ACCENT: Record<
     ring: "ring-blue-200",
     activeBg: "bg-blue-50/50",
   },
+  pinterest: {
+    bar: "bg-red-600",
+    badge: "text-red-700",
+    ring: "ring-red-200",
+    activeBg: "bg-red-50/40",
+  },
+  ltk: {
+    bar: "bg-slate-700",
+    badge: "text-slate-700",
+    ring: "ring-slate-200",
+    activeBg: "bg-slate-50",
+  },
+  shopmy: {
+    bar: "bg-violet-600",
+    badge: "text-violet-700",
+    ring: "ring-violet-200",
+    activeBg: "bg-violet-50/40",
+  },
   other: {
     bar: "bg-slate-400",
     badge: "text-slate-600",
@@ -74,6 +102,9 @@ export function parsePlatformFilter(value: string | null): PlatformFilterKey {
     value === "youtube" ||
     value === "instagram" ||
     value === "facebook" ||
+    value === "pinterest" ||
+    value === "ltk" ||
+    value === "shopmy" ||
     value === "other"
   ) {
     return value;
@@ -112,7 +143,7 @@ export function aggregatePlatformStats(items: PlatformStatItem[]): PlatformStatC
 
 export function buildPlatformCards(
   items: PlatformStatItem[],
-): Array<{ key: PlatformFilterKey; stats: PlatformStatCounts; label: string }> {
+): Array<{ key: PlatformFilterKey; stats: PlatformStatCounts; label: string; hint?: string }> {
   const byKey = new Map(items.map((item) => [item.platform as PlatformFilterKey, item]));
   const emptyStats: PlatformStatCounts = {
     total: 0,
@@ -123,13 +154,24 @@ export function buildPlatformCards(
   };
   const totals = aggregatePlatformStats(items);
 
-  const cards: Array<{ key: PlatformFilterKey; stats: PlatformStatCounts; label: string }> = [
+  const cards: Array<{ key: PlatformFilterKey; stats: PlatformStatCounts; label: string; hint?: string }> = [
     { key: "all", stats: totals, label: PLATFORM_FILTER_LABELS.all },
   ];
 
   for (const key of PRIMARY_PLATFORMS) {
     const stats = byKey.get(key) ?? emptyStats;
     cards.push({ key, stats, label: PLATFORM_FILTER_LABELS[key] });
+  }
+
+  for (const key of LINK_IMPORT_STAT_PLATFORMS) {
+    const stats = byKey.get(key);
+    if (!stats || stats.total <= 0) continue;
+    cards.push({
+      key,
+      stats,
+      label: PLATFORM_FILTER_LABELS[key],
+      hint: URL_ONLY_PLATFORM_STAT_HINT,
+    });
   }
 
   const other = byKey.get("other");

@@ -141,7 +141,7 @@ def test_build_collection_task_candidates_excel_influencer_fields_and_formats():
     followers_col = headers.index("粉丝数") + 1
     engagement_col = headers.index("互动率") + 1
     bio_col = headers.index("简介") + 1
-    source_col = headers.index("来源帖子") + 1
+    source_col = headers.index("来源作品链接") + 1
 
     profile_cell = ws.cell(row=2, column=profile_col)
     assert profile_cell.value == influencer.profile_url
@@ -189,7 +189,7 @@ def test_build_collection_task_candidates_excel_without_influencer():
     assert ws.cell(row=2, column=headers.index("主页链接") + 1).value == candidate.profile_url
     assert ws.cell(row=2, column=headers.index("粉丝数") + 1).value == 12_345
     assert ws.cell(row=2, column=headers.index("互动率") + 1).value == 1.2
-    assert ws.cell(row=2, column=headers.index("来源帖子") + 1).value == candidate.source_post_url
+    assert ws.cell(row=2, column=headers.index("来源作品链接") + 1).value == candidate.source_post_url
     assert ws.cell(row=2, column=headers.index("昵称") + 1).value is None
     assert ws.cell(row=2, column=headers.index("邮箱") + 1).value is None
 
@@ -235,17 +235,56 @@ def test_build_influencer_excel_formats_other_social_links():
     assert ws.cell(row=2, column=other_col).value == "Shop: https://lnktr.ee/TheSommerHomeYT"
 
 
-def test_build_influencer_library_excel_has_only_link_and_email_columns():
+def test_build_influencer_library_excel_uses_source_map():
+    from app.services.export import build_influencer_library_excel
+
+    influencer = SimpleNamespace(
+        id=7,
+        username="creator_a",
+        display_name="Creator A",
+        platform="tiktok",
+        profile_url="https://www.tiktok.com/@creator_a",
+        bio="bio",
+        followers_count=1000,
+        engagement_rate=3.2,
+        final_email="a@example.com",
+        email="a@example.com",
+        public_email=None,
+        business_email=None,
+        source_post_url=None,
+    )
+    sources = {
+        7: [
+            SimpleNamespace(
+                source_post_url="https://www.tiktok.com/@creator_a/video/111",
+                source_input_url="https://vm.tiktok.com/111",
+                task_name="导入任务",
+                task_id=3,
+                source_platform="tiktok",
+                collected_at=datetime(2026, 6, 4, 12, 0, 0, tzinfo=UTC),
+            )
+        ]
+    }
+    content, _ = build_influencer_library_excel([influencer], sources_by_influencer_id=sources)
+    ws, headers = _load_sheet(content)
+    assert ws.cell(row=2, column=headers.index("来源作品链接") + 1).value.endswith("/video/111")
+    assert "vm.tiktok.com/111" in ws.cell(row=2, column=headers.index("来源输入链接") + 1).value
+    assert ws.cell(row=2, column=headers.index("来源任务") + 1).value == "导入任务"
+
+
+def test_build_influencer_library_excel_includes_source_columns():
     influencer = _influencer()
     content, _ = build_influencer_library_excel([influencer])
     ws, headers = _load_sheet(content)
 
     expected_headers = [label for _, label, _ in INFLUENCER_LIBRARY_EXPORT_COLUMNS]
     assert headers == expected_headers
-    assert headers == ["链接", "邮箱"]
-    assert len(headers) == 2
+    assert "来源作品链接" in headers
+    assert "来源输入链接" in headers
+    assert "来源任务" in headers
+    assert "采集时间" in headers
 
-    profile_cell = ws.cell(row=2, column=headers.index("链接") + 1)
+    profile_cell = ws.cell(row=2, column=headers.index("主页链接") + 1)
     assert profile_cell.value == influencer.profile_url
     assert profile_cell.hyperlink.target == influencer.profile_url
     assert ws.cell(row=2, column=headers.index("邮箱") + 1).value == influencer.final_email
@@ -271,3 +310,83 @@ def test_build_influencer_library_excel_email_fallback_order():
     content_public, _ = build_influencer_library_excel([influencer_public_only])
     ws_public, headers_public = _load_sheet(content_public)
     assert ws_public.cell(row=2, column=headers_public.index("邮箱") + 1).value == "public@example.com"
+
+
+def test_ltk_seed_enrichment_candidate_export_shows_final_platform_and_ltk_source():
+    ltk_url = "https://www.shopltk.com/explore/apieceofmyhaven?utm_source=ig"
+    enrichment_meta = {
+        "link_seed_platform": "ltk",
+        "primary_platform": "instagram",
+        "enrichment_attempted": True,
+        "is_valuable": True,
+    }
+    candidate = _candidate(
+        username="apieceofmyhaven",
+        platform="instagram",
+        profile_url="https://www.instagram.com/apieceofmyhaven/",
+        source_input_url=ltk_url,
+        source_post_url=None,
+        source_meta={
+            "source_input_url": ltk_url,
+            "link_seed_enrichment": enrichment_meta,
+        },
+        source_type="input_profile",
+        source_discovery_type="url_profile",
+    )
+    influencer = _influencer(
+        username="apieceofmyhaven",
+        platform="instagram",
+        profile_url="https://www.instagram.com/apieceofmyhaven/",
+    )
+    content, _ = build_collection_task_candidates_excel([(candidate, influencer)], task_id=99)
+    ws, headers = _load_sheet(content)
+
+    assert ws.cell(row=2, column=headers.index("平台") + 1).value == "Instagram"
+    profile_cell = ws.cell(row=2, column=headers.index("主页链接") + 1)
+    assert profile_cell.value == influencer.profile_url
+    assert ws.cell(row=2, column=headers.index("来源平台") + 1).value == "LTK"
+    source_input_cell = ws.cell(row=2, column=headers.index("来源输入链接") + 1)
+    assert source_input_cell.value == ltk_url
+    assert "utm_source=ig" in source_input_cell.value
+    assert ws.cell(row=2, column=headers.index("Seed 平台") + 1).value == "LTK"
+    status = ws.cell(row=2, column=headers.index("Seed 补全状态") + 1).value
+    assert "LTK seed 补全为 Instagram" in status
+
+
+def test_influencer_library_ltk_seed_export_shows_source_and_final_platform():
+    ltk_url = "https://www.shopltk.com/explore/apieceofmyhaven"
+    influencer = SimpleNamespace(
+        id=8,
+        username="apieceofmyhaven",
+        display_name="Haven",
+        platform="instagram",
+        profile_url="https://www.instagram.com/apieceofmyhaven/",
+        bio="bio",
+        followers_count=50_000,
+        engagement_rate=2.1,
+        final_email="a@example.com",
+        email="a@example.com",
+        public_email=None,
+        business_email=None,
+        source_post_url=None,
+    )
+    sources = {
+        8: [
+            SimpleNamespace(
+                source_post_url=None,
+                source_input_url=ltk_url,
+                task_name="ltk-import",
+                task_id=10,
+                source_platform="ltk",
+                collected_at=datetime(2026, 6, 4, 12, 0, 0, tzinfo=UTC),
+            )
+        ]
+    }
+    content, _ = build_influencer_library_excel([influencer], sources_by_influencer_id=sources)
+    ws, headers = _load_sheet(content)
+
+    assert ws.cell(row=2, column=headers.index("平台") + 1).value == "Instagram"
+    assert ws.cell(row=2, column=headers.index("来源平台") + 1).value == "LTK"
+    assert ws.cell(row=2, column=headers.index("来源输入链接") + 1).value == ltk_url
+    assert ws.cell(row=2, column=headers.index("Seed 平台") + 1).value == "LTK"
+    assert "LTK seed 补全为 Instagram" in ws.cell(row=2, column=headers.index("Seed 补全状态") + 1).value

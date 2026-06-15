@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -31,6 +31,7 @@ class CollectionTaskCandidate(Base):
     source_keyword: Mapped[str | None] = mapped_column(String(255))
     source_hashtag: Mapped[str | None] = mapped_column(String(255))
     source_post_url: Mapped[str | None] = mapped_column(String(512))
+    source_input_url: Mapped[str | None] = mapped_column(String(512))
     source_caption: Mapped[str | None] = mapped_column(Text)
     source_comment_url: Mapped[str | None] = mapped_column(String(512))
     source_comment_text: Mapped[str | None] = mapped_column(Text)
@@ -38,6 +39,11 @@ class CollectionTaskCandidate(Base):
     source_meta: Mapped[dict | None] = mapped_column(JSONB)
     followers_count: Mapped[int | None] = mapped_column(Integer)
     engagement_rate: Mapped[float | None] = mapped_column(Float)
+    is_high_value: Mapped[bool | None] = mapped_column(Boolean)
+    has_email: Mapped[bool | None] = mapped_column(Boolean)
+    has_contact: Mapped[bool | None] = mapped_column(Boolean)
+    contact_status: Mapped[str | None] = mapped_column(String(32))
+    insert_blocked_reason: Mapped[str | None] = mapped_column(Text)
     profile_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     influencer_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("influencers.id", ondelete="SET NULL"))
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending_profile")

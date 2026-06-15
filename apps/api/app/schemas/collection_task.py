@@ -1,10 +1,120 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 from app.models.enums import CollectionMode, CollectionTaskStatus
 from app.schemas.common import ORMModel, TimestampMixin
+
+
+from app.services.platform_types import KEYWORD_DISCOVERY_PLATFORMS, URL_ONLY_PLATFORMS
+from app.services.url_parser import split_link_import_entries, validate_link_import_url_lines
+
+
+COMPETITOR_DISCOVERY_PLATFORMS: tuple[str, ...] = ("instagram", "youtube", "tiktok", "facebook")
+
+
+def build_link_import_task_fields(valid: list[dict[str, str]]) -> dict[str, Any]:
+    """Build collection-task fields from validated link-import URL entries."""
+    from app.services.competitor_product_discovery import (
+        competitor_product_max_search_keywords,
+        filter_competitor_phrase_keywords,
+    )
+
+    amazon_entries, profile_entries = split_link_import_entries(valid)
+    if amazon_entries:
+        keywords: list[str] = []
+        max_kw = competitor_product_max_search_keywords()
+        for entry in amazon_entries:
+            asin = entry.get("asin")
+            if asin and asin not in keywords:
+                keywords.append(asin)
+            for kw in entry.get("search_keywords") or entry.get("strong_keywords") or []:
+                token = str(kw).strip()
+                if token and token not in keywords:
+                    keywords.append(token)
+        keywords = filter_competitor_phrase_keywords(keywords)[:max_kw]
+        seeds = [
+            {
+                "url": entry.get("url") or entry["normalized_url"],
+                "normalized_url": entry["normalized_url"],
+                "platform": "amazon",
+                "asin": entry.get("asin", ""),
+                "marketplace": entry.get("marketplace", ""),
+                "source_type": "amazon_product",
+                "product_keywords": list(entry.get("product_keywords") or []),
+                "strong_keywords": list(entry.get("strong_keywords") or []),
+                "weak_keywords": list(entry.get("weak_keywords") or []),
+                "negative_keywords": list(entry.get("negative_keywords") or []),
+                "search_keywords": list(entry.get("search_keywords") or []),
+                "title_slug": entry.get("title_slug"),
+                "brand": entry.get("brand"),
+                "product_category": entry.get("product_category"),
+            }
+            for entry in amazon_entries
+        ]
+        discovery_platforms = list(COMPETITOR_DISCOVERY_PLATFORMS)
+        return {
+            "collection_mode": CollectionMode.COMPETITOR_PRODUCT,
+            "platform": "multi",
+            "platforms": discovery_platforms,
+            "input_urls": [entry["normalized_url"] for entry in amazon_entries],
+            "keywords": keywords,
+            "comment_discovery_enabled": False,
+            "run_checkpoint": {
+                "amazon_product_seeds": seeds,
+                "link_import_source": True,
+                "competitor_discovery_platforms": discovery_platforms,
+            },
+        }
+
+    inferred = list(dict.fromkeys(entry["platform"] for entry in profile_entries))
+    return {
+        "collection_mode": CollectionMode.LINK_IMPORT,
+        "platforms": inferred,
+        "platform": inferred[0] if len(inferred) == 1 else "multi",
+        "input_urls": [entry["url"] for entry in profile_entries],
+        "keywords": [],
+        "comment_discovery_enabled": False,
+        "run_checkpoint": {
+            "link_import_platforms": inferred,
+            "link_import_source": True,
+        },
+    }
+
+
+def _apply_amazon_link_import(task: "CollectionTaskCreate", amazon_entries: list[dict[str, str]]) -> None:
+    """Amazon 商品链接作为竞品发现 seed，不当作红人 profile。"""
+    fields = build_link_import_task_fields(amazon_entries)
+    task.collection_mode = fields["collection_mode"]
+    task.platform = fields["platform"]
+    task.platforms = fields["platforms"]
+    task.input_urls = fields["input_urls"]
+    task.keywords = fields["keywords"]
+    task.comment_discovery_enabled = fields["comment_discovery_enabled"]
+    task.run_checkpoint = {
+        **(getattr(task, "run_checkpoint", None) or {}),
+        **fields["run_checkpoint"],
+    }
+
+
+def _finalize_link_import_urls(task: "CollectionTaskCreate", valid: list[dict[str, str]]) -> None:
+    fields = build_link_import_task_fields(valid)
+    task.collection_mode = fields["collection_mode"]
+    task.platform = fields["platform"]
+    task.platforms = fields["platforms"]
+    task.input_urls = fields["input_urls"]
+    task.keywords = fields["keywords"]
+    task.comment_discovery_enabled = fields["comment_discovery_enabled"]
+    task.run_checkpoint = {
+        **(getattr(task, "run_checkpoint", None) or {}),
+        **fields["run_checkpoint"],
+    }
+
+
+def _has_amazon_product_seeds(task: "CollectionTaskCreate") -> bool:
+    checkpoint = getattr(task, "run_checkpoint", None) or {}
+    return bool(checkpoint.get("amazon_product_seeds"))
 
 
 def _list_or_empty(value: Any) -> list:
@@ -22,6 +132,58 @@ SUPPORTED_TASK_PLATFORMS = {
 }
 SUPPORTED_TASK_PLATFORM_LABEL = ", ".join(sorted(SUPPORTED_TASK_PLATFORMS))
 ALLOWED_PLATFORM_FIELD_VALUES = SUPPORTED_TASK_PLATFORMS | {"multi"}
+
+URL_ONLY_PLATFORM_LABELS = {
+    "pinterest": "Pinterest",
+    "ltk": "LTK",
+    "shopmy": "ShopMy",
+}
+
+ACTIVE_DISCOVERY_MODE_BLOCK = frozenset(
+    {
+        CollectionMode.KEYWORD,
+        CollectionMode.DISCOVERY,
+        CollectionMode.CATEGORY_DISCOVERY,
+        CollectionMode.CLUSTERING,
+        CollectionMode.MIXED,
+        CollectionMode.COMPETITOR_PRODUCT,
+    }
+)
+
+
+def _resolved_task_platforms(platform: str, platforms: list[str]) -> list[str]:
+    normalized = normalize_platform_list(platforms) if platforms else []
+    if not normalized and platform:
+        legacy = (platform or "").strip().lower()
+        if legacy in SUPPORTED_TASK_PLATFORMS:
+            normalized = [legacy]
+    return normalized
+
+
+def validate_url_only_platforms_for_mode(
+    collection_mode: CollectionMode,
+    platform: str,
+    platforms: list[str],
+) -> None:
+    """Pinterest / LTK / ShopMy 仅支持链接导入，不可用于关键词/自动发现/竞品商品发现。"""
+    if collection_mode in (CollectionMode.LINK_IMPORT, CollectionMode.URLS, CollectionMode.COMMENT_AUTHORS):
+        return
+    if collection_mode not in ACTIVE_DISCOVERY_MODE_BLOCK:
+        return
+    resolved = _resolved_task_platforms(platform, platforms)
+    blocked = set(resolved) & URL_ONLY_PLATFORMS
+    if blocked:
+        labels = [URL_ONLY_PLATFORM_LABELS.get(name, name) for name in sorted(blocked)]
+        if len(labels) == 1:
+            raise ValueError(f"{labels[0]} 当前主要通过链接导入或外链发现，请切换到「链接导入」模式")
+        joined = "、".join(labels)
+        raise ValueError(f"{joined} 当前主要通过链接导入或外链发现，请切换到「链接导入」模式")
+    if collection_mode == CollectionMode.COMPETITOR_PRODUCT:
+        invalid = set(resolved) - KEYWORD_DISCOVERY_PLATFORMS
+        if invalid:
+            raise ValueError(
+                "竞品商品发现仅支持 Instagram / YouTube / TikTok / Facebook 作为后续发现平台"
+            )
 
 
 def normalize_platform_list(platforms: list[str] | None) -> list[str]:
@@ -83,6 +245,11 @@ class CollectionTaskBase(BaseModel):
     max_followers_count: int | None = Field(default=None, ge=0)
     filter_include_keywords: list[str] = Field(default_factory=list)
     filter_exclude_keywords: list[str] = Field(default_factory=list)
+    require_email: bool = False
+    require_contact: bool = False
+    strict_quality_filter: bool = False
+    insert_qualified_only: bool = False
+    export_qualified_only: bool = False
     comment_discovery_enabled: bool = False
     status: CollectionTaskStatus = CollectionTaskStatus.DRAFT
     schedule_enabled: bool = False
@@ -154,6 +321,11 @@ class CollectionTaskCreate(BaseModel):
     max_followers_count: int | None = Field(default=None, ge=0)
     filter_include_keywords: list[str] = Field(default_factory=list)
     filter_exclude_keywords: list[str] = Field(default_factory=list)
+    require_email: bool = False
+    require_contact: bool = False
+    strict_quality_filter: bool = False
+    insert_qualified_only: bool = False
+    export_qualified_only: bool = False
     comment_discovery_enabled: bool = False
     status: CollectionTaskStatus = CollectionTaskStatus.DRAFT
     schedule_enabled: bool = False
@@ -164,6 +336,7 @@ class CollectionTaskCreate(BaseModel):
     outreach_provider: str = Field(default="smtp", max_length=50)
     outreach_dry_run: bool = True
     outreach_templates: dict[str, str] = Field(default_factory=dict)
+    run_checkpoint: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("keywords", "input_urls", "email_recipients", "filter_include_keywords", "filter_exclude_keywords", "platforms", mode="before")
     @classmethod
@@ -182,6 +355,28 @@ class CollectionTaskCreate(BaseModel):
 
     @model_validator(mode="after")
     def normalize_platform_fields(self) -> "CollectionTaskCreate":
+        if self.collection_mode == CollectionMode.LINK_IMPORT:
+            urls = [u.strip() for u in self.input_urls if u and u.strip()]
+            if urls:
+                valid = validate_link_import_url_lines(urls)
+                fields = build_link_import_task_fields(valid)
+                self.collection_mode = fields["collection_mode"]
+                self.platform = fields["platform"]
+                self.platforms = fields["platforms"]
+                self.input_urls = fields["input_urls"]
+                self.keywords = fields["keywords"]
+                self.comment_discovery_enabled = fields["comment_discovery_enabled"]
+                self.run_checkpoint = {
+                    **(self.run_checkpoint or {}),
+                    **fields["run_checkpoint"],
+                }
+                return self
+            self.platform, self.platforms = resolve_task_platform_fields(
+                self.platform,
+                self.platforms,
+                require_platforms=False,
+            )
+            return self
         self.platform, self.platforms = resolve_task_platform_fields(self.platform, self.platforms)
         return self
 
@@ -192,6 +387,37 @@ class CollectionTaskCreate(BaseModel):
         self.keywords = keywords
         self.input_urls = urls
 
+        if self.collection_mode == CollectionMode.LINK_IMPORT:
+            if not urls:
+                raise ValueError("链接导入至少需要一个链接")
+            if not _has_amazon_product_seeds(self):
+                valid = validate_link_import_url_lines(urls)
+                _finalize_link_import_urls(self, valid)
+        elif self.collection_mode == CollectionMode.COMPETITOR_PRODUCT:
+            if not keywords and not urls:
+                raise ValueError("竞品商品发现需填写 Amazon 链接、ASIN 或商品关键词")
+            self.comment_discovery_enabled = False
+            checkpoint = dict(self.run_checkpoint or {})
+            if urls and not checkpoint.get("amazon_product_seeds"):
+                seeds = []
+                normalized_urls: list[str] = []
+                for raw in urls:
+                    from app.services.amazon_url import parse_amazon_product_url
+
+                    seed = parse_amazon_product_url(raw)
+                    if seed:
+                        seeds.append(seed)
+                        normalized_urls.append(seed["normalized_url"])
+                    else:
+                        normalized_urls.append(raw)
+                if seeds:
+                    self.input_urls = list(dict.fromkeys(normalized_urls))
+                    checkpoint["amazon_product_seeds"] = seeds
+                    self.run_checkpoint = checkpoint
+                    for seed in seeds:
+                        asin = seed.get("asin")
+                        if asin and asin not in self.keywords:
+                            self.keywords.append(asin)
         if self.collection_mode in (CollectionMode.KEYWORD, CollectionMode.DISCOVERY) and not keywords:
             raise ValueError("关键词采集模式至少需要一个关键词")
         if self.collection_mode == CollectionMode.CATEGORY_DISCOVERY:
@@ -219,6 +445,7 @@ class CollectionTaskCreate(BaseModel):
             raise ValueError("最低粉丝数不能大于最高粉丝数")
         self.filter_include_keywords = [k.strip() for k in self.filter_include_keywords if k and k.strip()]
         self.filter_exclude_keywords = [k.strip() for k in self.filter_exclude_keywords if k and k.strip()]
+        validate_url_only_platforms_for_mode(self.collection_mode, self.platform, self.platforms)
         return self
 
 
@@ -254,6 +481,11 @@ class CollectionTaskUpdate(BaseModel):
     max_followers_count: int | None = Field(default=None, ge=0)
     filter_include_keywords: list[str] | None = None
     filter_exclude_keywords: list[str] | None = None
+    require_email: bool | None = None
+    require_contact: bool | None = None
+    strict_quality_filter: bool | None = None
+    insert_qualified_only: bool | None = None
+    export_qualified_only: bool | None = None
     comment_discovery_enabled: bool | None = None
     status: CollectionTaskStatus | None = None
     schedule_enabled: bool | None = None
@@ -300,6 +532,29 @@ class CollectionTaskUpdate(BaseModel):
             value = getattr(self, field_name)
             if value is not None:
                 setattr(self, field_name, [k.strip() for k in value if k and k.strip()])
+        if self.input_urls is not None:
+            valid = validate_link_import_url_lines(self.input_urls)
+            if self.collection_mode == CollectionMode.LINK_IMPORT:
+                fields = build_link_import_task_fields(valid)
+                self.collection_mode = fields["collection_mode"]
+                self.platform = fields["platform"]
+                self.platforms = fields["platforms"]
+                self.input_urls = fields["input_urls"]
+                self.keywords = fields["keywords"]
+                self.comment_discovery_enabled = fields["comment_discovery_enabled"]
+                self.run_checkpoint = fields["run_checkpoint"]
+        if self.collection_mode is not None:
+            validate_url_only_platforms_for_mode(
+                self.collection_mode,
+                self.platform or "",
+                self.platforms or [],
+            )
+        elif self.platforms is not None or self.platform is not None:
+            selected = set(_resolved_task_platforms(self.platform or "", self.platforms or []))
+            if selected & URL_ONLY_PLATFORMS:
+                labels = [URL_ONLY_PLATFORM_LABELS.get(name, name) for name in sorted(selected & URL_ONLY_PLATFORMS)]
+                label = labels[0] if len(labels) == 1 else "、".join(labels)
+                raise ValueError(f"{label} 当前主要通过链接导入或外链发现，请切换到「链接导入」模式")
         return self
 
 
@@ -308,6 +563,9 @@ class CollectionTaskRead(CollectionTaskBase, TimestampMixin, ORMModel):
     stale: bool = False
     recoverable: bool = False
     stale_after_seconds: int = Field(default=0, ge=0)
+    is_ineffective: bool = False
+    effectiveness_category: Literal["effective", "low_value_result", "no_result"] = "no_result"
+    has_retention_traces: bool = False
 
 
 class CollectionTaskFilter(BaseModel):
@@ -315,6 +573,25 @@ class CollectionTaskFilter(BaseModel):
     platform: str | None = None
     status: CollectionTaskStatus | None = None
     search: str | None = None
+    effectiveness: Literal["effective", "ineffective", "low_value_result", "no_result"] | None = None
+
+
+class CollectionTaskBulkDelete(BaseModel):
+    task_ids: list[int] = Field(min_length=1, max_length=100)
+
+
+class CollectionTaskBulkDeleteResult(BaseModel):
+    deleted_count: int = 0
+    archived_count: int = 0
+    skipped_count: int = 0
+    deleted_ids: list[int] = Field(default_factory=list)
+    archived_ids: list[int] = Field(default_factory=list)
+    skipped_ids: list[int] = Field(default_factory=list)
+
+
+class CollectionTaskDeleteResult(BaseModel):
+    action: Literal["deleted", "archived"]
+    task_id: int
 
 
 class CollectionRunResult(BaseModel):
@@ -346,6 +623,16 @@ class CollectionTaskCandidateFilter(BaseModel):
     failure_reason: str | None = None
     source_type: str | None = None
     source_discovery_type: str | None = None
+    platform: str | None = None
+    high_value: bool | None = None
+    has_email: bool | None = None
+    has_contact: bool | None = None
+    min_followers_count: int | None = Field(default=None, ge=0)
+    max_followers_count: int | None = Field(default=None, ge=0)
+    min_engagement_rate: float | None = Field(default=None, ge=0, le=100)
+    max_engagement_rate: float | None = Field(default=None, ge=0, le=100)
+    insert_blocked_reason: str | None = None
+    contact_status: str | None = None
     search: str | None = None
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=100)
@@ -361,6 +648,7 @@ class CollectionTaskCandidateRead(ORMModel):
     source_keyword: str | None = None
     source_hashtag: str | None = None
     source_post_url: str | None = None
+    source_input_url: str | None = None
     source_caption: str | None = None
     source_comment_url: str | None = None
     source_comment_text: str | None = None
@@ -368,6 +656,11 @@ class CollectionTaskCandidateRead(ORMModel):
     source_meta: dict | None = None
     followers_count: int | None = None
     engagement_rate: float | None = None
+    is_high_value: bool | None = None
+    has_email: bool | None = None
+    has_contact: bool | None = None
+    contact_status: str | None = None
+    insert_blocked_reason: str | None = None
     profile_fetched_at: datetime | None = None
     influencer_id: int | None = None
     status: str
@@ -376,3 +669,25 @@ class CollectionTaskCandidateRead(ORMModel):
     run_at: datetime | None = None
     created_at: datetime
     updated_at: datetime | None = None
+
+
+def resolve_candidate_source_input_url(
+    source_input_url: str | None,
+    source_meta: dict | None,
+) -> str | None:
+    if source_input_url and str(source_input_url).strip():
+        return str(source_input_url).strip()
+    if isinstance(source_meta, dict):
+        for key in ("source_input_url", "input_url"):
+            value = source_meta.get(key)
+            if value and str(value).strip():
+                return str(value).strip()
+    return None
+
+
+def collection_task_candidate_read(row) -> CollectionTaskCandidateRead:
+    read = CollectionTaskCandidateRead.model_validate(row)
+    resolved = resolve_candidate_source_input_url(read.source_input_url, read.source_meta)
+    if resolved != read.source_input_url:
+        return read.model_copy(update={"source_input_url": resolved})
+    return read

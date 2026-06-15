@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.collection_task import CollectionTask
 from app.models.collection_task_candidate import CollectionTaskCandidate
-from app.models.enums import CandidateFailureReason, CandidateStatus
+from app.models.enums import CandidateFailureReason, CandidateSourceType, CandidateStatus, CollectionMode
 from app.models.global_influencer_profile import GlobalInfluencerProfile
 from app.models.influencer import Influencer
 from app.models.product_influencer import ProductInfluencer
@@ -21,6 +22,10 @@ from app.services.candidate_pool import (
     normalize_profile_failure_reason,
     sanitize_failure_detail,
 )
+from app.collectors.base import CollectedInfluencer
+from app.services.high_value_filter import assessment_row_fields, evaluate_high_value_assessment
+from app.services.influencer_persistence import identity_key_for_item
+from app.services.url_parser import validate_link_import_url_lines
 
 
 class TaskCandidateService:
@@ -44,6 +49,13 @@ class TaskCandidateService:
                 payload.setdefault("product_id", product_id)
             if user_id is not None:
                 payload.setdefault("user_id", user_id)
+            source_input_url = payload.get("source_input_url")
+            if not source_input_url:
+                meta = payload.get("source_meta")
+                if isinstance(meta, dict):
+                    source_input_url = meta.get("source_input_url") or meta.get("input_url")
+            if source_input_url and not payload.get("source_input_url"):
+                payload["source_input_url"] = str(source_input_url).strip()
             db.add(
                 CollectionTaskCandidate(
                     task_id=task_id,
@@ -107,6 +119,7 @@ class TaskCandidateService:
         source_discovery_type: str | None = None,
         source_type: str | None = None,
         source_meta: dict | None = None,
+        source_input_url: str | None = None,
         followers_count: int | None = None,
         engagement_rate: float | None = None,
         profile_fetched_at: datetime | None = None,
@@ -124,6 +137,7 @@ class TaskCandidateService:
             "source_discovery_type": source_discovery_type,
             "source_type": source_type,
             "source_meta": source_meta,
+            "source_input_url": source_input_url,
             "followers_count": followers_count,
             "engagement_rate": engagement_rate,
             "profile_fetched_at": profile_fetched_at,
@@ -149,6 +163,7 @@ class TaskCandidateService:
         source_discovery_type: str | None = None,
         source_type: str | None = None,
         source_meta: dict | None = None,
+        source_input_url: str | None = None,
         followers_count: int | None = None,
         engagement_rate: float | None = None,
         profile_fetched_at: datetime | None = None,
@@ -166,12 +181,67 @@ class TaskCandidateService:
             "source_discovery_type": source_discovery_type,
             "source_type": source_type,
             "source_meta": source_meta,
+            "source_input_url": source_input_url,
             "followers_count": followers_count,
             "engagement_rate": engagement_rate,
             "profile_fetched_at": profile_fetched_at,
             "status": CandidateStatus.FILTERED_OUT.value,
             "failure_reason": normalize_hard_filter_reason(failure_reason),
             "failure_detail": sanitize_failure_detail(failure_detail),
+        }
+
+    @staticmethod
+    def row_from_not_inserted(
+        *,
+        username: str,
+        profile_url: str,
+        failure_reason: str | None = None,
+        failure_detail: str | None = None,
+        insert_blocked_reason: str | None = None,
+        platform: str = "instagram",
+        source_hashtag: str | None = None,
+        source_keyword: str | None = None,
+        source_post_url: str | None = None,
+        source_caption: str | None = None,
+        source_comment_url: str | None = None,
+        source_comment_text: str | None = None,
+        source_discovery_type: str | None = None,
+        source_type: str | None = None,
+        source_meta: dict | None = None,
+        source_input_url: str | None = None,
+        followers_count: int | None = None,
+        engagement_rate: float | None = None,
+        profile_fetched_at: datetime | None = None,
+        is_high_value: bool | None = None,
+        has_email: bool | None = None,
+        has_contact: bool | None = None,
+        contact_status: str | None = None,
+    ) -> dict:
+        return {
+            "username": username,
+            "profile_url": profile_url,
+            "platform": platform,
+            "source_hashtag": source_hashtag,
+            "source_keyword": source_keyword or source_hashtag,
+            "source_post_url": source_post_url,
+            "source_caption": source_caption,
+            "source_comment_url": source_comment_url,
+            "source_comment_text": source_comment_text,
+            "source_discovery_type": source_discovery_type,
+            "source_type": source_type,
+            "source_meta": source_meta,
+            "source_input_url": source_input_url,
+            "followers_count": followers_count,
+            "engagement_rate": engagement_rate,
+            "profile_fetched_at": profile_fetched_at,
+            "status": CandidateStatus.NOT_INSERTED.value,
+            "failure_reason": normalize_hard_filter_reason(failure_reason),
+            "failure_detail": sanitize_failure_detail(failure_detail),
+            "insert_blocked_reason": sanitize_failure_detail(insert_blocked_reason or failure_detail),
+            "is_high_value": is_high_value,
+            "has_email": has_email,
+            "has_contact": has_contact,
+            "contact_status": contact_status,
         }
 
     @staticmethod
@@ -234,6 +304,7 @@ class TaskCandidateService:
         engagement_rate: float | None = None,
         profile_fetched_at: datetime | None = None,
         source_keyword: str | None = None,
+        source_input_url: str | None = None,
         detail: str = "红人库中已存在相同主页，本次未重复写入",
     ) -> dict:
         if meta:
@@ -250,12 +321,200 @@ class TaskCandidateService:
                 "followers_count": followers_count,
                 "engagement_rate": engagement_rate,
                 "profile_fetched_at": profile_fetched_at,
+                "source_input_url": source_input_url,
                 "status": CandidateStatus.DUPLICATE.value,
                 "failure_reason": CandidateFailureReason.DUPLICATE.value,
                 "failure_detail": detail,
             }
         )
         return row
+
+    @staticmethod
+    async def count_by_status(
+        db: AsyncSession,
+        task_id: int,
+        *,
+        status: str | None = None,
+    ) -> int:
+        query = select(func.count()).select_from(CollectionTaskCandidate).where(
+            CollectionTaskCandidate.task_id == task_id
+        )
+        if status:
+            query = query.where(CollectionTaskCandidate.status == status)
+        return int((await db.execute(query)).scalar_one())
+
+    @staticmethod
+    def _apply_product_scope(query, product_id: int | None):
+        if product_id is None or product_id <= 0:
+            return query
+        return query.where(
+            or_(
+                CollectionTaskCandidate.product_id == product_id,
+                CollectionTaskCandidate.product_id.is_(None),
+            )
+        )
+
+    @staticmethod
+    async def sync_task_inserted_stats(db: AsyncSession, task: CollectionTask) -> None:
+        total_candidates = await TaskCandidateService.count_by_status(db, task.id)
+        if total_candidates <= 0:
+            return
+        inserted = await TaskCandidateService.count_by_status(
+            db, task.id, status=CandidateStatus.INSERTED.value
+        )
+        task.inserted_count = inserted
+        task.result_count = inserted
+
+    @staticmethod
+    async def ensure_candidates_for_task(db: AsyncSession, task: CollectionTask) -> int:
+        """Backfill missing inserted candidate rows for legacy/resume tasks."""
+        expected = max(task.inserted_count or 0, task.result_count or 0)
+        if expected <= 0 or not task.product_id:
+            return 0
+
+        existing_inserted = await TaskCandidateService.count_by_status(
+            db, task.id, status=CandidateStatus.INSERTED.value
+        )
+        if existing_inserted >= expected:
+            return 0
+
+        run_at = task.last_run_at or datetime.now(UTC)
+        missing = expected - existing_inserted
+        backfill_rows: list[dict] = []
+
+        linked_ids = select(CollectionTaskCandidate.product_influencer_id).where(
+            CollectionTaskCandidate.task_id == task.id,
+            CollectionTaskCandidate.product_influencer_id.isnot(None),
+        )
+
+        if task.collection_mode == CollectionMode.LINK_IMPORT.value and task.input_urls:
+            valid_entries = validate_link_import_url_lines(list(task.input_urls))
+            url_set = {
+                (entry.get("url") or "").lower().rstrip("/")
+                for entry in valid_entries
+                if entry.get("url")
+            }
+            if url_set:
+                result = await db.execute(
+                    select(ProductInfluencer, GlobalInfluencerProfile)
+                    .join(
+                        GlobalInfluencerProfile,
+                        ProductInfluencer.global_influencer_id == GlobalInfluencerProfile.id,
+                    )
+                    .where(
+                        ProductInfluencer.product_id == task.product_id,
+                        ProductInfluencer.id.notin_(linked_ids),
+                    )
+                )
+                for product_row, global_row in result.all():
+                    profile_url = (global_row.profile_url or "").lower().rstrip("/")
+                    if profile_url not in url_set:
+                        continue
+                    source_url = next(
+                        (entry.get("url") or profile_url for entry in valid_entries if (entry.get("url") or "").lower().rstrip("/") == profile_url),
+                        profile_url,
+                    )
+                    assessment = evaluate_high_value_assessment(
+                        CollectedInfluencer(
+                            platform=global_row.platform,
+                            username=global_row.username,
+                            profile_url=global_row.profile_url,
+                            followers_count=global_row.followers_count,
+                            engagement_rate=global_row.engagement_rate,
+                            final_email=global_row.final_email,
+                            email=global_row.final_email,
+                        ),
+                        task,
+                    )
+                    row = TaskCandidateService.row_from_inserted(
+                        meta=None,
+                        username=global_row.username,
+                        profile_url=global_row.profile_url,
+                        platform=global_row.platform,
+                        collection_mode=task.collection_mode,
+                        product_influencer_id=product_row.id,
+                        global_influencer_id=global_row.id,
+                        product_id=task.product_id,
+                        user_id=task.user_id,
+                        followers_count=global_row.followers_count,
+                        engagement_rate=global_row.engagement_rate,
+                        profile_fetched_at=run_at,
+                        source_type=CandidateSourceType.INPUT_PROFILE.value,
+                        source_discovery_type="url_profile",
+                        source_post_url=source_url,
+                    )
+                    row.update(assessment_row_fields(assessment))
+                    backfill_rows.append(row)
+                    if len(backfill_rows) >= missing:
+                        break
+
+        if len(backfill_rows) < missing and task.last_run_at:
+            window_start = task.last_run_at - timedelta(minutes=15)
+            window_end = task.last_run_at + timedelta(minutes=15)
+            result = await db.execute(
+                select(ProductInfluencer, GlobalInfluencerProfile)
+                .join(
+                    GlobalInfluencerProfile,
+                    ProductInfluencer.global_influencer_id == GlobalInfluencerProfile.id,
+                )
+                .where(
+                    ProductInfluencer.product_id == task.product_id,
+                    ProductInfluencer.is_inserted.is_(True),
+                    ProductInfluencer.last_collected_at >= window_start,
+                    ProductInfluencer.last_collected_at <= window_end,
+                    ProductInfluencer.id.notin_(linked_ids),
+                )
+                .order_by(ProductInfluencer.last_collected_at.desc())
+                .limit(missing - len(backfill_rows))
+            )
+            for product_row, global_row in result.all():
+                if any(row.get("product_influencer_id") == product_row.id for row in backfill_rows):
+                    continue
+                assessment = evaluate_high_value_assessment(
+                    CollectedInfluencer(
+                        platform=global_row.platform,
+                        username=global_row.username,
+                        profile_url=global_row.profile_url,
+                        followers_count=global_row.followers_count,
+                        engagement_rate=global_row.engagement_rate,
+                        final_email=global_row.final_email,
+                        email=global_row.final_email,
+                    ),
+                    task,
+                )
+                row = TaskCandidateService.row_from_inserted(
+                    meta=None,
+                    username=global_row.username,
+                    profile_url=global_row.profile_url,
+                    platform=global_row.platform,
+                    collection_mode=task.collection_mode,
+                    product_influencer_id=product_row.id,
+                    global_influencer_id=global_row.id,
+                    product_id=task.product_id,
+                    user_id=task.user_id,
+                    followers_count=global_row.followers_count,
+                    engagement_rate=global_row.engagement_rate,
+                    profile_fetched_at=run_at,
+                    source_type=product_row.source_discovery_type,
+                    source_discovery_type=product_row.source_discovery_type,
+                    source_post_url=product_row.source_post_url,
+                )
+                row.update(assessment_row_fields(assessment))
+                backfill_rows.append(row)
+
+        if not backfill_rows:
+            return 0
+
+        await TaskCandidateService.bulk_insert(
+            db,
+            task.id,
+            backfill_rows,
+            run_at=run_at,
+            product_id=task.product_id,
+            user_id=task.user_id,
+        )
+        await TaskCandidateService.sync_task_inserted_stats(db, task)
+        return len(backfill_rows)
 
     @staticmethod
     def _apply_candidate_filters(
@@ -266,6 +525,16 @@ class TaskCandidateService:
         failure_reason: str | None = None,
         source_type: str | None = None,
         source_discovery_type: str | None = None,
+        platform: str | None = None,
+        high_value: bool | None = None,
+        has_email: bool | None = None,
+        has_contact: bool | None = None,
+        min_followers_count: int | None = None,
+        max_followers_count: int | None = None,
+        min_engagement_rate: float | None = None,
+        max_engagement_rate: float | None = None,
+        insert_blocked_reason: str | None = None,
+        contact_status: str | None = None,
         search: str | None = None,
     ):
         query = query.where(CollectionTaskCandidate.task_id == task_id)
@@ -277,6 +546,27 @@ class TaskCandidateService:
             query = query.where(CollectionTaskCandidate.source_type == source_type)
         if source_discovery_type:
             query = query.where(CollectionTaskCandidate.source_discovery_type == source_discovery_type)
+        if platform:
+            query = query.where(CollectionTaskCandidate.platform == platform)
+        if high_value is not None:
+            query = query.where(CollectionTaskCandidate.is_high_value.is_(high_value))
+        if has_email is not None:
+            query = query.where(CollectionTaskCandidate.has_email.is_(has_email))
+        if has_contact is not None:
+            query = query.where(CollectionTaskCandidate.has_contact.is_(has_contact))
+        if min_followers_count is not None:
+            query = query.where(CollectionTaskCandidate.followers_count >= min_followers_count)
+        if max_followers_count is not None:
+            query = query.where(CollectionTaskCandidate.followers_count <= max_followers_count)
+        if min_engagement_rate is not None:
+            query = query.where(CollectionTaskCandidate.engagement_rate >= min_engagement_rate)
+        if max_engagement_rate is not None:
+            query = query.where(CollectionTaskCandidate.engagement_rate <= max_engagement_rate)
+        if insert_blocked_reason:
+            term = f"%{insert_blocked_reason.strip()}%"
+            query = query.where(CollectionTaskCandidate.insert_blocked_reason.ilike(term))
+        if contact_status:
+            query = query.where(CollectionTaskCandidate.contact_status == contact_status)
         if search:
             term = f"%{search.strip()}%"
             query = query.where(
@@ -297,6 +587,16 @@ class TaskCandidateService:
         failure_reason: str | None = None,
         source_type: str | None = None,
         source_discovery_type: str | None = None,
+        platform: str | None = None,
+        high_value: bool | None = None,
+        has_email: bool | None = None,
+        has_contact: bool | None = None,
+        min_followers_count: int | None = None,
+        max_followers_count: int | None = None,
+        min_engagement_rate: float | None = None,
+        max_engagement_rate: float | None = None,
+        insert_blocked_reason: str | None = None,
+        contact_status: str | None = None,
         search: str | None = None,
     ) -> list[tuple[CollectionTaskCandidate, Influencer | None]]:
         query = select(CollectionTaskCandidate, ProductInfluencer, GlobalInfluencerProfile).outerjoin(
@@ -311,10 +611,20 @@ class TaskCandidateService:
             failure_reason=failure_reason,
             source_type=source_type,
             source_discovery_type=source_discovery_type,
+            platform=platform,
+            high_value=high_value,
+            has_email=has_email,
+            has_contact=has_contact,
+            min_followers_count=min_followers_count,
+            max_followers_count=max_followers_count,
+            min_engagement_rate=min_engagement_rate,
+            max_engagement_rate=max_engagement_rate,
+            insert_blocked_reason=insert_blocked_reason,
+            contact_status=contact_status,
             search=search,
         )
         if product_id is not None:
-            query = query.where(CollectionTaskCandidate.product_id == product_id)
+            query = TaskCandidateService._apply_product_scope(query, product_id)
         result = await db.execute(query.order_by(CollectionTaskCandidate.id.desc()))
         rows: list[tuple[CollectionTaskCandidate, Influencer | None]] = []
         for candidate, product_row, global_row in result.all():
@@ -337,6 +647,16 @@ class TaskCandidateService:
         failure_reason: str | None = None,
         source_type: str | None = None,
         source_discovery_type: str | None = None,
+        platform: str | None = None,
+        high_value: bool | None = None,
+        has_email: bool | None = None,
+        has_contact: bool | None = None,
+        min_followers_count: int | None = None,
+        max_followers_count: int | None = None,
+        min_engagement_rate: float | None = None,
+        max_engagement_rate: float | None = None,
+        insert_blocked_reason: str | None = None,
+        contact_status: str | None = None,
         search: str | None = None,
     ) -> PaginatedResponse[CollectionTaskCandidate]:
         page_size = min(max(page_size, 1), 100)
@@ -348,6 +668,16 @@ class TaskCandidateService:
             failure_reason=failure_reason,
             source_type=source_type,
             source_discovery_type=source_discovery_type,
+            platform=platform,
+            high_value=high_value,
+            has_email=has_email,
+            has_contact=has_contact,
+            min_followers_count=min_followers_count,
+            max_followers_count=max_followers_count,
+            min_engagement_rate=min_engagement_rate,
+            max_engagement_rate=max_engagement_rate,
+            insert_blocked_reason=insert_blocked_reason,
+            contact_status=contact_status,
             search=search,
         )
 
@@ -359,6 +689,16 @@ class TaskCandidateService:
             failure_reason=failure_reason,
             source_type=source_type,
             source_discovery_type=source_discovery_type,
+            platform=platform,
+            high_value=high_value,
+            has_email=has_email,
+            has_contact=has_contact,
+            min_followers_count=min_followers_count,
+            max_followers_count=max_followers_count,
+            min_engagement_rate=min_engagement_rate,
+            max_engagement_rate=max_engagement_rate,
+            insert_blocked_reason=insert_blocked_reason,
+            contact_status=contact_status,
             search=search,
         )
         total = int((await db.execute(count_query)).scalar_one())

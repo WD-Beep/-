@@ -1,8 +1,11 @@
 """红人列表筛选与排序相关测试。"""
 
+import asyncio
+
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
+from app.db.session import async_session_factory
 from app.models.influencer import Influencer
 from app.schemas.influencer import InfluencerExportFilter, InfluencerFilter, PlatformStatItem
 from app.services.influencer import InfluencerService
@@ -71,6 +74,81 @@ def test_platform_stats_response_shape():
     )
     assert item.total == 10
     assert item.has_email == 4
+
+
+def test_platform_stats_omit_link_import_platforms_without_inserted_data():
+    async def _run() -> None:
+        from app.schemas.influencer import InfluencerFilter
+        from app.services.product_influencer_service import ProductInfluencerService
+
+        async with async_session_factory() as db_session:
+            stats = await ProductInfluencerService.get_platform_stats(
+                db_session,
+                product_id=1,
+                filters=InfluencerFilter(),
+            )
+            platforms = [item.platform for item in stats.items]
+            assert platforms[:4] == ["tiktok", "youtube", "instagram", "facebook"]
+            assert "pinterest" not in platforms
+            assert "ltk" not in platforms
+            assert "shopmy" not in platforms
+
+    asyncio.run(_run())
+
+
+def test_platform_stats_include_link_import_platform_with_inserted_data():
+    async def _run() -> None:
+        import uuid
+        from datetime import UTC, datetime
+
+        from app.collectors.base import CollectedInfluencer
+        from app.schemas.influencer import InfluencerFilter
+        from app.services.influencer_persistence import (
+            create_global_profile_from_collected,
+            create_product_influencer_from_collected,
+        )
+        from app.services.product_influencer_service import ProductInfluencerService
+
+        suffix = uuid.uuid4().hex[:8]
+        run_at = datetime.now(UTC)
+        item = CollectedInfluencer(
+            platform="pinterest",
+            username=f"pinterest_creator_{suffix}",
+            profile_url=f"https://www.pinterest.com/pinterest_creator_{suffix}/",
+            platform_unique_id=f"pinterest_{suffix}",
+            followers_count=12000,
+            engagement_rate=1.2,
+            bio="home decor creator",
+            display_name="Pinterest Creator",
+        )
+
+        async with async_session_factory() as db_session:
+            global_profile = create_global_profile_from_collected(item, run_at=run_at)
+            db_session.add(global_profile)
+            await db_session.flush()
+            db_session.add(
+                create_product_influencer_from_collected(
+                    product_id=1,
+                    global_profile=global_profile,
+                    data=item,
+                    task=None,
+                    run_at=run_at,
+                )
+            )
+            await db_session.flush()
+
+            stats = await ProductInfluencerService.get_platform_stats(
+                db_session,
+                product_id=1,
+                filters=InfluencerFilter(),
+            )
+            platforms = [entry.platform for entry in stats.items]
+            assert "pinterest" in platforms
+            pinterest = next(entry for entry in stats.items if entry.platform == "pinterest")
+            assert pinterest.total >= 1
+            await db_session.rollback()
+
+    asyncio.run(_run())
 
 
 def test_influencer_filter_accepts_value_tier():

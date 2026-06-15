@@ -19,8 +19,13 @@ import {
 import { ProductCreateDialog } from "@/components/layout/product-create-dialog";
 import { Button } from "@/components/ui/button";
 import { fetchTenantProducts, type TenantProduct } from "@/lib/api";
+import { formatTenantProductLabel } from "@/lib/brand-products";
 import { clearAuthSession } from "@/lib/auth";
 import { ALL_PRODUCTS_ID } from "@/lib/product-context";
+import {
+  prepareTenantProductOptions,
+  resolveStoredProductId,
+} from "@/lib/product-visibility";
 import { useActiveProductId, useProductActions } from "@/components/providers/product-provider";
 import { cn } from "@/lib/utils";
 
@@ -45,7 +50,7 @@ export function Sidebar() {
 
   const loadProducts = useCallback(async () => {
     try {
-      const items = await fetchTenantProducts();
+      const items = prepareTenantProductOptions(await fetchTenantProducts());
       setProducts(items);
       return items;
     } catch {
@@ -57,14 +62,26 @@ export function Sidebar() {
   useEffect(() => {
     let cancelled = false;
     queueMicrotask(() => {
-      void loadProducts().then(() => {
+      void loadProducts().then((items) => {
         if (cancelled) return;
+        const resolvedId = resolveStoredProductId(productId, items);
+        if (resolvedId !== productId) {
+          setActiveProductId(resolvedId);
+          return;
+        }
+        if (items.length === 0) return;
+        if (productId === ALL_PRODUCTS_ID) {
+          const defaultProduct = items.find((item) => item.is_default) ?? items[0];
+          if (defaultProduct) {
+            setActiveProductId(defaultProduct.id);
+          }
+        }
       });
     });
     return () => {
       cancelled = true;
     };
-  }, [loadProducts]);
+  }, [loadProducts, productId, setActiveProductId]);
 
   function showToast(message: string) {
     setToast(message);
@@ -130,11 +147,13 @@ export function Sidebar() {
           <option value={ALL_PRODUCTS_ID}>全部产品（汇总）</option>
           {products.map((product) => (
             <option key={product.id} value={product.id}>
-              {product.name}
-              {product.brand ? ` · ${product.brand}` : ""}
+              {formatTenantProductLabel(product.name, product.brand)}
             </option>
           ))}
         </select>
+        {products.length === 0 ? (
+          <p className="text-[11px] text-muted-foreground">暂无正式产品，请新增产品/品牌</p>
+        ) : null}
         {products.length === 0 ? (
           <Button
             type="button"

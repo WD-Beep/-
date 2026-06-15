@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useLayoutEffect, useMemo, useState } from "react";
 
-import { ALL_PRODUCTS_ID, setStoredProductId } from "@/lib/product-context";
+import { ALL_PRODUCTS_ID, readStoredProductIdFromStorage, setStoredProductId } from "@/lib/product-context";
 
 type ProductContextValue = {
   productId: number;
@@ -12,12 +12,11 @@ type ProductContextValue = {
 const ProductContext = createContext<ProductContextValue | null>(null);
 
 export function ProductProvider({ children }: { children: React.ReactNode }) {
-  const [productId, setProductIdState] = useState<number>(ALL_PRODUCTS_ID);
+  const [productId, setProductIdState] = useState<number>(readStoredProductIdFromStorage);
 
   useLayoutEffect(() => {
-    setStoredProductId(ALL_PRODUCTS_ID);
-    setProductIdState(ALL_PRODUCTS_ID);
-  }, []);
+    setStoredProductId(productId);
+  }, [productId]);
 
   const value = useMemo<ProductContextValue>(
     () => ({

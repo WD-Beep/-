@@ -1,5 +1,14 @@
-import { LinkImportPanel } from "@/components/link-import/link-import-panel";
+"use client";
 
-export default function LinkImportPage() {
-  return <LinkImportPanel />;
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+
+export default function LinkImportRedirectPage() {
+  const router = useRouter();
+
+  useEffect(() => {
+    router.replace("/collection-tasks?create=link_import");
+  }, [router]);
+
+  return null;
 }

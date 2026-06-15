@@ -1,4 +1,4 @@
-import { ensureTenantProductId, tenantHeaders } from "@/lib/product-context";
+import { ensureTenantProductId, tenantHeaders } from "./product-context.ts";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api-proxy";
 const SERVER_API_URL =
@@ -61,6 +61,17 @@ export type SocialLink = {
   label: string;
   url: string;
   type?: string;
+};
+
+export type InfluencerSourceRecord = {
+  id: number;
+  source_post_url: string | null;
+  source_input_url: string | null;
+  source_platform: string | null;
+  task_id: number | null;
+  task_name: string | null;
+  import_batch_id: number | null;
+  collected_at: string;
 };
 
 export type Influencer = {
@@ -142,6 +153,7 @@ export type Influencer = {
   source_post_url: string | null;
   source_comment_url: string | null;
   source_comment_text: string | null;
+  source_records?: InfluencerSourceRecord[];
   contact_discovered_at: string | null;
   contact_sources: Array<Record<string, unknown>>;
   contact_fetch_status: string | null;
@@ -242,7 +254,11 @@ export type CollectionMode =
   | "category_discovery"
   | "clustering"
   | "comment_authors"
-  | "competitor_product";
+  | "competitor_product"
+  | "link_import";
+
+/** 采集任务顶层来源方式（表单「采集方式」） */
+export type TaskSourceMethod = "keyword_discovery" | "link_import";
 
 export type PlatformCapability = {
   platform: string;
@@ -250,6 +266,12 @@ export type PlatformCapability = {
   status: "supported" | "not_configured" | "not_available" | "url_only";
   message: string;
   endpoints: string[];
+  keyword_discovery: boolean;
+  link_import: boolean;
+  product_seed: boolean;
+  link_import_hint?: string | null;
+  discovery_category?: "search_discovery" | "external_link_discovery" | "link_completion";
+  external_link_discovery?: boolean;
 };
 
 export type PlatformCapabilitiesResponse = {
@@ -278,6 +300,11 @@ export type CollectionTask = {
   max_followers_count: number | null;
   filter_include_keywords: string[];
   filter_exclude_keywords: string[];
+  require_email: boolean;
+  require_contact: boolean;
+  strict_quality_filter: boolean;
+  insert_qualified_only: boolean;
+  export_qualified_only: boolean;
   status: CollectionTaskStatus;
   schedule_enabled: boolean;
   schedule_cron: string | null;
@@ -314,6 +341,9 @@ export type CollectionTask = {
   stale: boolean;
   recoverable: boolean;
   stale_after_seconds: number;
+  is_ineffective?: boolean;
+  effectiveness_category?: "effective" | "low_value_result" | "no_result";
+  has_retention_traces?: boolean;
   status_summary: string | null;
   error_message: string | null;
   comment_discovery_enabled: boolean;
@@ -336,6 +366,11 @@ export type CollectionTaskPayload = {
   max_followers_count?: number | null;
   filter_include_keywords?: string[];
   filter_exclude_keywords?: string[];
+  require_email?: boolean;
+  require_contact?: boolean;
+  strict_quality_filter?: boolean;
+  insert_qualified_only?: boolean;
+  export_qualified_only?: boolean;
   schedule_enabled: boolean;
   schedule_cron?: string | null;
   email_enabled: boolean;
@@ -516,13 +551,19 @@ export type CollectionTaskCandidate = {
   source_keyword: string | null;
   source_hashtag: string | null;
   source_post_url: string | null;
+  source_input_url: string | null;
   source_caption: string | null;
   source_comment_url: string | null;
   source_comment_text: string | null;
   source_discovery_type: string | null;
-  source_meta: CompetitorCandidateSourceMeta | null;
+  source_meta: CompetitorCandidateSourceMeta | Record<string, unknown> | null;
   followers_count: number | null;
   engagement_rate: number | null;
+  is_high_value: boolean | null;
+  has_email: boolean | null;
+  has_contact: boolean | null;
+  contact_status: string | null;
+  insert_blocked_reason: string | null;
   profile_fetched_at: string | null;
   influencer_id: number | null;
   status: string;
@@ -552,7 +593,17 @@ export type CollectionTaskCandidateQuery = {
   failure_reason?: string;
   source_type?: string;
   source_discovery_type?: string;
-  search?: string;
+  platform?: string;
+  high_value?: boolean;
+  has_email?: boolean;
+  has_contact?: boolean;
+  min_followers_count?: number;
+  max_followers_count?: number;
+  min_engagement_rate?: number;
+  max_engagement_rate?: number;
+    insert_blocked_reason?: string;
+    contact_status?: string;
+    search?: string;
   page?: number;
   page_size?: number;
 };
@@ -672,6 +723,14 @@ async function parseError(response: Response): Promise<string> {
   } catch {
     return `Request failed: ${response.status}`;
   }
+}
+
+async function parseJsonResponse<T>(response: Response): Promise<T> {
+  const text = await response.text();
+  if (!text.trim()) {
+    return {} as T;
+  }
+  return JSON.parse(text) as T;
 }
 
 export async function fetchHealth(): Promise<HealthResponse> {
@@ -933,11 +992,18 @@ export async function fetchPlatformCapabilities(): Promise<PlatformCapabilitiesR
 export async function fetchCollectionTasks(
   page = 1,
   pageSize = 50,
+  options?: { effectiveness?: "effective" | "ineffective" | "low_value_result" | "no_result" },
 ): Promise<PaginatedResponse<CollectionTask>> {
-  const response = await apiFetch(
-    `${API_URL}/api/collection-tasks?page=${page}&page_size=${pageSize}`,
-    { cache: "no-store" },
-  );
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  if (options?.effectiveness) {
+    params.set("effectiveness", options.effectiveness);
+  }
+  const response = await apiFetch(`${API_URL}/api/collection-tasks?${params.toString()}`, {
+    cache: "no-store",
+  });
   if (!response.ok) {
     throw new Error(await parseError(response));
   }
@@ -991,6 +1057,16 @@ export async function runCollectionTask(id: number): Promise<CollectionRunResult
   return response.json();
 }
 
+export async function enrichLinkSeedProfiles(taskId: number): Promise<CollectionRunResult> {
+  const response = await apiFetch(`${API_URL}/api/collection-tasks/${taskId}/enrich-link-seeds`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
 function collectionTaskCandidateQueryParams(
   query: Omit<CollectionTaskCandidateQuery, "page" | "page_size"> = {},
 ) {
@@ -999,6 +1075,16 @@ function collectionTaskCandidateQueryParams(
     failure_reason: query.failure_reason,
     source_type: query.source_type,
     source_discovery_type: query.source_discovery_type,
+    platform: query.platform,
+    high_value: query.high_value,
+    has_email: query.has_email,
+    has_contact: query.has_contact,
+    min_followers_count: query.min_followers_count,
+    max_followers_count: query.max_followers_count,
+    min_engagement_rate: query.min_engagement_rate,
+    max_engagement_rate: query.max_engagement_rate,
+    insert_blocked_reason: query.insert_blocked_reason,
+    contact_status: query.contact_status,
     search: query.search,
   };
 }
@@ -1031,13 +1117,10 @@ export async function fetchCollectionTaskCandidates(
 ): Promise<PaginatedResponse<CollectionTaskCandidate>> {
   const params = new URLSearchParams();
   const filterParams = collectionTaskCandidateQueryParams(query);
-  if (filterParams.status) params.set("status", filterParams.status);
-  if (filterParams.failure_reason) params.set("failure_reason", filterParams.failure_reason);
-  if (filterParams.source_type) params.set("source_type", filterParams.source_type);
-  if (filterParams.source_discovery_type) {
-    params.set("source_discovery_type", filterParams.source_discovery_type);
+  for (const [key, value] of Object.entries(filterParams)) {
+    if (value === undefined || value === null || value === "") continue;
+    params.set(key, String(value));
   }
-  if (filterParams.search) params.set("search", filterParams.search);
   params.set("page", String(query.page ?? 1));
   params.set("page_size", String(query.page_size ?? 20));
   const qs = params.toString();
@@ -1048,13 +1131,99 @@ export async function fetchCollectionTaskCandidates(
   return response.json();
 }
 
-export async function deleteCollectionTask(id: number): Promise<void> {
+export type CollectionTaskDeleteResult = {
+  action: "deleted" | "archived";
+  task_id: number;
+};
+
+export type CollectionTaskBulkDeleteResult = {
+  deleted_count: number;
+  archived_count: number;
+  skipped_count: number;
+  deleted_ids: number[];
+  archived_ids: number[];
+  skipped_ids: number[];
+};
+
+export async function deleteCollectionTask(id: number): Promise<CollectionTaskDeleteResult> {
   const response = await apiFetch(`${API_URL}/api/collection-tasks/${id}`, {
     method: "DELETE",
   });
   if (!response.ok) {
     throw new Error(await parseError(response));
   }
+  if (response.status === 204) {
+    return { action: "deleted", task_id: id };
+  }
+  const result = await parseJsonResponse<Partial<CollectionTaskDeleteResult>>(response);
+  return {
+    action: result.action ?? "deleted",
+    task_id: result.task_id ?? id,
+  };
+}
+
+export async function bulkDeleteCollectionTasks(
+  taskIds: number[],
+): Promise<CollectionTaskBulkDeleteResult> {
+  const response = await apiFetch(`${API_URL}/api/collection-tasks/bulk-delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_ids: taskIds }),
+  });
+  if (response.status === 405) {
+    return bulkDeleteCollectionTasksFallback(taskIds);
+  }
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  const result = await parseJsonResponse<Partial<CollectionTaskBulkDeleteResult>>(response);
+  return {
+    deleted_count: result.deleted_count ?? 0,
+    archived_count: result.archived_count ?? 0,
+    skipped_count: result.skipped_count ?? 0,
+    deleted_ids: result.deleted_ids ?? [],
+    archived_ids: result.archived_ids ?? [],
+    skipped_ids: result.skipped_ids ?? [],
+  };
+}
+
+async function bulkDeleteCollectionTasksFallback(
+  taskIds: number[],
+): Promise<CollectionTaskBulkDeleteResult> {
+  const result: CollectionTaskBulkDeleteResult = {
+    deleted_count: 0,
+    archived_count: 0,
+    skipped_count: 0,
+    deleted_ids: [],
+    archived_ids: [],
+    skipped_ids: [],
+  };
+  for (const taskId of taskIds) {
+    try {
+      const single = await deleteCollectionTask(taskId);
+      if (single.action === "archived") {
+        result.archived_count += 1;
+        result.archived_ids.push(taskId);
+      } else {
+        result.deleted_count += 1;
+        result.deleted_ids.push(taskId);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        message.includes("409") ||
+        message.includes("无效果") ||
+        message.includes("Conflict") ||
+        message.includes("正在运行")
+      ) {
+        result.skipped_count += 1;
+        result.skipped_ids.push(taskId);
+        continue;
+      }
+      throw error;
+    }
+  }
+  return result;
 }
 
 export async function sendCollectionTaskEmail(id: number): Promise<EmailSendResult> {
@@ -1166,6 +1335,11 @@ export type TenantProduct = {
   brand?: string | null;
   description?: string | null;
   is_default?: boolean;
+  is_archived?: boolean;
+  is_hidden?: boolean;
+  is_test?: boolean;
+  created_source?: string | null;
+  display_order?: number | null;
   created_at?: string;
   updated_at?: string;
 };
@@ -1178,8 +1352,11 @@ export type TenantProductPayload = {
   is_default?: boolean;
 };
 
-export async function fetchTenantProducts(): Promise<TenantProduct[]> {
-  const response = await apiFetch(`${API_URL}/api/tenant/products`, { cache: "no-store" });
+export async function fetchTenantProducts(options?: {
+  includeTest?: boolean;
+}): Promise<TenantProduct[]> {
+  const params = options?.includeTest ? "?include_test=true" : "";
+  const response = await apiFetch(`${API_URL}/api/tenant/products${params}`, { cache: "no-store" });
   if (!response.ok) {
     throw new Error(await parseError(response));
   }

@@ -78,10 +78,22 @@ def normalize_hard_filter_reason(reason: str | None) -> str:
         return CandidateFailureReason.UNKNOWN.value
     if reason == "below_min_followers":
         return CandidateFailureReason.BELOW_MIN_FOLLOWERS.value
+    if reason == "below_min_engagement_rate":
+        return CandidateFailureReason.BELOW_MIN_ENGAGEMENT_RATE.value
+    if reason == "above_max_followers":
+        return CandidateFailureReason.ABOVE_MAX_FOLLOWERS.value
+    if reason == "missing_engagement_rate":
+        return CandidateFailureReason.MISSING_ENGAGEMENT_RATE.value
+    if reason == "missing_email":
+        return CandidateFailureReason.MISSING_EMAIL.value
+    if reason == "missing_contact":
+        return CandidateFailureReason.MISSING_CONTACT.value
     if reason in ("invalid_profile", "invalid_username"):
         return CandidateFailureReason.INVALID_USERNAME.value
     if reason.startswith("excluded_keyword:"):
         return CandidateFailureReason.EXCLUDED_KEYWORD.value
+    if reason == "low_value_seed":
+        return CandidateFailureReason.LOW_VALUE_SEED.value
     return CandidateFailureReason.UNKNOWN.value
 
 
@@ -118,16 +130,21 @@ def hard_filter_failure_detail(
 
 
 def meta_source_fields(meta: PostAuthorCandidate, *, collection_mode: str | None = None) -> dict:
+    source_meta = dict(meta.source_meta or {})
+    source_input_url = meta.source_input_url or source_meta.get("source_input_url") or source_meta.get("input_url")
+    if source_input_url:
+        source_meta["source_input_url"] = str(source_input_url)
     fields = {
         "source_type": resolve_source_type(meta, collection_mode=collection_mode),
         "source_hashtag": meta.source_hashtag,
         "source_keyword": meta.source_hashtag,
         "source_post_url": meta.source_post_url,
+        "source_input_url": source_input_url,
         "source_caption": meta.source_caption,
         "source_comment_url": meta.source_comment_url,
         "source_comment_text": meta.source_comment_text,
         "source_discovery_type": meta.source_discovery_type,
     }
-    if meta.source_meta:
-        fields["source_meta"] = meta.source_meta
+    if source_meta:
+        fields["source_meta"] = source_meta
     return fields

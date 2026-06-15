@@ -117,16 +117,25 @@ export function collectionTaskSlowApiHintLabel(
 export function collectionTaskFunnelLine(task: CollectionTask): string {
   const discovered = task.discovered_count ?? 0;
   const deduped = task.deduped_count ?? 0;
+  const posts = task.post_count ?? 0;
   const fetched = task.profile_fetched_count ?? 0;
   const filtered = task.filtered_out_count ?? 0;
   const inserted = task.inserted_count ?? task.result_count ?? 0;
   const target = collectionTaskTargetCount(task);
-  const targetPart = target == null ? "目标未设置" : `${inserted}/${target}`;
+  const targetPart = target == null ? `${inserted}/目标未设置` : `${inserted}/${target}`;
+  if (task.collection_mode === "link_import") {
+    const postPart = posts > 0 ? posts : deduped > 0 ? deduped : discovered;
+    return `发现 ${discovered} → 作品链接 ${postPart} → 主页 ${fetched} → 入库 ${targetPart}`;
+  }
   return `发现 ${discovered} → 去重 ${deduped} → 主页 ${fetched} → 过滤 ${filtered} → 入库 ${targetPart}`;
 }
 
-function collectionTaskProviderLabel(task: CollectionTask, providerRaw: string | null): string {
-  const platform = (task.platform || task.platforms?.[0] || "").toLowerCase();
+function collectionTaskProviderLabel(
+  task: CollectionTask,
+  providerRaw: string | null,
+  platformOverride?: string,
+): string {
+  const platform = platformOverride || (task.platform || task.platforms?.[0] || "").toLowerCase();
   if (providerRaw === "api_direct") {
     if (platform === "facebook") return "API Direct Facebook";
     if (platform === "tiktok") return "API Direct TikTok";
@@ -147,16 +156,53 @@ export function collectionTaskDiscoveryContext(task: CollectionTask): string | n
   const checkpoint = task.run_checkpoint ?? {};
   const currentKeyword = typeof checkpoint.current_keyword === "string" ? checkpoint.current_keyword : null;
   const providerRaw = typeof checkpoint.discovery_provider === "string" ? checkpoint.discovery_provider : null;
-  const provider = collectionTaskProviderLabel(task, providerRaw);
+  const platformRaw = typeof checkpoint.current_platform === "string" ? checkpoint.current_platform : null;
+  const platformStatus =
+    checkpoint.platform_discovery_status && typeof checkpoint.platform_discovery_status === "object"
+      ? (checkpoint.platform_discovery_status as Record<string, string>)
+      : null;
+  const provider = collectionTaskProviderLabel(
+    task,
+    providerRaw,
+    platformRaw || (task.platform || task.platforms?.[0] || "").toLowerCase(),
+  );
   const completed = typeof checkpoint.keywords_completed === "number" ? checkpoint.keywords_completed : null;
   const total = typeof checkpoint.keywords_total === "number" ? checkpoint.keywords_total : null;
+  const platformsCompleted =
+    typeof checkpoint.platforms_completed === "number" ? checkpoint.platforms_completed : null;
+  const platformsTotal = typeof checkpoint.platforms_total === "number" ? checkpoint.platforms_total : null;
   const discovered = task.discovered_count ?? 0;
   const hydratingTotal =
     typeof checkpoint.profiles_hydrating_total === "number" ? checkpoint.profiles_hydrating_total : null;
   const hydratingCompleted =
     typeof checkpoint.profiles_hydrating_completed === "number" ? checkpoint.profiles_hydrating_completed : null;
+  const elapsedSeconds =
+    typeof checkpoint.discovery_elapsed_seconds === "number" ? checkpoint.discovery_elapsed_seconds : null;
 
   const parts: string[] = [];
+  if (platformStatus && Object.keys(platformStatus).length > 0) {
+    const labelMap: Record<string, string> = {
+      tiktok: "TikTok",
+      youtube: "YouTube",
+      facebook: "Facebook",
+      instagram: "Instagram",
+    };
+    const stateMap: Record<string, string> = {
+      queued: "排队",
+      searching: "搜索中",
+      done: "完成",
+      partial: "部分成功",
+      timeout_skipped: "超时跳过",
+      failed: "失败",
+    };
+    const platformBits = Object.entries(platformStatus).map(
+      ([name, status]) => `${labelMap[name] ?? name}${stateMap[status] ?? status}`,
+    );
+    parts.push(`平台：${platformBits.join("、")}`);
+  } else if (platformsTotal != null && platformsCompleted != null && platformsTotal > 0) {
+    parts.push(`多平台搜索（${platformsCompleted}/${platformsTotal}）`);
+  }
+
   if (currentKeyword) {
     if (total != null && completed != null) {
       parts.push(`${provider}：关键词「${currentKeyword}」（${completed}/${total}）`);
@@ -172,6 +218,9 @@ export function collectionTaskDiscoveryContext(task: CollectionTask): string | n
   }
   if (hydratingTotal != null && hydratingTotal > 0) {
     parts.push(`补采主页 ${hydratingCompleted ?? 0}/${hydratingTotal}`);
+  }
+  if (elapsedSeconds != null && elapsedSeconds >= 30) {
+    parts.push(`已运行 ${Math.round(elapsedSeconds)}s`);
   }
 
   return parts.length > 0 ? parts.join("，") : null;

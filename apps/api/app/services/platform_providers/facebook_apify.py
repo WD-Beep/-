@@ -62,7 +62,14 @@ def _effective_profile_concurrency() -> int:
     return max(1, min(APIFY_PROFILE_CONCURRENCY_CAP, settings.facebook_apify_profile_concurrency))
 
 
-def _discovery_deadline() -> float:
+def _discovery_deadline(task=None) -> float:
+    if task is not None:
+        from app.services.competitor_product_discovery import is_competitor_product_task
+
+        if is_competitor_product_task(task):
+            from app.core.config import settings
+
+            return time.perf_counter() + max(30, settings.competitor_product_platform_timeout_seconds)
     return time.perf_counter() + max(30, settings.facebook_discovery_max_duration_seconds)
 
 
@@ -257,6 +264,15 @@ class FacebookApifyProvider:
 
         checkpoint = checkpoint or RunCheckpoint.from_task(task)
         keywords = [k.strip() for k in (task.keywords or []) if k and str(k).strip()]
+        from app.services.competitor_product_discovery import (
+            competitor_discovery_apify_timeout_seconds,
+            competitor_discovery_keyword_timeout_seconds,
+            filter_competitor_phrase_keywords,
+            is_competitor_product_task,
+        )
+
+        if is_competitor_product_task(task):
+            keywords = filter_competitor_phrase_keywords(keywords)
         input_urls = [u.strip() for u in (task.input_urls or []) if u and str(u).strip()]
         if not keywords and not input_urls:
             msg = "Facebook 采集需要关键词或公开 Page URL"
@@ -268,9 +284,12 @@ class FacebookApifyProvider:
         rate_limit_count = 0
         slow_api = False
         discovery_started = time.perf_counter()
-        deadline = _discovery_deadline()
+        deadline = _discovery_deadline(task)
         keyword_timeout = max(1, settings.facebook_discovery_keyword_timeout_seconds)
         apify_timeout = max(1, settings.apify_facebook_timeout_seconds)
+        if is_competitor_product_task(task):
+            keyword_timeout = competitor_discovery_keyword_timeout_seconds(keyword_timeout)
+            apify_timeout = competitor_discovery_apify_timeout_seconds(apify_timeout)
         profile_timeout = max(1, settings.facebook_apify_profile_timeout_seconds)
         concurrency = _effective_keyword_concurrency()
 

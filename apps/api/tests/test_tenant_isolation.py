@@ -472,6 +472,48 @@ def test_ensure_task_access_rejects_task_without_product():
     assert exc.value.status_code == 403
 
 
+def test_ensure_task_access_rejects_all_products_context():
+    from app.deps.tenant import TenantContext
+    from app.services.task_access import ensure_task_access
+    from app.services.tenant_scope import ALL_PRODUCTS_ID
+
+    task = CollectionTask(
+        name="bound",
+        platform="instagram",
+        platforms=["instagram"],
+        keywords=["B00VOEZYHI"],
+        product_id=1,
+    )
+    ctx = TenantContext(
+        user_id=1,
+        product_id=ALL_PRODUCTS_ID,
+        workspace_id=1,
+        is_admin=True,
+    )
+
+    with pytest.raises(Exception) as exc:
+        ensure_task_access(task, ctx)
+    assert exc.value.status_code == 403
+
+
+def test_ensure_task_access_rejects_cross_product():
+    from app.deps.tenant import TenantContext
+    from app.services.task_access import ensure_task_access
+
+    task = CollectionTask(
+        name="product-a-task",
+        platform="instagram",
+        platforms=["instagram"],
+        keywords=["B00VOEZYHI"],
+        product_id=1,
+    )
+    ctx = TenantContext(user_id=1, product_id=99, workspace_id=1, is_admin=False)
+
+    with pytest.raises(Exception) as exc:
+        ensure_task_access(task, ctx)
+    assert exc.value.status_code == 403
+
+
 def test_protected_api_rejects_missing_tenant_headers():
     async def _run() -> None:
         from httpx import ASGITransport, AsyncClient
@@ -636,6 +678,47 @@ def test_link_import_batches_filtered_by_product():
                     {"pattern": f"%-{suffix}"},
                 )
                 await db_session.commit()
+
+    asyncio.run(_run())
+
+
+def test_link_import_batch_access_rejects_all_products_context():
+    async def _run() -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        from app.main import app
+
+        suffix = uuid.uuid4().hex[:8]
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            create_resp = await client.post(
+                "/api/link-import/batches",
+                headers={"X-User-Id": "1", "X-Product-Id": "1"},
+                json={
+                    "name": f"tenant-batch-{suffix}",
+                    "raw_urls": "https://www.pinterest.com/example_user/",
+                },
+            )
+            assert create_resp.status_code == 201, create_resp.text
+            batch_id = create_resp.json()["id"]
+
+            denied_get = await client.get(
+                f"/api/link-import/batches/{batch_id}",
+                headers={"X-User-Id": "1", "X-Product-Id": "0"},
+            )
+            assert denied_get.status_code == 403
+
+            denied_run = await client.post(
+                f"/api/link-import/batches/{batch_id}/run",
+                headers={"X-User-Id": "1", "X-Product-Id": "0"},
+            )
+            assert denied_run.status_code == 403
+
+            denied_delete = await client.delete(
+                f"/api/link-import/batches/{batch_id}",
+                headers={"X-User-Id": "1", "X-Product-Id": "0"},
+            )
+            assert denied_delete.status_code == 403
 
     asyncio.run(_run())
 

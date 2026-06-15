@@ -32,6 +32,17 @@ Thumbs.db
 
 # Database
 postgres_data/
+backups/
+*.dump
+*.sql
+*.sql.gz
+*.backup
+
+# Local secrets / certificates
+*.pem
+*.key
+*.p12
+*.crt
 
 # Local probes / scratch files
 tmp_*

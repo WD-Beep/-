@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.collectors import get_collector
 from app.collectors.base import CollectedInfluencer
 from app.models.collection_task import CollectionTask
-from app.models.enums import CandidateStatus, CollectionTaskStatus
+from app.models.enums import CandidateStatus, CollectionMode, CollectionTaskStatus
 from app.models.influencer import Influencer
 from app.models.product_influencer import ProductInfluencer
 from app.services.influencer_persistence import (
@@ -26,13 +26,15 @@ from app.services.influencer_persistence import (
 from app.core.config import settings
 from app.db.session import async_session_factory
 from app.services.ai_service import analyze_influencer
+from app.services.influencer_source import InfluencerSourceService
 from app.services.instagram_urls import (
     normalize_instagram_post_url,
     normalize_instagram_profile_url,
 )
 from app.services.collect_errors import summarize_errors
 from app.services.email import EmailService
-from app.services.instagram_pipeline import InstagramCollectionPipeline
+from app.services.instagram_pipeline import InstagramCollectionPipeline, InstagramPipelineResult, PipelineRunStats
+from app.services.link_import import LinkImportService
 from app.services.multi_platform_runner import (
     build_multi_platform_summary,
     determine_multi_platform_status,
@@ -52,14 +54,50 @@ logger = logging.getLogger(__name__)
 _collection_run_lock = asyncio.Lock()
 _active_collection_task_id: int | None = None
 
+
+async def run_instagram_pipeline_with_provider_check(
+    task: CollectionTask,
+    *,
+    db: AsyncSession,
+    checkpoint,
+) -> InstagramPipelineResult:
+    """Instagram provider 未配置时返回明确错误，避免阻断多平台任务中的其他平台。"""
+    try:
+        get_collector(task)
+    except RuntimeError as exc:
+        message = str(exc).strip() or "Instagram 采集未配置"
+        return InstagramPipelineResult(
+            errors=[f"[instagram] {message}"],
+            stats=PipelineRunStats(discovery_api_failed=True),
+        )
+    return await InstagramCollectionPipeline.run(task, db=db, checkpoint=checkpoint)
+
+
+def _annotate_instagram_failure_in_aggregate(aggregate, pipeline_result: InstagramPipelineResult | None) -> None:
+    if not pipeline_result or not getattr(pipeline_result.stats, "discovery_api_failed", False):
+        return
+    if not pipeline_result.errors:
+        return
+    reason = pipeline_result.errors[0]
+    if not any(entry.startswith("instagram:") for entry in aggregate.platform_failures):
+        aggregate.platform_failures.append(reason if reason.startswith("[instagram]") else f"instagram: {reason}")
+    if aggregate.platform_successes:
+        aggregate.has_api_warnings = True
+
+
 from app.services.candidate_pool import hard_filter_failure_detail, meta_source_fields
 from app.services.category_discovery import apply_category_discovery_expansion
 from app.services.collection_filters import (
+    PostHydrationHardFilterResult,
     evaluate_post_hydration_hard_filter,
     get_quality_preference_mismatch_reasons,
-    matches_quality_preferences,
 )
-from app.services.instagram_pipeline import InstagramPipelineResult
+from app.services.high_value_filter import (
+    assessment_row_fields,
+    evaluate_high_value_assessment,
+    should_skip_insert,
+    should_strict_filter_out,
+)
 from app.services.collection_funnel import (
     CollectionFunnelStats,
     append_target_qualified_summary,
@@ -284,33 +322,71 @@ class CollectionRunnerService:
             if outcome and outcome.get("status") == "filtered_out":
                 item = outcome["item"]
                 hard = outcome["hard"]
-                rows.append(
-                    TaskCandidateService.row_from_filtered(
-                        username=item.username,
-                        profile_url=item.profile_url,
-                        failure_reason=hard.reason,
-                        failure_detail=hard_filter_failure_detail(
-                            hard.reason,
-                            task=task,
-                            followers_count=item.followers_count,
-                        ),
-                        platform=platform,
-                        source_keyword=source_keyword,
-                        source_hashtag=meta.source_hashtag,
-                        source_post_url=meta.source_post_url or item.source_post_url,
-                        source_caption=meta.source_caption,
-                        source_comment_url=meta.source_comment_url or item.source_comment_url,
-                        source_comment_text=meta.source_comment_text or item.source_comment_text,
-                        source_discovery_type=meta.source_discovery_type or item.source_discovery_type,
-                        source_type=meta_source_fields(meta, collection_mode=task.collection_mode).get(
-                            "source_type"
-                        ),
-                        source_meta=meta.source_meta,
+                quality = outcome.get("quality")
+                failure_detail = (
+                    quality.filter_detail
+                    if quality and quality.filter_detail
+                    else hard_filter_failure_detail(
+                        hard.reason,
+                        task=task,
                         followers_count=item.followers_count,
-                        engagement_rate=item.engagement_rate,
-                        profile_fetched_at=run_at,
+                        platform=platform,
                     )
                 )
+                row = TaskCandidateService.row_from_filtered(
+                    username=item.username,
+                    profile_url=item.profile_url,
+                    failure_reason=hard.reason,
+                    failure_detail=failure_detail,
+                    platform=platform,
+                    source_keyword=source_keyword,
+                    source_hashtag=meta.source_hashtag,
+                    source_post_url=meta.source_post_url or item.source_post_url,
+                    source_caption=meta.source_caption,
+                    source_comment_url=meta.source_comment_url or item.source_comment_url,
+                    source_comment_text=meta.source_comment_text or item.source_comment_text,
+                    source_discovery_type=meta.source_discovery_type or item.source_discovery_type,
+                    source_type=meta_source_fields(meta, collection_mode=task.collection_mode).get(
+                        "source_type"
+                    ),
+                    source_meta=meta.source_meta,
+                    followers_count=item.followers_count,
+                    engagement_rate=item.engagement_rate,
+                    profile_fetched_at=run_at,
+                )
+                if quality:
+                    row.update(assessment_row_fields(quality))
+                rows.append(row)
+                continue
+
+            if outcome and outcome.get("status") == "not_inserted":
+                item = outcome["item"]
+                quality = outcome.get("quality")
+                row = TaskCandidateService.row_from_not_inserted(
+                    username=item.username,
+                    profile_url=item.profile_url,
+                    failure_reason=quality.filter_reason if quality else None,
+                    failure_detail=quality.insert_blocked_reason if quality else None,
+                    insert_blocked_reason=quality.insert_blocked_reason if quality else None,
+                    platform=platform,
+                    source_keyword=source_keyword,
+                    source_hashtag=meta.source_hashtag,
+                    source_post_url=meta.source_post_url or item.source_post_url,
+                    source_caption=meta.source_caption,
+                    source_comment_url=meta.source_comment_url or item.source_comment_url,
+                    source_comment_text=meta.source_comment_text or item.source_comment_text,
+                    source_discovery_type=meta.source_discovery_type or item.source_discovery_type,
+                    source_type=meta_source_fields(meta, collection_mode=task.collection_mode).get(
+                        "source_type"
+                    ),
+                    source_meta=meta.source_meta,
+                    followers_count=item.followers_count,
+                    engagement_rate=item.engagement_rate,
+                    profile_fetched_at=run_at,
+                )
+                if quality:
+                    row.update(assessment_row_fields(quality))
+                rows.append(row)
                 continue
 
             if outcome and outcome.get("status") == "duplicate":
@@ -333,23 +409,25 @@ class CollectionRunnerService:
 
             if outcome and outcome.get("status") == "inserted":
                 item = outcome["item"]
-                rows.append(
-                    TaskCandidateService.row_from_inserted(
-                        meta=meta,
-                        username=item.username,
-                        profile_url=item.profile_url,
-                        platform=platform,
-                        collection_mode=task.collection_mode,
-                        product_influencer_id=outcome.get("product_influencer_id"),
-                        global_influencer_id=outcome.get("global_influencer_id"),
-                        product_id=task.product_id,
-                        user_id=task.user_id,
-                        followers_count=item.followers_count,
-                        engagement_rate=item.engagement_rate,
-                        profile_fetched_at=run_at,
-                        source_keyword=source_keyword,
-                    )
+                quality = outcome.get("quality")
+                row = TaskCandidateService.row_from_inserted(
+                    meta=meta,
+                    username=item.username,
+                    profile_url=item.profile_url,
+                    platform=platform,
+                    collection_mode=task.collection_mode,
+                    product_influencer_id=outcome.get("product_influencer_id"),
+                    global_influencer_id=outcome.get("global_influencer_id"),
+                    product_id=task.product_id,
+                    user_id=task.user_id,
+                    followers_count=item.followers_count,
+                    engagement_rate=item.engagement_rate,
+                    profile_fetched_at=run_at,
+                    source_keyword=source_keyword,
                 )
+                if quality:
+                    row.update(assessment_row_fields(quality))
+                rows.append(row)
                 continue
 
             rows.append(
@@ -396,23 +474,48 @@ class CollectionRunnerService:
             item = outcome.get("item")
             if status == "filtered_out":
                 hard = outcome["hard"]
-                rows.append(
-                    candidate_row_from_profile(
-                        profile,
-                        status=CandidateStatus.FILTERED_OUT.value,
-                        collection_mode=task.collection_mode,
-                        source_keyword=keyword,
-                        failure_reason=hard.reason,
-                        failure_detail=hard_filter_failure_detail(
-                            hard.reason,
-                            task=task,
-                            followers_count=getattr(item, "followers_count", None),
-                            platform=profile.platform,
-                        ),
+                quality = outcome.get("quality")
+                failure_detail = (
+                    quality.filter_detail
+                    if quality and quality.filter_detail
+                    else hard_filter_failure_detail(
+                        hard.reason,
+                        task=task,
                         followers_count=getattr(item, "followers_count", None),
-                        engagement_rate=getattr(item, "engagement_rate", None),
+                        platform=profile.platform,
                     )
                 )
+                row = candidate_row_from_profile(
+                    profile,
+                    status=CandidateStatus.FILTERED_OUT.value,
+                    collection_mode=task.collection_mode,
+                    source_keyword=keyword,
+                    failure_reason=hard.reason,
+                    failure_detail=failure_detail,
+                    followers_count=getattr(item, "followers_count", None),
+                    engagement_rate=getattr(item, "engagement_rate", None),
+                )
+                if quality:
+                    row.update(assessment_row_fields(quality))
+                rows.append(row)
+                continue
+
+            if status == "not_inserted":
+                quality = outcome.get("quality")
+                row = candidate_row_from_profile(
+                    profile,
+                    status=CandidateStatus.NOT_INSERTED.value,
+                    collection_mode=task.collection_mode,
+                    source_keyword=keyword,
+                    failure_reason=quality.filter_reason if quality else None,
+                    failure_detail=quality.insert_blocked_reason if quality else None,
+                    insert_blocked_reason=quality.insert_blocked_reason if quality else None,
+                    followers_count=getattr(item, "followers_count", None) if item else None,
+                    engagement_rate=getattr(item, "engagement_rate", None) if item else None,
+                )
+                if quality:
+                    row.update(assessment_row_fields(quality))
+                rows.append(row)
                 continue
 
             if status == "duplicate":
@@ -435,20 +538,22 @@ class CollectionRunnerService:
                 continue
 
             if status == "inserted":
-                rows.append(
-                    candidate_row_from_profile(
-                        profile,
-                        status=CandidateStatus.INSERTED.value,
-                        collection_mode=task.collection_mode,
-                        source_keyword=keyword,
-                        product_influencer_id=outcome.get("product_influencer_id"),
-                        global_influencer_id=outcome.get("global_influencer_id"),
-                        product_id=task.product_id,
-                        user_id=task.user_id,
-                        followers_count=getattr(item, "followers_count", None) if item else None,
-                        engagement_rate=getattr(item, "engagement_rate", None) if item else None,
-                    )
+                quality = outcome.get("quality")
+                row = candidate_row_from_profile(
+                    profile,
+                    status=CandidateStatus.INSERTED.value,
+                    collection_mode=task.collection_mode,
+                    source_keyword=keyword,
+                    product_influencer_id=outcome.get("product_influencer_id"),
+                    global_influencer_id=outcome.get("global_influencer_id"),
+                    product_id=task.product_id,
+                    user_id=task.user_id,
+                    followers_count=getattr(item, "followers_count", None) if item else None,
+                    engagement_rate=getattr(item, "engagement_rate", None) if item else None,
                 )
+                if quality:
+                    row.update(assessment_row_fields(quality))
+                rows.append(row)
                 continue
 
             rows.append(
@@ -946,6 +1051,9 @@ class CollectionRunnerService:
         filtered_excluded = 0
 
         try:
+            if task.collection_mode == CollectionMode.LINK_IMPORT.value:
+                return await LinkImportService.run_collection_task(db, task)
+
             apply_category_discovery_expansion(task)
             run_at = datetime.now(UTC)
             platforms = task_platforms(task)
@@ -969,22 +1077,65 @@ class CollectionRunnerService:
             collection_errors: list[str] = []
             stats = CollectionFunnelStats()
             platform_results = []
+            competitor_timed_out = False
+
+            async def _run_instagram_pipeline():
+                return await run_instagram_pipeline_with_provider_check(task, db=db, checkpoint=checkpoint)
+
+            async def _run_non_instagram_discovery():
+                return await discover_non_instagram_platforms(
+                    task,
+                    non_instagram,
+                    checkpoint=checkpoint,
+                )
 
             if "instagram" in platforms and non_instagram:
-                get_collector(task)
                 discovery_reporter = DiscoveryProgressReporter(db, task, checkpoint, qualified_target)
                 discovery_reporter_token = set_discovery_reporter(discovery_reporter)
-                pipeline_result, platform_results = await asyncio.gather(
-                    InstagramCollectionPipeline.run(task, db=db, checkpoint=checkpoint),
-                    discover_non_instagram_platforms(task, non_instagram, checkpoint=checkpoint),
-                )
-                collected = list(pipeline_result.items)
-                collection_errors = list(pipeline_result.errors)
-                stats = pipeline_result.stats
+                discovery_tasks: list[asyncio.Task] = [
+                    asyncio.create_task(_run_instagram_pipeline()),
+                    asyncio.create_task(_run_non_instagram_discovery()),
+                ]
+                if task.collection_mode == CollectionMode.COMPETITOR_PRODUCT.value:
+                    total_timeout = max(60, settings.competitor_product_task_timeout_seconds)
+                    done, pending = await asyncio.wait(discovery_tasks, timeout=total_timeout)
+                    for pending_task in pending:
+                        pending_task.cancel()
+                        competitor_timed_out = True
+                    ig_task = discovery_tasks[0]
+                    plat_task = discovery_tasks[1]
+                    if ig_task in done:
+                        try:
+                            pipeline_result = ig_task.result()
+                        except Exception as exc:
+                            collection_errors.append(str(exc))
+                    if plat_task in done:
+                        try:
+                            platform_results = plat_task.result()
+                        except Exception as exc:
+                            collection_errors.append(str(exc))
+                    if competitor_timed_out:
+                        collection_errors.append(
+                            "已达到任务最大耗时，部分平台/API 响应慢，已结束本轮采集"
+                        )
+                        checkpoint_extra = dict(task.run_checkpoint or {})
+                        checkpoint_extra["competitor_discovery_timed_out"] = True
+                        task.run_checkpoint = checkpoint_extra
+                    if pipeline_result is not None:
+                        collected = list(pipeline_result.items)
+                        collection_errors.extend(pipeline_result.errors)
+                        stats = pipeline_result.stats
+                else:
+                    pipeline_result, platform_results = await asyncio.gather(
+                        _run_instagram_pipeline(),
+                        _run_non_instagram_discovery(),
+                    )
+                    collected = list(pipeline_result.items)
+                    collection_errors = list(pipeline_result.errors)
+                    stats = pipeline_result.stats
             else:
                 if "instagram" in platforms:
-                    get_collector(task)
-                    pipeline_result = await InstagramCollectionPipeline.run(
+                    pipeline_result = await run_instagram_pipeline_with_provider_check(
                         task,
                         db=db,
                         checkpoint=checkpoint,
@@ -996,11 +1147,27 @@ class CollectionRunnerService:
                 if non_instagram:
                     discovery_reporter = DiscoveryProgressReporter(db, task, checkpoint, qualified_target)
                     discovery_reporter_token = set_discovery_reporter(discovery_reporter)
-                    platform_results = await discover_non_instagram_platforms(
-                        task,
-                        non_instagram,
-                        checkpoint=checkpoint,
-                    )
+                    if task.collection_mode == CollectionMode.COMPETITOR_PRODUCT.value:
+                        total_timeout = max(60, settings.competitor_product_task_timeout_seconds)
+                        plat_task = asyncio.create_task(_run_non_instagram_discovery())
+                        done, pending = await asyncio.wait([plat_task], timeout=total_timeout)
+                        for pending_task in pending:
+                            pending_task.cancel()
+                            competitor_timed_out = True
+                        if plat_task in done:
+                            try:
+                                platform_results = plat_task.result()
+                            except Exception as exc:
+                                collection_errors.append(str(exc))
+                        if competitor_timed_out:
+                            collection_errors.append(
+                                "已达到任务最大耗时，部分平台/API 响应慢，已结束本轮采集"
+                            )
+                            checkpoint_extra = dict(task.run_checkpoint or {})
+                            checkpoint_extra["competitor_discovery_timed_out"] = True
+                            task.run_checkpoint = checkpoint_extra
+                    else:
+                        platform_results = await _run_non_instagram_discovery()
 
             aggregate = merge_platform_results(
                 instagram_result=pipeline_result,
@@ -1010,6 +1177,7 @@ class CollectionRunnerService:
                 instagram_collected=collected,
                 platform_results=platform_results,
             )
+            _annotate_instagram_failure_in_aggregate(aggregate, pipeline_result)
             collected = dedupe_collected_items(aggregate.collected_items)
             collection_errors = aggregate.collection_errors
             total_count = len(collected)
@@ -1137,6 +1305,28 @@ class CollectionRunnerService:
                         item.profile_url,
                         platform_unique_id=item.platform_unique_id,
                     ):
+                        if resume:
+                            identity_key = identity_key_for_item(item)
+                            product_record = product_map.get(identity_key)
+                            global_profile = global_map.get(identity_key)
+                            if product_record and product_record.is_inserted:
+                                user_key = (item.username or "").lower()
+                                profile_key = collected_identity_key(item)
+                                assessment = evaluate_high_value_assessment(item, task)
+                                outcome = {
+                                    "status": "inserted",
+                                    "item": item,
+                                    "product_influencer_id": product_record.id,
+                                    "global_influencer_id": (
+                                        global_profile.id
+                                        if global_profile
+                                        else product_record.global_influencer_id
+                                    ),
+                                    "quality": assessment,
+                                }
+                                platform_outcomes[profile_key] = outcome
+                                if item.platform == "instagram":
+                                    outcomes[user_key] = outcome
                         continue
 
                     hard = evaluate_post_hydration_hard_filter(item, task)
@@ -1163,9 +1353,49 @@ class CollectionRunnerService:
                         )
                         continue
 
-                    if not matches_quality_preferences(item, task):
+                    assessment = evaluate_high_value_assessment(item, task)
+                    if should_strict_filter_out(task, assessment):
+                        filtered_count += 1
+                        if assessment.filter_reason == "below_min_followers":
+                            filtered_below_min += 1
+                        outcome = {
+                            "status": "filtered_out",
+                            "item": item,
+                            "hard": PostHydrationHardFilterResult(False, assessment.filter_reason),
+                            "quality": assessment,
+                        }
+                        platform_outcomes[profile_key] = outcome
+                        if item.platform == "instagram":
+                            outcomes[user_key] = outcome
+                        checkpoint.mark_persisted(
+                            item.platform,
+                            item.profile_url,
+                            platform_unique_id=item.platform_unique_id,
+                        )
+                        continue
+
+                    if should_skip_insert(task, assessment):
+                        skipped_count += 1
+                        outcome = {
+                            "status": "not_inserted",
+                            "item": item,
+                            "quality": assessment,
+                        }
+                        platform_outcomes[profile_key] = outcome
+                        if item.platform == "instagram":
+                            outcomes[user_key] = outcome
+                        checkpoint.mark_persisted(
+                            item.platform,
+                            item.profile_url,
+                            platform_unique_id=item.platform_unique_id,
+                        )
+                        continue
+
+                    if not assessment.is_high_value:
                         preference_mismatch_count += 1
-                        mismatch = get_quality_preference_mismatch_reasons(item, task)
+                        mismatch = list(assessment.mismatch_codes) or get_quality_preference_mismatch_reasons(
+                            item, task
+                        )
                         logger.debug(
                             "Quality preference mismatch @%s: %s",
                             item.username,
@@ -1197,6 +1427,9 @@ class CollectionRunnerService:
 
                     if product_record:
                         if not product_record_has_changes(product_record, item, task):
+                            await InfluencerSourceService.record_from_collected(
+                                db, product_record, item, task=task, run_at=run_at
+                            )
                             skipped_count += 1
                             outcome = {
                                 "status": "duplicate",
@@ -1220,6 +1453,9 @@ class CollectionRunnerService:
                         ):
                             apply_global_profile_data(global_profile, item, run_at=run_at)
                         apply_product_influencer_data(product_record, item, task, run_at=run_at)
+                        await InfluencerSourceService.record_from_collected(
+                            db, product_record, item, task=task, run_at=run_at
+                        )
                         touched_influencers.append(product_record)
                         updated_count += 1
                         outcome = {
@@ -1227,6 +1463,7 @@ class CollectionRunnerService:
                             "item": item,
                             "product_influencer_id": product_record.id,
                             "global_influencer_id": global_profile.id if global_profile else None,
+                            "quality": assessment,
                         }
                         platform_outcomes[profile_key] = outcome
                         if item.platform == "instagram":
@@ -1259,6 +1496,10 @@ class CollectionRunnerService:
                             run_at=run_at,
                         )
                         db.add(product_record)
+                        await db.flush()
+                        await InfluencerSourceService.record_from_collected(
+                            db, product_record, item, task=task, run_at=run_at
+                        )
                         touched_influencers.append(product_record)
                         product_map[identity_key] = product_record
                         new_count += 1
@@ -1268,6 +1509,7 @@ class CollectionRunnerService:
                             "product_influencer_id": None,
                             "global_influencer_id": global_profile.id if global_profile else None,
                             "_product_influencer": product_record,
+                            "quality": assessment,
                         }
                         platform_outcomes[profile_key] = outcome
                         if item.platform == "instagram":
@@ -1342,6 +1584,7 @@ class CollectionRunnerService:
                 aggregate.platform_profiles or [],
                 funnel,
             )
+            aggregate.funnel = funnel
             discovery_api_failed = getattr(stats, "discovery_api_failed", False) if pipeline_result else aggregate.discovery_api_failed
             has_api_warnings = bool(
                 aggregate.has_api_warnings
@@ -1407,6 +1650,10 @@ class CollectionRunnerService:
                 filtered_excluded=funnel.filtered_excluded_keyword_count,
                 filtered_out=funnel.filtered_out_count,
             )
+            if competitor_timed_out and task.status_summary:
+                task.status_summary = (
+                    f"{task.status_summary}。已达到任务最大耗时，部分平台/API 响应慢，已结束本轮采集"
+                )
             if discovery_api_failed and instagram_only:
                 task.status_summary = (
                     "Instagram 采集 API 全部失败，未获得任何候选账号，请查看错误详情"
@@ -1432,6 +1679,7 @@ class CollectionRunnerService:
                 )
 
             await db.flush()
+            await TaskCandidateService.sync_task_inserted_stats(db, task)
             await TaskInfluencerService.refresh_task_stats(db, task)
             await db.commit()
 

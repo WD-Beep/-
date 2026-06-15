@@ -12,6 +12,7 @@ from app.db.base import Base
 if TYPE_CHECKING:
     from app.models.global_influencer_profile import GlobalInfluencerProfile
     from app.models.influencer_followup import InfluencerFollowup
+    from app.models.product_influencer_source import ProductInfluencerSource
 
 
 class ProductInfluencer(Base):
@@ -76,4 +77,9 @@ class ProductInfluencer(Base):
         back_populates="product_influencer",
         cascade="all, delete-orphan",
         order_by="InfluencerFollowup.created_at.desc()",
+    )
+    sources: Mapped[list["ProductInfluencerSource"]] = relationship(
+        back_populates="product_influencer",
+        cascade="all, delete-orphan",
+        order_by="ProductInfluencerSource.collected_at.desc()",
     )

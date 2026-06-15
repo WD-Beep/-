@@ -175,3 +175,11 @@ def test_list_platform_capabilities_includes_provider_metadata():
     caps = list_platform_capabilities()
     assert any(item.platform == "instagram" for item in caps)
     assert any(item.platform == "tiktok" for item in caps)
+    assert any(item.platform == "amazon" for item in caps)
+    by_platform = {item.platform: item for item in caps}
+    assert by_platform["instagram"].keyword_discovery is True
+    assert by_platform["instagram"].link_import is True
+    assert by_platform["pinterest"].keyword_discovery is False
+    assert by_platform["pinterest"].link_import is True
+    assert by_platform["amazon"].product_seed is True
+    assert by_platform["amazon"].keyword_discovery is False

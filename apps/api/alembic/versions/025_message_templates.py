@@ -13,6 +13,11 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    if "message_templates" in inspector.get_table_names():
+        return
+
     op.create_table(
         "message_templates",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),

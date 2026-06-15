@@ -130,12 +130,12 @@ def upgrade() -> None:
         UPDATE collection_task_candidates c
         SET product_influencer_id = target_pi.id
         FROM remapped r
+        JOIN product_influencers source_pi
+          ON source_pi.global_influencer_id = r.duplicate_id
         JOIN product_influencers target_pi
           ON target_pi.global_influencer_id = r.canonical_id
-         AND target_pi.product_id = c.product_id
-        WHERE c.product_influencer_id IN (
-            SELECT pi.id FROM product_influencers pi WHERE pi.global_influencer_id = r.duplicate_id
-        )
+        WHERE c.product_influencer_id = source_pi.id
+          AND target_pi.product_id = c.product_id
         """
     )
 

@@ -7,7 +7,8 @@ from types import SimpleNamespace
 from app.models.global_influencer_profile import GlobalInfluencerProfile
 from app.models.influencer import Influencer
 from app.models.product_influencer import ProductInfluencer
-from app.schemas.influencer import InfluencerRead
+from app.models.product_influencer_source import ProductInfluencerSource
+from app.schemas.influencer import InfluencerRead, InfluencerSourceRead
 def merged_influencer_for_ai(
     product_row: ProductInfluencer,
     global_row: GlobalInfluencerProfile,
@@ -98,12 +99,19 @@ def merged_influencer_for_ai(
     )
 
 
+def source_records_from_rows(rows: list[ProductInfluencerSource]) -> list[InfluencerSourceRead]:
+    return [InfluencerSourceRead.model_validate(row) for row in rows]
+
+
 def to_influencer_read(
     product_row: ProductInfluencer,
     global_row: GlobalInfluencerProfile,
+    *,
+    sources: list[ProductInfluencerSource] | None = None,
 ) -> InfluencerRead:
     merged = merged_influencer_for_ai(product_row, global_row)
     read = InfluencerRead.model_validate(merged)
+    source_records = source_records_from_rows(sources or [])
     return read.model_copy(
         update={
             "id": product_row.id,
@@ -111,6 +119,7 @@ def to_influencer_read(
             "lead_priority": product_row.final_priority,
             "owner_name": product_row.owner,
             "lead_note": product_row.note,
+            "source_records": source_records,
         }
     )
 

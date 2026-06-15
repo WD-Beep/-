@@ -75,7 +75,7 @@ export function LinkImportPanel() {
 
   useEffect(() => {
     if (productId === null) {
-      setLoadingHistory(false);
+      queueMicrotask(() => setLoadingHistory(false));
       return;
     }
     queueMicrotask(() => {

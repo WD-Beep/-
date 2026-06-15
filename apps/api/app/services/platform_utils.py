@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from app.collectors.base import CollectedInfluencer
 from app.core.config import settings
+
+if TYPE_CHECKING:
+    from app.collectors.base import CollectedInfluencer
 from app.services.platform_types import PlatformCandidateProfile
 
 _COUNT_SUFFIX = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}
@@ -205,6 +207,7 @@ def dedupe_collected_items(items: list[CollectedInfluencer]) -> list[CollectedIn
 
 
 def profile_to_collected(profile: PlatformCandidateProfile) -> CollectedInfluencer:
+    from app.collectors.base import CollectedInfluencer
     from app.services.contact_discovery import extract_emails_from_text, normalize_email
     from app.services.contact_signals import (
         apply_bio_contact_hints,
@@ -214,6 +217,7 @@ def profile_to_collected(profile: PlatformCandidateProfile) -> CollectedInfluenc
         merge_other_social_links,
     )
     from app.services.business_quality import apply_creator_quality
+    from app.services.platform_types import URL_ONLY_PLATFORMS
 
     item = CollectedInfluencer(
         platform=profile.platform,
@@ -238,11 +242,21 @@ def profile_to_collected(profile: PlatformCandidateProfile) -> CollectedInfluenc
         recent_post_titles=list(profile.recent_post_titles or []),
         recent_post_urls=list(profile.recent_post_urls or []),
         source_discovery_type=profile.source_discovery_type,
-        source_post_url=profile.source_url,
+        source_post_url=profile.source_post_url or profile.source_meta.get("source_post_url") or (
+            profile.source_url
+            if profile.source_meta.get("link_type") in {"post", "pin", "product", "short"}
+            else None
+        ),
+        source_input_url=profile.source_input_url
+        or profile.source_meta.get("source_input_url")
+        or profile.source_meta.get("input_url"),
         tags=["api_direct"],
     )
 
     apply_bio_contact_hints(item)
+
+    if profile.platform in URL_ONLY_PLATFORMS and not item.contact_fetch_status:
+        item.contact_fetch_status = "pending"
 
     for link in profile.other_social_links or []:
         if not isinstance(link, dict):
@@ -341,18 +355,42 @@ def candidate_row_from_profile(
     user_id: int | None = None,
     followers_count: int | None = None,
     engagement_rate: float | None = None,
+    is_high_value: bool | None = None,
+    has_email: bool | None = None,
+    has_contact: bool | None = None,
+    contact_status: str | None = None,
+    insert_blocked_reason: str | None = None,
 ) -> dict[str, Any]:
+    source_meta = dict(profile.source_meta or {})
+    source_input_url = (
+        profile.source_input_url
+        or source_meta.get("source_input_url")
+        or source_meta.get("input_url")
+    )
+    if source_input_url:
+        source_meta["source_input_url"] = str(source_input_url)
+    source_post_url = profile.source_post_url or source_meta.get("source_post_url") or (
+        profile.source_url
+        if source_meta.get("link_type") in {"post", "pin", "product", "short"}
+        else None
+    )
     return {
         "username": profile.username,
         "profile_url": profile.profile_url,
         "platform": profile.platform,
         "source_type": profile.source_type,
         "source_keyword": source_keyword,
-        "source_post_url": profile.source_url,
+        "source_post_url": source_post_url,
+        "source_input_url": source_input_url,
         "source_discovery_type": profile.source_discovery_type,
-        "source_meta": profile.source_meta or None,
+        "source_meta": source_meta or None,
         "followers_count": followers_count if followers_count is not None else profile.followers_count,
         "engagement_rate": engagement_rate if engagement_rate is not None else profile.engagement_rate,
+        "is_high_value": is_high_value,
+        "has_email": has_email,
+        "has_contact": has_contact,
+        "contact_status": contact_status,
+        "insert_blocked_reason": insert_blocked_reason,
         "status": status,
         "failure_reason": failure_reason,
         "failure_detail": failure_detail,

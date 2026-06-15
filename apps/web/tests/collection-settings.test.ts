@@ -26,6 +26,9 @@ test("platform capability hint prefers backend message", () => {
     status: "supported",
     message: "TikTok 数据源：Apify TikTok Scraper（APIFY_TOKEN 已配置）",
     endpoints: [],
+    keyword_discovery: true,
+    link_import: true,
+    product_seed: false,
   });
   assert.match(hint, /Apify TikTok Scraper/);
 });

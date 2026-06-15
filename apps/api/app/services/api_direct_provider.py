@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from app.core.config import settings
 from app.models.collection_task import CollectionTask
+from app.models.enums import CollectionMode
 from app.services.api_direct_client import reset_request_budget
+from app.services.discovery_progress import report_discovery_progress
 from app.services.platform_providers.facebook_api_direct import FacebookApiDirectProvider
 from app.services.platform_providers.facebook_apify import FacebookApifyProvider
 from app.services.platform_providers.instagram_api_direct import InstagramApiDirectProvider
@@ -20,8 +23,17 @@ from app.services.platform_providers.url_only import (
 from app.services.platform_providers.youtube_api_direct import YouTubeApiDirectProvider
 from app.services.platform_providers.youtube_apify import YouTubeApifyProvider
 from app.services.collection_sources import enrich_platform_capability
-from app.services.platform_types import SUPPORTED_PLATFORMS, PlatformCapability, PlatformDiscoveryResult
-from app.services.task_run_progress import RunCheckpoint
+from app.services.platform_types import (
+    LINK_IMPORT_HINTS,
+    SUPPORTED_PLATFORMS,
+    PlatformCapability,
+    PlatformDiscoveryResult,
+    apply_platform_feature_flags,
+    platform_feature_flags,
+)
+from app.services.task_run_progress import RunCheckpoint, STAGE_DISCOVERY
+
+logger = logging.getLogger(__name__)
 
 _PROVIDER_REGISTRY = {
     "instagram": InstagramApiDirectProvider,
@@ -69,18 +81,42 @@ def _provider_cls(platform: str):
 def get_platform_capability(platform: str) -> PlatformCapability:
     provider_cls = _provider_cls(platform)
     if not provider_cls:
-        return PlatformCapability(
-            platform=platform,
-            label=platform,
-            status="not_available",
-            message=f"暂未接入该平台（{platform}）",
-            endpoints=[],
+        return _finalize_platform_capability(
+            PlatformCapability(
+                platform=platform,
+                label=platform,
+                status="not_available",
+                message=f"暂未接入该平台（{platform}）",
+                endpoints=[],
+            )
         )
-    return enrich_platform_capability(provider_cls.capability())
+    return _finalize_platform_capability(enrich_platform_capability(provider_cls.capability()))
+
+
+def _finalize_platform_capability(cap: PlatformCapability) -> PlatformCapability:
+    cap = apply_platform_feature_flags(cap)
+    cap.link_import_hint = LINK_IMPORT_HINTS.get(cap.platform)
+    return cap
+
+
+def _amazon_platform_capability() -> PlatformCapability:
+    return PlatformCapability(
+        platform="amazon",
+        label="Amazon",
+        status="supported",
+        message="Amazon 商品链接用于竞品商品发现线索；主要通过链接导入，不是红人主页平台。",
+        endpoints=[],
+        keyword_discovery=False,
+        link_import=True,
+        product_seed=True,
+        link_import_hint=LINK_IMPORT_HINTS["amazon"],
+    )
 
 
 def list_platform_capabilities() -> list[PlatformCapability]:
-    return [get_platform_capability(name) for name in SUPPORTED_PLATFORMS]
+    caps = [_finalize_platform_capability(get_platform_capability(name)) for name in SUPPORTED_PLATFORMS]
+    caps.append(_amazon_platform_capability())
+    return caps
 
 
 def ensure_api_direct_ready() -> None:
@@ -127,15 +163,81 @@ async def discover_non_instagram_platforms(
     if not targets:
         return []
 
+    competitor_mode = (task.collection_mode or "") == CollectionMode.COMPETITOR_PRODUCT.value
+    discovery_task = task
+    platform_timeout: int | None = None
+    if competitor_mode:
+        from app.services.competitor_product_discovery import (
+            competitor_task_for_platform_discovery,
+            order_competitor_discovery_platforms,
+        )
+
+        discovery_task = competitor_task_for_platform_discovery(task)
+        targets = order_competitor_discovery_platforms(targets)
+        platform_timeout = max(30, settings.competitor_product_platform_timeout_seconds)
+
+    status_lock = asyncio.Lock()
+    platform_status: dict[str, str] = {p: "queued" for p in targets}
+
+    async def _set_platform_status(platform: str, status: str, note: str | None = None) -> None:
+        if not competitor_mode:
+            return
+        async with status_lock:
+            platform_status[platform] = status
+            completed = sum(1 for s in platform_status.values() if s in {"done", "partial", "timeout_skipped", "failed"})
+            await report_discovery_progress(
+                phase=STAGE_DISCOVERY,
+                platform=platform,
+                current_platform=platform if status == "searching" else None,
+                platforms_completed=completed,
+                platforms_total=len(targets),
+                platform_discovery_status=dict(platform_status),
+                partial_skip_note=note,
+            )
+
     async def _safe_discover(platform: str) -> PlatformDiscoveryResult:
+        await _set_platform_status(platform, "searching")
         try:
-            return await discover_platform(task, platform, checkpoint=checkpoint)
+            if platform_timeout:
+                result = await asyncio.wait_for(
+                    discover_platform(discovery_task, platform, checkpoint=checkpoint),
+                    timeout=platform_timeout,
+                )
+            else:
+                result = await discover_platform(discovery_task, platform, checkpoint=checkpoint)
+            if result.errors and not (result.profiles or result.items):
+                await _set_platform_status(platform, "failed")
+            elif result.errors:
+                await _set_platform_status(platform, "partial")
+            else:
+                await _set_platform_status(platform, "done")
+            return result
+        except asyncio.TimeoutError:
+            msg = f"{platform} 平台发现超时（{platform_timeout}s），已跳过该平台继续其他平台"
+            logger.warning("[CompetitorProduct] platform timeout platform=%s", platform)
+            await _set_platform_status(platform, "timeout_skipped", note=msg)
+            return PlatformDiscoveryResult(
+                platform=platform,
+                fatal=False,
+                errors=[msg],
+                skip_reason=msg,
+            )
         except Exception as exc:
+            await _set_platform_status(platform, "failed")
             return PlatformDiscoveryResult(
                 platform=platform,
                 fatal=True,
                 errors=[str(exc)],
             )
+
+    if competitor_mode:
+        await report_discovery_progress(
+            phase=STAGE_DISCOVERY,
+            platforms_total=len(targets),
+            platforms_completed=0,
+            platform_discovery_status=dict(platform_status),
+            partial_skip_note=f"多平台并发搜索（{len(targets)} 个平台，每平台最多 {platform_timeout}s）",
+        )
 
     outcomes = await asyncio.gather(*(_safe_discover(p) for p in targets), return_exceptions=True)
     results: list[PlatformDiscoveryResult] = []
@@ -146,4 +248,16 @@ async def discover_non_instagram_platforms(
             )
         else:
             results.append(outcome)
+
+    if competitor_mode:
+        from app.services.competitor_product_discovery import apply_competitor_product_relevance_to_platform_results
+
+        apply_competitor_product_relevance_to_platform_results(results, task)
+        await report_discovery_progress(
+            phase=STAGE_DISCOVERY,
+            platforms_completed=len(targets),
+            platforms_total=len(targets),
+            platform_discovery_status=dict(platform_status),
+        )
+
     return results

@@ -1,3 +1,4 @@
+import "./register-path-aliases.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -38,6 +39,11 @@ function task(overrides: Partial<CollectionTask>): CollectionTask {
     max_followers_count: null,
     filter_include_keywords: [],
     filter_exclude_keywords: [],
+    require_email: false,
+    require_contact: false,
+    strict_quality_filter: false,
+    insert_qualified_only: false,
+    export_qualified_only: false,
     status: "running",
     schedule_enabled: false,
     schedule_cron: null,
@@ -249,6 +255,21 @@ test("backend slow_api flag triggers immediately without elapsed wait", () => {
   assert.ok(hint);
   assert.match(hint!, /接口响应较慢，继续处理/);
   assert.doesNotMatch(hint!, /等待较久/);
+});
+
+test("link import funnel shows post link stage", () => {
+  const funnel = collectionTaskFunnelLine(
+    task({
+      collection_mode: "link_import",
+      discovered_count: 1,
+      deduped_count: 1,
+      post_count: 1,
+      profile_fetched_count: 1,
+      inserted_count: 1,
+      discovery_limit: null as unknown as number,
+    }),
+  );
+  assert.match(funnel, /发现 1 → 作品链接 1 → 主页 1 → 入库 1\/目标未设置/);
 });
 
 test("collection result lines include inserted and funnel", () => {

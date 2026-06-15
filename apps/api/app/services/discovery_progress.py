@@ -140,6 +140,14 @@ class DiscoveryProgressReporter:
 
         platform: str | None = None,
 
+        current_platform: str | None = None,
+
+        platforms_completed: int | None = None,
+
+        platforms_total: int | None = None,
+
+        platform_discovery_status: dict[str, str] | None = None,
+
         commit: bool = True,
 
     ) -> None:
@@ -232,6 +240,26 @@ class DiscoveryProgressReporter:
 
             extra["partial_skip_note"] = partial_skip_note
 
+        if current_platform:
+
+            extra["current_platform"] = current_platform
+
+        if platforms_completed is not None:
+
+            extra["platforms_completed"] = platforms_completed
+
+        if platforms_total is not None:
+
+            extra["platforms_total"] = platforms_total
+
+        if platform_discovery_status is not None:
+
+            merged_status = dict(extra.get("platform_discovery_status") or {})
+
+            merged_status.update(platform_discovery_status)
+
+            extra["platform_discovery_status"] = merged_status
+
         extra["discovery_elapsed_seconds"] = round(self._discovery_elapsed_seconds(), 1)
 
 
@@ -301,6 +329,14 @@ class DiscoveryProgressReporter:
             partial_skip_note=resolved_partial_skip,
 
             platform=platform or getattr(self.task, "platform", None),
+
+            current_platform=extra.get("current_platform"),
+
+            platforms_completed=extra.get("platforms_completed"),
+
+            platforms_total=extra.get("platforms_total"),
+
+            platform_discovery_status=extra.get("platform_discovery_status"),
 
         )
 

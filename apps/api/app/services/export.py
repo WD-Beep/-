@@ -7,15 +7,27 @@ from openpyxl.utils import get_column_letter
 
 from app.models.collection_task_candidate import CollectionTaskCandidate
 from app.models.influencer import Influencer
+from app.models.product_influencer_source import ProductInfluencerSource
 from app.services.contact_signals import build_contact_summary
 from app.services.contact_discovery import credibility_level_label
 from app.services.value_tier import classify_value_tier, value_tier_label
+from app.services.link_seed_enrichment import (
+    build_seed_enrichment_status,
+    compute_seed_source_export_fields,
+    final_platform_display,
+    link_seed_platform_display,
+    resolve_seed_platform_from_input_url,
+)
 
 CANDIDATE_BUSINESS_EXPORT_COLUMNS: list[tuple[str, str, str]] = [
     ("username", "账号", "text"),
     ("display_name", "昵称", "text"),
     ("platform", "平台", "text"),
     ("profile_url", "主页链接", "url"),
+    ("source_platform", "来源平台", "text"),
+    ("source_input_url", "来源输入链接", "url"),
+    ("seed_platform", "Seed 平台", "text"),
+    ("seed_enrichment_status", "Seed 补全状态", "text"),
     ("followers_count", "粉丝数", "int"),
     ("engagement_rate", "互动率", "float"),
     ("avg_views", "平均观看", "int"),
@@ -54,20 +66,41 @@ CANDIDATE_BUSINESS_EXPORT_COLUMNS: list[tuple[str, str, str]] = [
     ("ai_summary", "AI 推荐理由", "wrap"),
     ("ai_collaboration_suggestion", "适合怎么合作", "wrap"),
     ("ai_outreach_message", "开场话术", "wrap"),
-    ("source_post_url", "来源帖子", "url"),
+    ("source_post_url", "来源作品链接", "url"),
+    ("source_task_name", "来源任务", "text"),
+    ("collected_at", "采集时间", "text"),
 ]
 
 INFLUENCER_LIBRARY_EXPORT_COLUMNS: list[tuple[str, str, str]] = [
-    ("profile_url", "链接", "url"),
+    ("username", "账号", "text"),
+    ("display_name", "昵称", "text"),
+    ("platform", "平台", "text"),
+    ("profile_url", "主页链接", "url"),
+    ("source_platform", "来源平台", "text"),
+    ("source_input_url", "来源输入链接", "url"),
+    ("seed_platform", "Seed 平台", "text"),
+    ("seed_enrichment_status", "Seed 补全状态", "text"),
+    ("followers_count", "粉丝数", "int"),
+    ("engagement_rate", "互动率", "float"),
     ("email", "邮箱", "text"),
+    ("bio", "简介", "wrap"),
+    ("source_post_url", "来源作品链接", "url"),
+    ("source_task_name", "来源任务", "text"),
+    ("collected_at", "采集时间", "text"),
 ]
 
 EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("platform", "平台"),
     ("display_name", "昵称"),
     ("profile_url", "主页链接"),
+    ("source_platform", "来源平台"),
+    ("source_input_url", "来源输入链接"),
+    ("seed_platform", "Seed 平台"),
+    ("seed_enrichment_status", "Seed 补全状态"),
     ("source_discovery_type", "发现来源"),
-    ("source_post_url", "来源帖子"),
+    ("source_post_url", "来源作品链接"),
+    ("source_task_name", "来源任务"),
+    ("collected_at", "采集时间"),
     ("source_comment_text", "来源评论"),
     ("public_email", "公开邮箱"),
     ("business_email", "商业邮箱"),
@@ -110,9 +143,19 @@ EXPORT_COLUMNS: list[tuple[str, str]] = [
 ]
 
 
-def _cell_value(influencer: Influencer, field: str):
+def _cell_value(
+    influencer: Influencer,
+    field: str,
+    *,
+    source_fields: dict[str, str] | None = None,
+):
+    if source_fields and field in source_fields:
+        return source_fields[field]
     if field == "display_name":
         return influencer.display_name or influencer.username or ""
+    if field == "platform":
+        value = getattr(influencer, "platform", None)
+        return final_platform_display(value) or value or ""
     if field == "value_tier":
         tier, _, _ = classify_value_tier(influencer)
         return value_tier_label(tier)
@@ -143,11 +186,48 @@ def _resolve_export_email(influencer: Influencer) -> str:
     return ""
 
 
-def _library_export_value(influencer: Influencer, field: str) -> str:
+def _library_export_value(
+    influencer: Influencer,
+    field: str,
+    *,
+    source_fields: dict[str, str] | None = None,
+) -> str:
+    if field in {
+        "source_post_url",
+        "source_input_url",
+        "source_task_name",
+        "collected_at",
+        "source_platform",
+        "seed_platform",
+        "seed_enrichment_status",
+    }:
+        if source_fields:
+            return source_fields.get(field, "")
+        if field == "source_post_url":
+            return str(getattr(influencer, "source_post_url", None) or "").strip()
+        return ""
     if field == "profile_url":
         return str(getattr(influencer, "profile_url", None) or "").strip()
     if field == "email":
         return _resolve_export_email(influencer)
+    if field == "display_name":
+        return str(getattr(influencer, "display_name", None) or getattr(influencer, "username", None) or "").strip()
+    if field == "username":
+        return str(getattr(influencer, "username", None) or "").strip()
+    if field == "platform":
+        return final_platform_display(getattr(influencer, "platform", None)) or str(
+            getattr(influencer, "platform", None) or ""
+        ).strip()
+    if field == "bio":
+        return str(getattr(influencer, "bio", None) or "").strip()
+    if field == "followers_count":
+        value = getattr(influencer, "followers_count", None)
+        return "" if value is None else str(value)
+    if field == "engagement_rate":
+        value = getattr(influencer, "engagement_rate", None)
+        if value is None:
+            return ""
+        return f"{float(value):.2f}%"
     return ""
 
 
@@ -169,7 +249,14 @@ def _write_library_export_cell(ws, row_idx: int, col_idx: int, kind: str, raw_va
 
 
 def _auto_fit_library_columns(ws, row_count: int) -> None:
-    widths = {"链接": 42, "邮箱": 28}
+    widths = {
+        "主页链接": 42,
+        "邮箱": 28,
+        "来源作品链接": 42,
+        "来源输入链接": 42,
+        "Seed 补全状态": 36,
+        "简介": 36,
+    }
     for col_idx in range(1, len(INFLUENCER_LIBRARY_EXPORT_COLUMNS) + 1):
         header = str(ws.cell(row=1, column=col_idx).value or "")
         column_letter = get_column_letter(col_idx)
@@ -187,7 +274,11 @@ def _auto_fit_library_columns(ws, row_count: int) -> None:
 def build_influencer_library_excel(
     influencers: list[Influencer] | list,
     filename: str | None = None,
+    *,
+    sources_by_influencer_id: dict[int, list[ProductInfluencerSource]] | None = None,
 ) -> tuple[bytes, str]:
+    from app.services.influencer_source import InfluencerSourceService
+
     wb = Workbook()
     ws = wb.active
     ws.title = "红人数据"
@@ -200,8 +291,19 @@ def build_influencer_library_excel(
         cell.font = bold_font
 
     for row_offset, influencer in enumerate(influencers, start=2):
+        source_fields = None
+        source_rows: list | None = None
+        influencer_id = getattr(influencer, "id", None)
+        if sources_by_influencer_id and influencer_id is not None:
+            source_rows = sources_by_influencer_id.get(influencer_id, [])
+            source_fields = InfluencerSourceService.aggregate_for_export(source_rows)
+            source_fields = _merge_source_export_fields(
+                source_fields,
+                sources=source_rows,
+                final_platform=getattr(influencer, "platform", None),
+            )
         for col_idx, (field, _, kind) in enumerate(INFLUENCER_LIBRARY_EXPORT_COLUMNS, start=1):
-            raw_value = _library_export_value(influencer, field)
+            raw_value = _library_export_value(influencer, field, source_fields=source_fields)
             _write_library_export_cell(ws, row_offset, col_idx, kind, raw_value)
 
     ws.freeze_panes = "A2"
@@ -236,18 +338,71 @@ def _format_social_links(value: list | None) -> str:
     return "\n".join(parts)
 
 
+def _candidate_source_input_url(candidate: CollectionTaskCandidate) -> str:
+    column = getattr(candidate, "source_input_url", None)
+    if column and str(column).strip():
+        return str(column).strip()
+    meta = getattr(candidate, "source_meta", None) or {}
+    if isinstance(meta, dict):
+        value = meta.get("source_input_url") or meta.get("input_url")
+        if value:
+            return str(value).strip()
+    return ""
+
+
+def _candidate_link_seed_meta(candidate: CollectionTaskCandidate) -> dict:
+    meta = getattr(candidate, "source_meta", None) or {}
+    if not isinstance(meta, dict):
+        return {}
+    enrichment = meta.get("link_seed_enrichment")
+    return enrichment if isinstance(enrichment, dict) else {}
+
+
+def _candidate_final_platform(
+    candidate: CollectionTaskCandidate,
+    influencer: Influencer | None,
+) -> str:
+    if influencer and getattr(influencer, "platform", None):
+        return str(influencer.platform)
+    return str(getattr(candidate, "platform", None) or "")
+
+
+def _merge_source_export_fields(
+    source_fields: dict[str, str] | None,
+    *,
+    sources: list | None,
+    final_platform: str | None,
+) -> dict[str, str]:
+    merged = dict(source_fields or {})
+    seed_fields = compute_seed_source_export_fields(sources, final_platform=final_platform)
+    if seed_fields.get("source_platform"):
+        merged["source_platform"] = seed_fields["source_platform"]
+    elif merged.get("source_platform"):
+        merged["source_platform"] = "\n".join(
+            final_platform_display(part.strip()) or part.strip()
+            for part in merged["source_platform"].split("\n")
+            if part.strip()
+        )
+    merged["seed_platform"] = seed_fields.get("seed_platform", "")
+    merged["seed_enrichment_status"] = seed_fields.get("seed_enrichment_status", "")
+    return merged
+
+
 def _candidate_export_value(
     candidate: CollectionTaskCandidate,
     influencer: Influencer | None,
     field: str,
+    *,
+    task_name: str | None = None,
+    task_id: int | None = None,
 ):
     if field == "username":
         return candidate.username or (influencer.username if influencer else "") or ""
 
     if field == "platform":
-        if influencer and getattr(influencer, "platform", None):
-            return influencer.platform
-        return getattr(candidate, "platform", None) or ""
+        final = _candidate_final_platform(candidate, influencer)
+        display = final_platform_display(final)
+        return display or final
 
     if field == "profile_url":
         if influencer and influencer.profile_url:
@@ -256,6 +411,51 @@ def _candidate_export_value(
 
     if field == "source_post_url":
         return candidate.source_post_url or (influencer.source_post_url if influencer else None) or ""
+
+    if field == "source_input_url":
+        return _candidate_source_input_url(candidate)
+
+    if field == "source_task_name":
+        return task_name or ""
+
+    if field == "source_platform":
+        enrichment = _candidate_link_seed_meta(candidate)
+        seed_key = str(enrichment.get("link_seed_platform") or "").strip().lower()
+        if seed_key:
+            return link_seed_platform_display(seed_key)
+        inp = _candidate_source_input_url(candidate)
+        detected = resolve_seed_platform_from_input_url(inp)
+        if detected:
+            return link_seed_platform_display(detected)
+        cand_plat = str(getattr(candidate, "platform", None) or "").strip().lower()
+        if cand_plat in {"ltk", "shopmy", "pinterest"}:
+            return link_seed_platform_display(cand_plat)
+        return ""
+
+    if field == "seed_platform":
+        enrichment = _candidate_link_seed_meta(candidate)
+        seed_key = str(enrichment.get("link_seed_platform") or "").strip().lower()
+        if not seed_key:
+            seed_key = resolve_seed_platform_from_input_url(_candidate_source_input_url(candidate)) or ""
+        return link_seed_platform_display(seed_key) if seed_key else ""
+
+    if field == "seed_enrichment_status":
+        enrichment = _candidate_link_seed_meta(candidate)
+        return build_seed_enrichment_status(
+            enrichment_meta=enrichment or None,
+            source_input_url=_candidate_source_input_url(candidate),
+            final_platform=_candidate_final_platform(candidate, influencer),
+            failure_reason=getattr(candidate, "failure_reason", None),
+        )
+
+    if field == "collected_at":
+        run_at = getattr(candidate, "run_at", None) or getattr(candidate, "profile_fetched_at", None)
+        if run_at and isinstance(run_at, datetime):
+            return run_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        created = getattr(candidate, "created_at", None)
+        if created and isinstance(created, datetime):
+            return created.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        return ""
 
     if field == "display_name":
         if influencer:
@@ -379,6 +579,7 @@ def build_collection_task_candidates_excel(
     rows: list[tuple[CollectionTaskCandidate, Influencer | None]],
     *,
     task_id: int,
+    task_name: str | None = None,
 ) -> tuple[bytes, str]:
     wb = Workbook()
     ws = wb.active
@@ -393,7 +594,13 @@ def build_collection_task_candidates_excel(
 
     for row_offset, (candidate, influencer) in enumerate(rows, start=2):
         for col_idx, (field, _, kind) in enumerate(CANDIDATE_BUSINESS_EXPORT_COLUMNS, start=1):
-            raw_value = _candidate_export_value(candidate, influencer, field)
+            raw_value = _candidate_export_value(
+                candidate,
+                influencer,
+                field,
+                task_name=task_name,
+                task_id=task_id,
+            )
             _write_candidate_export_cell(ws, row_offset, col_idx, field, kind, raw_value)
 
     ws.freeze_panes = "A2"
@@ -426,7 +633,11 @@ def _auto_fit_columns(ws, row_count: int, col_count: int) -> None:
 def build_influencer_excel(
     influencers: list[Influencer] | list,
     filename: str | None = None,
+    *,
+    sources_by_influencer_id: dict[int, list[ProductInfluencerSource]] | None = None,
 ) -> tuple[bytes, str]:
+    from app.services.influencer_source import InfluencerSourceService
+
     wb = Workbook()
     ws = wb.active
     ws.title = "红人数据"
@@ -439,7 +650,21 @@ def build_influencer_excel(
         cell.font = bold_font
 
     for influencer in influencers:
-        row = [_cell_value(influencer, field) for field, _ in EXPORT_COLUMNS]
+        source_fields = None
+        source_rows: list | None = None
+        influencer_id = getattr(influencer, "id", None)
+        if sources_by_influencer_id and influencer_id is not None:
+            source_rows = sources_by_influencer_id.get(influencer_id, [])
+            source_fields = InfluencerSourceService.aggregate_for_export(source_rows)
+            source_fields = _merge_source_export_fields(
+                source_fields,
+                sources=source_rows,
+                final_platform=getattr(influencer, "platform", None),
+            )
+        row = [
+            _cell_value(influencer, field, source_fields=source_fields)
+            for field, _ in EXPORT_COLUMNS
+        ]
         ws.append(row)
 
     ws.freeze_panes = "A2"

@@ -128,6 +128,7 @@ def _extract_author_from_video(video: dict, *, source_keyword: str | None) -> Pl
             comments=comments if isinstance(comments, int) else None,
         ),
         source_url=video.get("url"),
+        source_post_url=str(video.get("url")) if video.get("url") else None,
         source_type="keyword_video_author",
         source_discovery_type="video_author",
         source_meta={

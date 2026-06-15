@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from app.models.enums import CollectionTaskStatus
 from app.services.collection_funnel import CollectionFunnelStats, determine_task_status
+from app.services.instagram_pipeline import PipelineRunStats
 from app.services.platform_types import PlatformDiscoveryResult
 
 _LINK_TYPE_LABELS = {
@@ -23,6 +24,34 @@ _LINK_TYPE_LABELS = {
     "stan_store": "Stan Store",
     "carrd": "Carrd",
 }
+
+
+def funnel_from_pipeline_stats(stats: object | None) -> CollectionFunnelStats:
+    if stats is None:
+        return CollectionFunnelStats()
+    if isinstance(stats, CollectionFunnelStats):
+        return stats
+    return CollectionFunnelStats(
+        discovered_count=getattr(stats, "discovered_count", 0),
+        deduped_count=getattr(stats, "deduped_count", 0),
+        profile_fetched_count=getattr(stats, "profile_fetched_count", 0),
+        profile_failed_count=getattr(stats, "profile_failed_count", 0),
+        filtered_out_count=getattr(stats, "filtered_out_count", 0),
+        inserted_count=getattr(stats, "inserted_count", 0),
+        preference_mismatch_count=getattr(stats, "preference_mismatch_count", 0),
+        hashtag_count=getattr(stats, "hashtag_count", 0),
+        post_count=getattr(stats, "post_count", 0),
+        comment_author_count=getattr(stats, "comment_author_count", 0),
+        filtered_below_min_followers_count=getattr(stats, "filtered_below_min_followers_count", 0),
+        filtered_excluded_keyword_count=getattr(stats, "filtered_excluded_keyword_count", 0),
+        target_qualified_count=getattr(stats, "target_qualified_count", 0),
+        overfetch_stop_reason=getattr(stats, "overfetch_stop_reason", None),
+        external_link_count=getattr(stats, "external_link_count", 0),
+        commercial_link_count=getattr(stats, "commercial_link_count", 0),
+        social_only_link_count=getattr(stats, "social_only_link_count", 0),
+        missing_contact_or_landing_count=getattr(stats, "missing_contact_or_landing_count", 0),
+        external_link_types=getattr(stats, "external_link_types", None),
+    )
 
 
 @dataclass
@@ -44,13 +73,13 @@ class MultiPlatformRunAggregate:
 def merge_platform_results(
     *,
     instagram_result: object | None,
-    instagram_funnel: CollectionFunnelStats | None,
+    instagram_funnel: CollectionFunnelStats | PipelineRunStats | None,
     instagram_errors: list[str],
     instagram_candidate_rows: list[dict],
     instagram_collected: list,
     platform_results: list[PlatformDiscoveryResult],
 ) -> MultiPlatformRunAggregate:
-    funnel = instagram_funnel or CollectionFunnelStats()
+    funnel = funnel_from_pipeline_stats(instagram_funnel)
     collected = list(instagram_collected or [])
     platform_profiles: list = []
     errors = list(instagram_errors or [])
@@ -193,21 +222,25 @@ def build_multi_platform_summary(
     other = filtered_out - filtered_below_min - filtered_excluded
     if other > 0:
         reasons.append("无效主页、重复或商业信号不足")
-    if aggregate.funnel.external_link_count > 0:
+    external_link_count = getattr(aggregate.funnel, "external_link_count", 0)
+    if external_link_count > 0:
         labels = ", ".join(
             _LINK_TYPE_LABELS.get(link_type, link_type)
-            for link_type in (aggregate.funnel.external_link_types or [])[:6]
+            for link_type in (getattr(aggregate.funnel, "external_link_types", None) or [])[:6]
         )
-        link_reason = f"发现主页外链 {aggregate.funnel.external_link_count} 个"
+        link_reason = f"发现主页外链 {external_link_count} 个"
         if labels:
             link_reason += f"（{labels}）"
-        if aggregate.funnel.commercial_link_count > 0:
-            link_reason += f"，商业外链 {aggregate.funnel.commercial_link_count} 个"
-        if aggregate.funnel.social_only_link_count > 0:
-            link_reason += f"，{aggregate.funnel.social_only_link_count} 个仅有社媒链接"
-        if aggregate.funnel.missing_contact_or_landing_count > 0:
+        commercial_link_count = getattr(aggregate.funnel, "commercial_link_count", 0)
+        if commercial_link_count > 0:
+            link_reason += f"，商业外链 {commercial_link_count} 个"
+        social_only_link_count = getattr(aggregate.funnel, "social_only_link_count", 0)
+        if social_only_link_count > 0:
+            link_reason += f"，{social_only_link_count} 个仅有社媒链接"
+        missing_contact_or_landing_count = getattr(aggregate.funnel, "missing_contact_or_landing_count", 0)
+        if missing_contact_or_landing_count > 0:
             link_reason += (
-                f"，其中 {aggregate.funnel.missing_contact_or_landing_count} 个缺少有效联系方式或商业落地页"
+                f"，其中 {missing_contact_or_landing_count} 个缺少有效联系方式或商业落地页"
             )
         reasons.append(link_reason)
     if overfetch_stop_reason:

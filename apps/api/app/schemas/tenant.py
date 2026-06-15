@@ -11,6 +11,11 @@ class ProductRead(ORMModel, TimestampMixin):
     brand: str | None = None
     description: str | None = None
     is_default: bool = False
+    is_archived: bool = False
+    is_hidden: bool = False
+    is_test: bool = False
+    created_source: str | None = None
+    display_order: int | None = None
 
 
 class ProductCreate(BaseModel):

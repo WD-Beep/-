@@ -30,6 +30,17 @@ OptionalEmail = Annotated[EmailStr | None, BeforeValidator(_empty_email_to_none)
 OptionalUrl = Annotated[HttpUrl | str | None, BeforeValidator(_empty_optional_string_to_none)]
 
 
+class InfluencerSourceRead(ORMModel):
+    id: int
+    source_post_url: str | None = None
+    source_input_url: str | None = None
+    source_platform: str | None = None
+    task_id: int | None = None
+    task_name: str | None = None
+    import_batch_id: int | None = None
+    collected_at: datetime
+
+
 class InfluencerBase(BaseModel):
     platform: str = Field(..., max_length=50)
     username: str = Field(..., max_length=255)
@@ -266,6 +277,7 @@ class InfluencerUpdate(BaseModel):
 
 class InfluencerRead(InfluencerBase, TimestampMixin, ORMModel):
     id: int
+    source_records: list[InfluencerSourceRead] = Field(default_factory=list)
     value_tier: Literal["direct_contact", "manual_research", "skip"] = "skip"
     value_tier_label: str = "暂时跳过"
     value_tier_reason: str = ""

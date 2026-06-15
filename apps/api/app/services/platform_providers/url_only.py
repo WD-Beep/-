@@ -28,19 +28,19 @@ CONFIGS = {
         platform="pinterest",
         label="Pinterest",
         hosts=("pinterest.com", "www.pinterest.com"),
-        message="当前支持 Pinterest 主页 URL 导入；关键词发现暂未接入。",
+        message="当前主要通过链接导入或社媒外链发现补全；站内关键词采集暂未接入。",
     ),
     "ltk": UrlOnlyPlatformConfig(
         platform="ltk",
         label="LTK",
         hosts=("shopltk.com", "www.shopltk.com"),
-        message="当前支持 LTK 创作者/商品 URL 导入；关键词发现暂未接入。",
+        message="当前主要通过链接导入或社媒外链发现补全；站内关键词采集暂未接入。",
     ),
     "shopmy": UrlOnlyPlatformConfig(
         platform="shopmy",
         label="ShopMy",
         hosts=("shopmy.us", "www.shopmy.us"),
-        message="当前支持 ShopMy 创作者/商品 URL 导入；关键词发现暂未接入。",
+        message="当前主要通过链接导入或社媒外链发现补全；站内关键词采集暂未接入。",
     ),
 }
 
@@ -58,6 +58,7 @@ PINTEREST_RESERVED = {
 }
 SHOPMY_RESERVED = {"collections", "discover", "explore", "login", "products", "shop", "stores"}
 HANDLE_RE = re.compile(r"^[A-Za-z0-9_.-]{2,80}$")
+PINTEREST_PIN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _clean_url(raw_url: str) -> str:
@@ -80,6 +81,28 @@ def _parse_pinterest(raw_url: str) -> PlatformCandidateProfile | None:
     if host not in CONFIGS["pinterest"].hosts:
         return None
     parts = _path_parts(parsed)
+    if len(parts) == 2 and parts[0].lower() == "pin":
+        pin_id = parts[1].strip()
+        if not PINTEREST_PIN_ID_RE.match(pin_id):
+            return None
+        profile_url = f"https://www.pinterest.com/pin/{pin_id}/"
+        return PlatformCandidateProfile(
+            platform="pinterest",
+            username=f"pin_{pin_id}",
+            profile_url=profile_url,
+            display_name=f"Pinterest Pin {pin_id}",
+            source_url=text,
+            source_post_url=text,
+            source_type="input_url",
+            source_discovery_type="url_import",
+            source_meta={
+                "provider": "url_only",
+                "input_url": raw_url.strip(),
+                "link_type": "pin",
+                "pin_id": pin_id,
+                "profile_hydration": "url_only_pending",
+            },
+        )
     if len(parts) != 1:
         return None
     username = parts[0].strip()
@@ -94,7 +117,7 @@ def _parse_pinterest(raw_url: str) -> PlatformCandidateProfile | None:
         source_url=text,
         source_type="input_url",
         source_discovery_type="url_import",
-        source_meta={"provider": "url_only", "input_url": raw_url.strip()},
+        source_meta={"provider": "url_only", "input_url": raw_url.strip(), "link_type": "profile", "profile_hydration": "url_only_pending"},
     )
 
 
@@ -111,15 +134,26 @@ def _parse_ltk(raw_url: str) -> PlatformCandidateProfile | None:
     if not HANDLE_RE.match(username):
         return None
     profile_url = f"https://www.shopltk.com/explore/{username}"
+    link_type = "profile"
+    source_post_url = None
+    if len(parts) > 2:
+        link_type = "product"
+        source_post_url = text
     return PlatformCandidateProfile(
         platform="ltk",
         username=username,
         profile_url=profile_url,
         display_name=username.replace("_", " "),
         source_url=text,
+        source_post_url=source_post_url,
         source_type="input_url",
         source_discovery_type="url_import",
-        source_meta={"provider": "url_only", "input_url": raw_url.strip()},
+        source_meta={
+            "provider": "url_only",
+            "input_url": raw_url.strip(),
+            "link_type": link_type,
+            "profile_hydration": "url_only_pending",
+        },
     )
 
 
@@ -130,6 +164,26 @@ def _parse_shopmy(raw_url: str) -> PlatformCandidateProfile | None:
     if host not in CONFIGS["shopmy"].hosts:
         return None
     parts = _path_parts(parsed)
+    if len(parts) >= 2 and parts[0].lower() not in SHOPMY_RESERVED:
+        username = parts[0].strip()
+        if HANDLE_RE.match(username):
+            return PlatformCandidateProfile(
+                platform="shopmy",
+                username=username,
+                profile_url=f"https://shopmy.us/{username}",
+                display_name=username.replace("_", " "),
+                source_url=text,
+                source_post_url=text,
+                source_type="input_url",
+                source_discovery_type="url_import",
+                source_meta={
+                    "provider": "url_only",
+                    "input_url": raw_url.strip(),
+                    "link_type": "product",
+                    "profile_hydration": "url_only_pending",
+                },
+            )
+        return None
     if len(parts) != 1:
         return None
     username = parts[0].strip()
@@ -144,7 +198,12 @@ def _parse_shopmy(raw_url: str) -> PlatformCandidateProfile | None:
         source_url=text,
         source_type="input_url",
         source_discovery_type="url_import",
-        source_meta={"provider": "url_only", "input_url": raw_url.strip()},
+        source_meta={
+            "provider": "url_only",
+            "input_url": raw_url.strip(),
+            "link_type": "profile",
+            "profile_hydration": "url_only_pending",
+        },
     )
 
 

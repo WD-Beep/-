@@ -1186,6 +1186,7 @@ def _profile_from_post(post: dict, *, source_keyword: str | None) -> PlatformCan
             comments=None,
         ),
         source_url=post_url,
+        source_post_url=str(post_url) if post_url else None,
         recent_post_titles=[title] if title else [],
         recent_post_urls=[str(post_url)] if post_url else [],
         source_type="keyword_video_channel",
@@ -1205,29 +1206,130 @@ def _profile_from_input_url(url: str) -> PlatformCandidateProfile | None:
     if not text:
         return None
     match = CHANNEL_URL_RE.search(text)
-    if not match:
+    if match:
+        channel_id = match.group(1)
+        handle = match.group(2)
+        if channel_id:
+            profile_url = f"https://www.youtube.com/channel/{channel_id}"
+            username = channel_id
+        else:
+            profile_url = f"https://www.youtube.com/@{handle}"
+            username = handle
+        return PlatformCandidateProfile(
+            platform="youtube",
+            username=username,
+            profile_url=profile_url,
+            source_type="input_url",
+            source_discovery_type="url_import",
+            channel_id=channel_id,
+            source_meta={
+                "provider": "api_direct",
+                "input_url": text,
+                "link_type": "profile",
+                "profile_hydration": "url_only_pending_channel_search",
+            },
+        )
+
+    from app.services.platform_providers.youtube_dedupe import extract_video_id
+
+    video_id = extract_video_id({"url": text})
+    if not video_id:
         return None
-    channel_id = match.group(1)
-    handle = match.group(2)
-    if channel_id:
-        profile_url = f"https://www.youtube.com/channel/{channel_id}"
-        username = channel_id
-    else:
-        profile_url = f"https://www.youtube.com/@{handle}"
-        username = handle
     return PlatformCandidateProfile(
         platform="youtube",
-        username=username,
-        profile_url=profile_url,
+        username=f"video_{video_id}",
+        profile_url=f"https://www.youtube.com/watch?v={video_id}",
+        source_url=text,
+        source_post_url=text,
         source_type="input_url",
         source_discovery_type="url_import",
-        channel_id=channel_id,
         source_meta={
             "provider": "api_direct",
             "input_url": text,
-            "profile_hydration": "url_only_pending_channel_search",
+            "link_type": "post",
+            "video_id": video_id,
+            "profile_hydration": "url_only_pending_video_lookup",
         },
     )
+
+
+async def _hydrate_url_import_video_profiles(
+    profiles: list[PlatformCandidateProfile],
+    *,
+    errors: list[str],
+    keyword_timeout: int,
+) -> list[PlatformCandidateProfile]:
+    hydrated: list[PlatformCandidateProfile] = []
+    for profile in profiles:
+        meta = profile.source_meta or {}
+        if meta.get("profile_hydration") != "url_only_pending_video_lookup":
+            hydrated.append(profile)
+            continue
+        video_id = meta.get("video_id")
+        input_url = meta.get("input_url") or profile.source_post_url or profile.source_url
+        if not video_id:
+            hydrated.append(profile)
+            continue
+        try:
+            post_data = await _ad_get_timed(
+                "/v1/youtube/posts",
+                params={"query": str(video_id), "pages": "1"},
+                platform="youtube",
+                timeout_seconds=keyword_timeout,
+            )
+            posts = post_data.get("posts") or []
+            matched = posts[0] if posts else None
+            if not isinstance(matched, dict):
+                errors.append(f"YouTube 视频 {input_url}: 未返回频道信息")
+                hydrated.append(profile)
+                continue
+            channel_profile = _profile_from_post(matched, source_keyword=None)
+            if channel_profile is None:
+                errors.append(f"YouTube 视频 {input_url}: 无法解析频道")
+                hydrated.append(profile)
+                continue
+            source_post_url = profile.source_post_url or str(input_url or "")
+            hydrated.append(
+                PlatformCandidateProfile(
+                    platform=channel_profile.platform,
+                    username=channel_profile.username,
+                    profile_url=channel_profile.profile_url,
+                    display_name=channel_profile.display_name,
+                    avatar_url=channel_profile.avatar_url,
+                    bio=channel_profile.bio,
+                    followers_count=channel_profile.followers_count,
+                    avg_views=channel_profile.avg_views,
+                    avg_likes=channel_profile.avg_likes,
+                    avg_comments=channel_profile.avg_comments,
+                    engagement_rate=channel_profile.engagement_rate,
+                    website=channel_profile.website,
+                    email=channel_profile.email,
+                    other_social_links=channel_profile.other_social_links,
+                    recent_post_titles=channel_profile.recent_post_titles,
+                    recent_post_urls=channel_profile.recent_post_urls or ([source_post_url] if source_post_url else []),
+                    source_url=source_post_url or channel_profile.source_url,
+                    source_post_url=source_post_url or None,
+                    source_type="input_url",
+                    source_discovery_type="url_import",
+                    channel_id=channel_profile.channel_id,
+                    source_meta={
+                        **(channel_profile.source_meta or {}),
+                        **meta,
+                        "link_type": "post",
+                        "profile_hydration": "video_channel_resolved",
+                    },
+                )
+            )
+        except ApiDirectError as exc:
+            errors.append(f"YouTube 视频 {input_url}: {exc}")
+            hydrated.append(profile)
+        except httpx.HTTPError as exc:
+            errors.append(f"YouTube 视频 {input_url}: 网络请求失败 ({exc.__class__.__name__})")
+            hydrated.append(profile)
+        except Exception as exc:
+            errors.append(f"YouTube 视频 {input_url}: {exc}")
+            hydrated.append(profile)
+    return hydrated
 
 
 def _merge_channel_details(
@@ -1484,11 +1586,18 @@ class YouTubeApiDirectProvider:
         url_profiles = [p for p in url_profiles if p]
 
         if not keywords and not url_profiles:
-            msg = "YouTube 采集需要关键词或 YouTube 频道链接"
+            msg = "YouTube 采集需要关键词或 YouTube 频道/视频链接"
             return PlatformDiscoveryResult(platform="youtube", errors=[msg], skip_reason=msg)
 
         limit = discovery_fetch_limit(task)
         pages = overfetch_pages_for_limit(limit)
+        keyword_timeout = max(1, settings.youtube_discovery_keyword_timeout_seconds)
+        if url_profiles:
+            url_profiles = await _hydrate_url_import_video_profiles(
+                url_profiles,
+                errors=errors,
+                keyword_timeout=keyword_timeout,
+            )
         profiles: list[PlatformCandidateProfile] = list(url_profiles)
         channel_profiles: list[PlatformCandidateProfile] = []
         collected_posts: list[dict] = []
@@ -1496,7 +1605,6 @@ class YouTubeApiDirectProvider:
         slow_api = False
         discovery_started = time.perf_counter()
         deadline = _discovery_deadline()
-        keyword_timeout = max(1, settings.youtube_discovery_keyword_timeout_seconds)
         concurrency = _youtube_keyword_search_concurrency()
 
         await report_discovery_progress(

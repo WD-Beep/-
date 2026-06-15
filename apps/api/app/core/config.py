@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     facebook_apify_keyword_concurrency: int = 2
     facebook_apify_profile_concurrency: int = 2
 
+    # Amazon competitor_product：缩短等待、限制关键词、平台/任务超时
+    competitor_product_task_timeout_seconds: int = 300
+    competitor_product_platform_timeout_seconds: int = 90
+    competitor_product_keyword_timeout_seconds: int = 25
+    competitor_product_max_search_keywords: int = 8
+    competitor_product_max_hashtags: int = 6
+
     hikerapi_api_key: str = ""
     hikerapi_base_url: str = "https://api.hikerapi.com"
     yepapi_api_key: str = ""

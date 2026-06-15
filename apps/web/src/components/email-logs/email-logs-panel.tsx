@@ -66,13 +66,13 @@ export function EmailLogsPanel() {
 
   useEffect(() => {
     if (productId === null) {
-      setLoading(false);
+      queueMicrotask(() => setLoading(false));
       return;
     }
-    setLogs([]);
-    setTasks([]);
-    setTotal(0);
     queueMicrotask(() => {
+      setLogs([]);
+      setTasks([]);
+      setTotal(0);
       void loadData();
     });
   }, [loadData, productId]);

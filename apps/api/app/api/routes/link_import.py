@@ -20,12 +20,17 @@ router = APIRouter(prefix="/link-import", tags=["link-import"])
 
 
 def _ensure_batch_access(batch: LinkImportBatch, ctx: TenantContext) -> None:
-    if (
-        batch.product_id is not None
-        and batch.product_id != ctx.product_id
-        and ctx.product_id != ALL_PRODUCTS_ID
-        and not ctx.is_admin
-    ):
+    if not batch.product_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="导入批次未绑定产品，拒绝访问",
+        )
+    if ctx.product_id == ALL_PRODUCTS_ID:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="请先选择具体产品后再访问链接导入批次",
+        )
+    if batch.product_id != ctx.product_id and not ctx.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问该导入批次")
 
 
@@ -52,7 +57,10 @@ async def create_link_import_batch(
     if not data.raw_urls.strip():
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="请粘贴至少一行链接")
 
-    batch = await LinkImportService.create_batch(db, data, ctx=ctx)
+    try:
+        batch = await LinkImportService.create_batch(db, data, ctx=ctx)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     return LinkImportBatchRead.model_validate(batch)
 
 

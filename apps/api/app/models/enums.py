@@ -40,9 +40,15 @@ class CandidateFailureReason(str, enum.Enum):
     INVALID_USERNAME = "invalid_username"
     MISSING_PROFILE_DETAIL = "missing_profile_detail"
     BELOW_MIN_FOLLOWERS = "below_min_followers"
+    BELOW_MIN_ENGAGEMENT_RATE = "below_min_engagement_rate"
+    ABOVE_MAX_FOLLOWERS = "above_max_followers"
+    MISSING_ENGAGEMENT_RATE = "missing_engagement_rate"
+    MISSING_EMAIL = "missing_email"
+    MISSING_CONTACT = "missing_contact"
     EXCLUDED_KEYWORD = "excluded_keyword"
     DUPLICATE = "duplicate"
     API_FAILED = "api_failed"
+    LOW_VALUE_SEED = "low_value_seed"
     UNKNOWN = "unknown"
 
 
@@ -52,6 +58,7 @@ class CandidateStatus(str, enum.Enum):
     PROFILE_FETCHED = "profile_fetched"
     PROFILE_FAILED = "profile_failed"
     FILTERED_OUT = "filtered_out"
+    NOT_INSERTED = "not_inserted"
     INSERTED = "inserted"
     DUPLICATE = "duplicate"
 
@@ -65,6 +72,7 @@ class CollectionMode(str, enum.Enum):
     CLUSTERING = "clustering"
     COMMENT_AUTHORS = "comment_authors"
     COMPETITOR_PRODUCT = "competitor_product"
+    LINK_IMPORT = "link_import"
 
 
 class LinkImportBatchStatus(str, enum.Enum):

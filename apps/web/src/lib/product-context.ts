@@ -6,17 +6,17 @@ export type ProductOption = {
   is_default?: boolean;
 };
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api-proxy";
-const SERVER_API_URL =
-  process.env.INTERNAL_API_URL?.replace(/\/$/, "") ?? "http://127.0.0.1:8000";
 export const ALL_PRODUCTS_ID = 0;
 const PRODUCT_STORAGE_KEY = "influencer_intel_product_id";
 const USER_STORAGE_KEY = "influencer_intel_user_id";
 
 let activeProductId: number = ALL_PRODUCTS_ID;
 
-function resolveApiUrl(): string {
-  return typeof window === "undefined" ? SERVER_API_URL : API_URL;
+export function readStoredProductIdFromStorage(): number {
+  if (typeof window === "undefined") return ALL_PRODUCTS_ID;
+  const raw = window.localStorage.getItem(PRODUCT_STORAGE_KEY);
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : ALL_PRODUCTS_ID;
 }
 
 export function getActiveProductId(): number {

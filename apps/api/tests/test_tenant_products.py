@@ -56,7 +56,9 @@ def test_create_product_writes_to_user_workspace():
                 listed = await client.get("/api/tenant/products", headers=headers)
                 assert listed.status_code == 200
                 names = {item["name"] for item in listed.json()}
-                assert payload["name"] in names
+                assert payload["name"] not in names
+                assert create.json()["is_test"] is True
+                assert create.json()["is_hidden"] is True
         finally:
             async with async_session_factory() as db_session:
                 await db_session.execute(

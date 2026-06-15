@@ -51,6 +51,11 @@ class PipelineRunStats:
     post_count: int = 0
     comment_author_count: int = 0
     discovery_api_failed: bool = False
+    external_link_count: int = 0
+    commercial_link_count: int = 0
+    social_only_link_count: int = 0
+    missing_contact_or_landing_count: int = 0
+    external_link_types: list[str] | None = None
 
 
 @dataclass
@@ -243,6 +248,11 @@ class InstagramCollectionPipeline:
             if meta.source_post_url:
                 item.source_post_url = (
                     normalize_instagram_post_url(meta.source_post_url) or meta.source_post_url
+                )
+            if meta.source_input_url or (meta.source_meta or {}).get("source_input_url"):
+                item.source_input_url = (
+                    meta.source_input_url
+                    or (meta.source_meta or {}).get("source_input_url")
                 )
             if meta.source_comment_url:
                 item.source_comment_url = (

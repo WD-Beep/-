@@ -43,6 +43,7 @@ class PostAuthorCandidate:
     profile_url: str
     source_hashtag: str | None = None
     source_post_url: str | None = None
+    source_input_url: str | None = None
     source_caption: str | None = None
     post_type: str | None = None
     source_comment_url: str | None = None

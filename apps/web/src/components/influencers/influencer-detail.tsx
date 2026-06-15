@@ -537,33 +537,60 @@ export function InfluencerDetail({ initial }: InfluencerDetailProps) {
 
         {(influencer.source_discovery_type ||
           influencer.source_post_url ||
-          influencer.source_comment_text) && (
+          influencer.source_comment_text ||
+          (influencer.source_records?.length ?? 0) > 0) && (
           <SectionCard title="发现来源" description="该红人如何进入系统">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <InfoItem
-                label="发现类型"
-                value={
-                  influencer.source_discovery_type
-                    ? SOURCE_DISCOVERY_LABELS[influencer.source_discovery_type] ??
-                      influencer.source_discovery_type
-                    : "-"
-                }
-              />
-              <LinkItem label="来源帖子" href={influencer.source_post_url} />
-              <LinkItem label="来源评论链接" href={influencer.source_comment_url} />
-              <InfoItem
-                label="来源评论"
-                value={
-                  influencer.source_comment_text ? (
-                    <span className="font-normal leading-relaxed text-muted-foreground">
-                      {influencer.source_comment_text}
-                    </span>
-                  ) : (
-                    "-"
-                  )
-                }
-              />
-            </div>
+            {(influencer.source_records?.length ?? 0) > 0 ? (
+              <div className="space-y-4">
+                {influencer.source_records!.map((source) => (
+                  <div
+                    key={source.id}
+                    className="rounded-md border bg-muted/20 p-3 grid gap-3 sm:grid-cols-2"
+                  >
+                    <LinkItem label="来源作品链接" href={source.source_post_url} />
+                    <LinkItem label="来源输入链接" href={source.source_input_url} />
+                    <InfoItem label="来源任务" value={source.task_name || (source.task_id ? `#${source.task_id}` : "-")} />
+                    <InfoItem
+                      label="采集时间"
+                      value={
+                        source.collected_at
+                          ? new Date(source.collected_at).toLocaleString("zh-CN")
+                          : "-"
+                      }
+                    />
+                    {source.source_platform ? (
+                      <InfoItem label="来源平台" value={source.source_platform} />
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <InfoItem
+                  label="发现类型"
+                  value={
+                    influencer.source_discovery_type
+                      ? SOURCE_DISCOVERY_LABELS[influencer.source_discovery_type] ??
+                        influencer.source_discovery_type
+                      : "-"
+                  }
+                />
+                <LinkItem label="来源帖子" href={influencer.source_post_url} />
+                <LinkItem label="来源评论链接" href={influencer.source_comment_url} />
+                <InfoItem
+                  label="来源评论"
+                  value={
+                    influencer.source_comment_text ? (
+                      <span className="font-normal leading-relaxed text-muted-foreground">
+                        {influencer.source_comment_text}
+                      </span>
+                    ) : (
+                      "-"
+                    )
+                  }
+                />
+              </div>
+            )}
           </SectionCard>
         )}
 

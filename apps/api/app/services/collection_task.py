@@ -12,6 +12,22 @@ from app.schemas.collection_task import (
     CollectionTaskFilter,
     CollectionTaskRead,
     CollectionTaskUpdate,
+    build_link_import_task_fields,
+    validate_url_only_platforms_for_mode,
+)
+from app.services.url_parser import validate_link_import_url_lines
+from app.services.task_effectiveness import (
+    batch_task_effectiveness_categories,
+    classify_task_effectiveness,
+    effective_sql_condition,
+    ineffective_sql_condition,
+    low_value_result_sql_condition,
+    no_result_sql_condition,
+)
+from app.services.task_retention import (
+    batch_task_has_retention_traces,
+    dispose_collection_task,
+    task_has_obvious_retention,
 )
 from app.schemas.common import PaginatedResponse
 
@@ -61,13 +77,28 @@ class CollectionTaskService:
         return current - reference > timedelta(seconds=threshold_seconds)
 
     @staticmethod
-    def task_read(task: CollectionTask) -> CollectionTaskRead:
+    def task_read(
+        task: CollectionTask,
+        *,
+        has_retention_traces: bool | None = None,
+        effectiveness_category: str | None = None,
+    ) -> CollectionTaskRead:
         stale = CollectionTaskService.is_running_stale(task)
+        retention = (
+            has_retention_traces
+            if has_retention_traces is not None
+            else task_has_obvious_retention(task)
+        )
+        category = effectiveness_category or classify_task_effectiveness(task)
+        running = task.status == CollectionTaskStatus.RUNNING.value
         return CollectionTaskRead.model_validate(task).model_copy(
             update={
                 "stale": stale,
                 "recoverable": stale,
                 "stale_after_seconds": max(settings.collection_running_stale_seconds, 0),
+                "effectiveness_category": category,
+                "is_ineffective": (not running) and category != "effective",
+                "has_retention_traces": retention,
             }
         )
 
@@ -105,6 +136,8 @@ class CollectionTaskService:
             raise ValueError("关键词采集模式至少需要一个关键词")
         if mode_value == CollectionMode.CATEGORY_DISCOVERY.value and not (category or "").strip():
             raise ValueError("类目采集模式必须填写类目")
+        if mode_value == CollectionMode.LINK_IMPORT.value and not input_urls:
+            raise ValueError("链接导入模式至少需要一个有效链接")
         if mode_value in (CollectionMode.URLS.value, CollectionMode.CLUSTERING.value) and not input_urls:
             raise ValueError("链接采集模式至少需要一个主页链接")
         if mode_value == CollectionMode.MIXED.value and not keywords and not input_urls:
@@ -116,6 +149,7 @@ class CollectionTaskService:
 
     @staticmethod
     def _apply_filters(query, filters: CollectionTaskFilter):
+        query = query.where(CollectionTask.is_archived.is_(False))
         if filters.product_id:
             query = query.where(CollectionTask.product_id == filters.product_id)
         if filters.platform:
@@ -125,6 +159,14 @@ class CollectionTaskService:
         if filters.search:
             term = f"%{filters.search}%"
             query = query.where(or_(CollectionTask.name.ilike(term), CollectionTask.category.ilike(term)))
+        if filters.effectiveness == "ineffective":
+            query = query.where(ineffective_sql_condition())
+        elif filters.effectiveness == "effective":
+            query = query.where(effective_sql_condition())
+        elif filters.effectiveness == "low_value_result":
+            query = query.where(low_value_result_sql_condition())
+        elif filters.effectiveness == "no_result":
+            query = query.where(no_result_sql_condition())
         return query
 
     @staticmethod
@@ -142,7 +184,21 @@ class CollectionTaskService:
 
         query = base_query.order_by(CollectionTask.updated_at.desc()).offset((page - 1) * page_size).limit(page_size)
         result = await db.execute(query)
-        items = [CollectionTaskService.task_read(row) for row in result.scalars().all()]
+        rows = result.scalars().all()
+        retention_flags = await batch_task_has_retention_traces(
+            db,
+            [row.id for row in rows],
+            tasks=rows,
+        )
+        categories = await batch_task_effectiveness_categories(db, rows)
+        items = [
+            CollectionTaskService.task_read(
+                row,
+                has_retention_traces=retention_flags.get(row.id, False),
+                effectiveness_category=categories.get(row.id, "no_result"),
+            )
+            for row in rows
+        ]
 
         return PaginatedResponse(
             items=items,
@@ -154,6 +210,14 @@ class CollectionTaskService:
 
     @staticmethod
     async def get_task(db: AsyncSession, task_id: int) -> CollectionTask | None:
+        task = await db.get(CollectionTask, task_id)
+        if task and task.is_archived:
+            return None
+        return task
+
+    @staticmethod
+    async def get_task_including_archived(db: AsyncSession, task_id: int) -> CollectionTask | None:
+        """读取任务（含已归档），供候选池查询/导出等追溯场景使用。"""
         return await db.get(CollectionTask, task_id)
 
     @staticmethod
@@ -196,6 +260,15 @@ class CollectionTaskService:
         merged_mode_value = (
             merged_mode.value if isinstance(merged_mode, CollectionMode) else merged_mode
         )
+        merged_platform = update_data.get("platform", task.platform)
+        merged_platforms = update_data.get("platforms", task.platforms or [])
+        if any(key in update_data for key in ("collection_mode", "platform", "platforms")):
+            mode = merged_mode if isinstance(merged_mode, CollectionMode) else CollectionMode(merged_mode_value)
+            validate_url_only_platforms_for_mode(
+                mode,
+                str(merged_platform or ""),
+                list(merged_platforms or []),
+            )
         if any(
             key in update_data
             for key in (
@@ -216,6 +289,17 @@ class CollectionTaskService:
                 category=merged_category,
             )
 
+        if merged_mode_value == CollectionMode.LINK_IMPORT.value and (
+            "input_urls" in update_data or "collection_mode" in update_data
+        ):
+            valid = validate_link_import_url_lines(merged_urls)
+            update_data.update(build_link_import_task_fields(valid))
+            merged_keywords = update_data.get("keywords", merged_keywords)
+            merged_mode = update_data.get("collection_mode", merged_mode)
+            merged_mode_value = (
+                merged_mode.value if isinstance(merged_mode, CollectionMode) else merged_mode
+            )
+
         if merged_mode_value == CollectionMode.COMPETITOR_PRODUCT.value:
             update_data["comment_discovery_enabled"] = False
 
@@ -226,11 +310,61 @@ class CollectionTaskService:
         return task
 
     @staticmethod
-    async def delete_task(db: AsyncSession, task: CollectionTask) -> None:
-        if task.status == CollectionTaskStatus.RUNNING.value:
-            raise ValueError("任务正在运行中，无法删除")
-        await db.delete(task)
+    async def dispose_task(
+        db: AsyncSession,
+        task: CollectionTask,
+        *,
+        require_ineffective: bool = True,
+    ) -> str:
+        action, reason = await dispose_collection_task(
+            db, task, require_ineffective=require_ineffective
+        )
+        if action == "skipped":
+            raise ValueError(reason or "无法删除该任务")
         await db.commit()
+        return action
+
+    @staticmethod
+    async def dispose_tasks_bulk(
+        db: AsyncSession,
+        tasks: list[CollectionTask],
+        *,
+        require_ineffective: bool = True,
+    ) -> dict[str, list[int]]:
+        deleted_ids: list[int] = []
+        archived_ids: list[int] = []
+        skipped_ids: list[int] = []
+        for task in tasks:
+            action, _ = await dispose_collection_task(
+                db, task, require_ineffective=require_ineffective
+            )
+            if action == "deleted":
+                deleted_ids.append(task.id)
+            elif action == "archived":
+                archived_ids.append(task.id)
+            else:
+                skipped_ids.append(task.id)
+        await db.commit()
+        return {
+            "deleted_ids": deleted_ids,
+            "archived_ids": archived_ids,
+            "skipped_ids": skipped_ids,
+        }
+
+    @staticmethod
+    async def delete_task(db: AsyncSession, task: CollectionTask) -> str:
+        return await CollectionTaskService.dispose_task(db, task, require_ineffective=True)
+
+    @staticmethod
+    async def delete_tasks_bulk(
+        db: AsyncSession,
+        tasks: list[CollectionTask],
+        *,
+        require_ineffective: bool = True,
+    ) -> dict[str, list[int]]:
+        return await CollectionTaskService.dispose_tasks_bulk(
+            db, tasks, require_ineffective=require_ineffective
+        )
 
     @staticmethod
     async def get_recent_tasks(
@@ -239,11 +373,28 @@ class CollectionTaskService:
         *,
         product_id: int | None = None,
     ) -> list[CollectionTaskRead]:
-        query = select(CollectionTask).order_by(CollectionTask.updated_at.desc()).limit(limit)
+        query = (
+            select(CollectionTask)
+            .where(CollectionTask.is_archived.is_(False))
+            .order_by(CollectionTask.updated_at.desc())
+            .limit(limit)
+        )
         if product_id is not None:
             query = query.where(CollectionTask.product_id == product_id)
         result = await db.execute(query)
-        return [CollectionTaskService.task_read(row) for row in result.scalars().all()]
+        rows = result.scalars().all()
+        retention_flags = await batch_task_has_retention_traces(
+            db,
+            [row.id for row in rows],
+            tasks=rows,
+        )
+        return [
+            CollectionTaskService.task_read(
+                row,
+                has_retention_traces=retention_flags.get(row.id, False),
+            )
+            for row in rows
+        ]
 
     @staticmethod
     async def count_by_statuses(
@@ -253,7 +404,11 @@ class CollectionTaskService:
         product_id: int | None = None,
     ) -> int:
         values = [status.value for status in statuses]
-        query = select(func.count()).select_from(CollectionTask).where(CollectionTask.status.in_(values))
+        query = (
+            select(func.count())
+            .select_from(CollectionTask)
+            .where(CollectionTask.status.in_(values), CollectionTask.is_archived.is_(False))
+        )
         if product_id is not None:
             query = query.where(CollectionTask.product_id == product_id)
         count = await db.scalar(query)
@@ -266,7 +421,11 @@ class CollectionTaskService:
         *,
         product_id: int | None = None,
     ) -> int:
-        query = select(func.count()).select_from(CollectionTask).where(CollectionTask.status == status.value)
+        query = (
+            select(func.count())
+            .select_from(CollectionTask)
+            .where(CollectionTask.status == status.value, CollectionTask.is_archived.is_(False))
+        )
         if product_id is not None:
             query = query.where(CollectionTask.product_id == product_id)
         count = await db.scalar(query)

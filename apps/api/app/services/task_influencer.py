@@ -50,7 +50,27 @@ class TaskInfluencerService:
         )
 
         if task.platform:
-            query = query.where(GlobalInfluencerProfile.platform == task.platform)
+            platform = task.platform.strip().lower()
+            platforms = [
+                str(value).strip().lower()
+                for value in (task.platforms or [])
+                if value and str(value).strip()
+            ]
+            if platform == "multi":
+                if platforms:
+                    query = query.where(GlobalInfluencerProfile.platform.in_(platforms))
+            elif platforms and len(platforms) > 1:
+                query = query.where(GlobalInfluencerProfile.platform.in_(platforms))
+            else:
+                query = query.where(GlobalInfluencerProfile.platform == platform)
+        elif task.platforms:
+            platforms = [
+                str(value).strip().lower()
+                for value in task.platforms
+                if value and str(value).strip()
+            ]
+            if platforms:
+                query = query.where(GlobalInfluencerProfile.platform.in_(platforms))
         if task.country:
             query = query.where(GlobalInfluencerProfile.country == task.country)
         if task.category:

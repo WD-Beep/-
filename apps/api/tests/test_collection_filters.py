@@ -243,6 +243,7 @@ def test_facebook_profile_passes_platform_validation():
 def test_url_only_platform_profiles_pass_validation():
     cases = [
         ("pinterest", "targetcreator", "https://www.pinterest.com/targetcreator/"),
+        ("pinterest", "pin:123", "https://www.pinterest.com/pin/123/"),
         ("ltk", "targetcreator", "https://www.shopltk.com/explore/targetcreator"),
         ("shopmy", "targetcreator", "https://shopmy.us/targetcreator"),
     ]
@@ -260,7 +261,7 @@ def test_url_only_platform_profiles_pass_validation():
 
 def test_url_only_platform_reserved_urls_fail_validation():
     cases = [
-        ("pinterest", "pin", "https://www.pinterest.com/pin/123/"),
+        ("pinterest", "login", "https://www.pinterest.com/login/"),
         ("ltk", "explore", "https://www.shopltk.com/post/abc"),
         ("shopmy", "shop", "https://shopmy.us/shop"),
     ]

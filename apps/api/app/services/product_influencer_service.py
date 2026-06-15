@@ -32,10 +32,13 @@ from app.services.influencer_persistence import (
     identity_key_for_item,
 )
 from app.services.influencer_projection import to_influencer_read
+from app.services.influencer_source import InfluencerSourceService
 from app.services.platform_utils import normalize_profile_url
 from app.services.tenant_scope import ALL_PRODUCTS_ID
 
 PRIMARY_PLATFORMS: tuple[str, ...] = ("tiktok", "youtube", "instagram", "facebook")
+LINK_IMPORT_STAT_PLATFORMS: tuple[str, ...] = ("pinterest", "ltk", "shopmy")
+ALL_STAT_PLATFORMS: tuple[str, ...] = PRIMARY_PLATFORMS + LINK_IMPORT_STAT_PLATFORMS
 
 _PRODUCT_UPDATE_FIELDS = frozenset(
     {
@@ -218,13 +221,33 @@ class ProductInfluencerService:
             ordering = (PI.last_collected_at.desc().nullslast(), PI.id.desc())
         query = base_query.order_by(*ordering).offset((page - 1) * page_size).limit(page_size)
         rows = (await db.execute(query)).all()
-        items = [to_influencer_read(pi, gp) for pi, gp in rows]
+        influencer_ids = [pi.id for pi, _gp in rows]
+        sources_by_id = await InfluencerSourceService.list_for_product_influencers(db, influencer_ids)
+        items = [
+            to_influencer_read(pi, gp, sources=sources_by_id.get(pi.id, []))
+            for pi, gp in rows
+        ]
         return PaginatedResponse(
             items=items,
             total=total,
             page=page,
             page_size=page_size,
             pages=math.ceil(total / page_size) if total else 0,
+        )
+
+    @staticmethod
+    async def influencer_read_with_sources(
+        db: AsyncSession,
+        product_row: ProductInfluencer,
+        global_row: GlobalInfluencerProfile,
+    ) -> InfluencerRead:
+        sources_map = await InfluencerSourceService.list_for_product_influencers(
+            db, [product_row.id]
+        )
+        return to_influencer_read(
+            product_row,
+            global_row,
+            sources=sources_map.get(product_row.id, []),
         )
 
     @staticmethod
@@ -285,6 +308,8 @@ class ProductInfluencerService:
             run_at=run_at,
         )
         db.add(record)
+        await db.flush()
+        await InfluencerSourceService.record_from_collected(db, record, item, run_at=run_at)
         try:
             await db.commit()
         except IntegrityError as exc:
@@ -354,7 +379,12 @@ class ProductInfluencerService:
         else:
             ordering = (PI.last_collected_at.desc().nullslast(), PI.id.desc())
         rows = (await db.execute(base_query.order_by(*ordering))).all()
-        return [to_influencer_read(pi, gp) for pi, gp in rows]
+        influencer_ids = [pi.id for pi, _gp in rows]
+        sources_by_id = await InfluencerSourceService.list_for_product_influencers(db, influencer_ids)
+        return [
+            to_influencer_read(pi, gp, sources=sources_by_id.get(pi.id, []))
+            for pi, gp in rows
+        ]
 
     @staticmethod
     async def get_platform_stats(
@@ -378,7 +408,7 @@ class ProductInfluencerService:
 
         buckets: dict[str, PlatformStatItem] = {}
         for platform, pi, gp in rows:
-            platform_key = platform if platform in PRIMARY_PLATFORMS else "other"
+            platform_key = platform if platform in ALL_STAT_PLATFORMS else "other"
             has_mail = bool(gp.final_email or gp.email or gp.public_email or gp.business_email)
             has_reach = bool(
                 gp.final_email or gp.email or gp.public_email or gp.business_email
@@ -406,7 +436,27 @@ class ProductInfluencerService:
                     high_value=current.high_value + (1 if is_high else 0),
                 )
 
-        ordered_keys = [p for p in PRIMARY_PLATFORMS if p in buckets]
-        if "other" in buckets:
+        empty = PlatformStatItem(
+            platform="",
+            total=0,
+            has_email=0,
+            direct_contact=0,
+            missing_contact=0,
+            high_value=0,
+        )
+        ordered_keys = list(PRIMARY_PLATFORMS)
+        for platform_key in LINK_IMPORT_STAT_PLATFORMS:
+            bucket = buckets.get(platform_key)
+            if bucket is not None and bucket.total > 0:
+                ordered_keys.append(platform_key)
+        if "other" in buckets and buckets["other"].total > 0:
             ordered_keys.append("other")
-        return PlatformStatsResponse(items=[buckets[key] for key in ordered_keys])
+        return PlatformStatsResponse(
+            items=[
+                buckets.get(
+                    key,
+                    empty.model_copy(update={"platform": key}),
+                )
+                for key in ordered_keys
+            ]
+        )

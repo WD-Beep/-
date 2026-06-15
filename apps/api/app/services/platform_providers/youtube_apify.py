@@ -258,7 +258,7 @@ def _profile_from_apify_item(item: dict, *, source_keyword: str | None) -> Platf
         other_social_links=external_links,
 
         source_url=video_url,
-
+        source_post_url=video_url,
         recent_post_titles=[video_title] if video_title else [],
 
         recent_post_urls=[video_url] if video_url else [],
@@ -285,7 +285,16 @@ def _apify_proxy_config() -> dict:
 
 
 
-def _discovery_deadline() -> float:
+def _discovery_deadline(task: CollectionTask | None = None) -> float:
+
+    if task is not None:
+        from app.services.competitor_product_discovery import is_competitor_product_task
+
+        if is_competitor_product_task(task):
+            return time.perf_counter() + max(
+                30,
+                settings.competitor_product_platform_timeout_seconds,
+            )
 
     return time.perf_counter() + max(30, settings.youtube_discovery_max_duration_seconds)
 
@@ -370,6 +379,15 @@ class YouTubeApifyProvider:
 
 
         keywords = normalize_keywords([str(k) for k in (task.keywords or [])])
+        from app.services.competitor_product_discovery import (
+            competitor_discovery_apify_timeout_seconds,
+            competitor_discovery_keyword_timeout_seconds,
+            filter_competitor_phrase_keywords,
+            is_competitor_product_task,
+        )
+
+        if is_competitor_product_task(task):
+            keywords = filter_competitor_phrase_keywords(keywords)
 
         input_urls = [u.strip() for u in (task.input_urls or []) if u and str(u).strip()]
 
@@ -399,7 +417,7 @@ class YouTubeApifyProvider:
 
         discovery_started = time.perf_counter()
 
-        deadline = _discovery_deadline()
+        deadline = _discovery_deadline(task)
 
 
 
@@ -430,8 +448,10 @@ class YouTubeApifyProvider:
         total_item_stats = YouTubeDedupeStats()
 
         keyword_timeout = max(1, settings.youtube_discovery_keyword_timeout_seconds)
-
         apify_timeout = max(1, settings.apify_youtube_timeout_seconds)
+        if is_competitor_product_task(task):
+            keyword_timeout = competitor_discovery_keyword_timeout_seconds(keyword_timeout)
+            apify_timeout = competitor_discovery_apify_timeout_seconds(apify_timeout)
 
         concurrency = max(1, min(APIFY_KEYWORD_CONCURRENCY_CAP, settings.youtube_apify_keyword_concurrency))
 

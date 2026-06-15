@@ -69,24 +69,28 @@ def determine_task_status(
 
 
 def _link_signal_summary(stats: CollectionFunnelStats) -> str | None:
-    if stats.external_link_count <= 0:
+    external_link_count = getattr(stats, "external_link_count", 0)
+    if external_link_count <= 0:
         return None
 
     labels: list[str] = []
-    for link_type in stats.external_link_types or []:
+    for link_type in getattr(stats, "external_link_types", None) or []:
         label = _LINK_TYPE_LABELS.get(link_type, link_type)
         if label not in labels:
             labels.append(label)
 
-    parts = [f"已发现主页外链 {stats.external_link_count} 个"]
+    parts = [f"已发现主页外链 {external_link_count} 个"]
     if labels:
         parts.append(f"类型包括 {', '.join(labels[:6])}")
-    if stats.commercial_link_count > 0:
-        parts.append(f"其中商业外链 {stats.commercial_link_count} 个")
-    if stats.social_only_link_count > 0:
-        parts.append(f"{stats.social_only_link_count} 个仅有社媒链接")
-    if stats.missing_contact_or_landing_count > 0:
-        parts.append(f"{stats.missing_contact_or_landing_count} 个缺少有效联系方式或商业落地页")
+    commercial_link_count = getattr(stats, "commercial_link_count", 0)
+    if commercial_link_count > 0:
+        parts.append(f"其中商业外链 {commercial_link_count} 个")
+    social_only_link_count = getattr(stats, "social_only_link_count", 0)
+    if social_only_link_count > 0:
+        parts.append(f"{social_only_link_count} 个仅有社媒链接")
+    missing_contact_or_landing_count = getattr(stats, "missing_contact_or_landing_count", 0)
+    if missing_contact_or_landing_count > 0:
+        parts.append(f"{missing_contact_or_landing_count} 个缺少有效联系方式或商业落地页")
     return "；".join(parts)
 
 
@@ -289,6 +293,45 @@ def _hydration_progress_note(
     return f"正在补采主页（{completed}/{profiles_hydrating_total}）"
 
 
+def _platform_progress_note(
+    *,
+    current_platform: str | None,
+    platforms_completed: int | None,
+    platforms_total: int | None,
+    platform_discovery_status: dict[str, str] | None,
+) -> str | None:
+    labels = {
+        "tiktok": "TikTok",
+        "youtube": "YouTube",
+        "facebook": "Facebook",
+        "instagram": "Instagram",
+    }
+    status_labels = {
+        "queued": "排队",
+        "searching": "搜索中",
+        "done": "完成",
+        "partial": "部分成功",
+        "timeout_skipped": "超时跳过",
+        "failed": "失败",
+    }
+    if platform_discovery_status:
+        bits = []
+        for name, status in platform_discovery_status.items():
+            label = labels.get(name, name)
+            state = status_labels.get(status, status)
+            bits.append(f"{label}{state}")
+        if bits:
+            return "平台进度：" + "、".join(bits)
+    if current_platform:
+        label = labels.get(current_platform, current_platform)
+        if platforms_total and platforms_completed is not None:
+            return f"正在搜索 {label}（平台 {platforms_completed}/{platforms_total}）"
+        return f"正在搜索 {label}"
+    if platforms_total and platforms_completed is not None and platforms_total > 0:
+        return f"多平台搜索中（{platforms_completed}/{platforms_total}）"
+    return None
+
+
 def build_running_discovery_summary(
     *,
     phase: str,
@@ -308,6 +351,10 @@ def build_running_discovery_summary(
     profiles_hydrating_completed: int | None = None,
     partial_skip_note: str | None = None,
     platform: str | None = None,
+    current_platform: str | None = None,
+    platforms_completed: int | None = None,
+    platforms_total: int | None = None,
+    platform_discovery_status: dict[str, str] | None = None,
 ) -> str:
     phase_labels = {
         "discovery": "发现候选",
@@ -326,6 +373,12 @@ def build_running_discovery_summary(
     hydration_note = _hydration_progress_note(
         profiles_hydrating_total=profiles_hydrating_total,
         profiles_hydrating_completed=profiles_hydrating_completed,
+    )
+    platform_note = _platform_progress_note(
+        current_platform=current_platform,
+        platforms_completed=platforms_completed,
+        platforms_total=platforms_total,
+        platform_discovery_status=platform_discovery_status,
     )
     if rate_limited:
         prefix = "平台接口限流，系统正在降速重试；"
@@ -354,7 +407,7 @@ def build_running_discovery_summary(
             hint = "可能原因：正在补采频道 About / 主页，请稍候"
         else:
             hint = "可能原因：处理中，请稍候"
-        notes = [note for note in (keyword_note, hydration_note) if note]
+        notes = [note for note in (platform_note, keyword_note, hydration_note) if note]
         if notes:
             return f"{prefix}{body}。{'。'.join(notes)}。{hint}"
         return f"{prefix}{body}。{hint}"
@@ -362,7 +415,7 @@ def build_running_discovery_summary(
     if discovered > 0 and inserted == 0 and filtered_out > 0:
         return f"{prefix}{body}。部分账号已被过滤（粉丝门槛 / 排除词 / 主页无效等）"
 
-    notes = [note for note in (keyword_note, hydration_note) if note]
+    notes = [note for note in (platform_note, keyword_note, hydration_note) if note]
     if notes:
         return f"{prefix}{body}。{'。'.join(notes)}"
     return f"{prefix}{body}"

@@ -13,6 +13,7 @@ type PlatformCard = {
   key: PlatformFilterKey;
   stats: PlatformStatCounts;
   label: string;
+  hint?: string;
 };
 
 type PlatformOrganizerProps = {
@@ -98,6 +99,9 @@ function PlatformCardButton({
         <StatChip label="缺联" value={card.stats.missing_contact} tone="warning" />
         <StatChip label="高价值" value={card.stats.high_value} tone="muted" />
       </div>
+      {card.hint ? (
+        <p className="mt-2 line-clamp-2 text-[10px] leading-snug text-muted-foreground">{card.hint}</p>
+      ) : null}
     </button>
   );
 }

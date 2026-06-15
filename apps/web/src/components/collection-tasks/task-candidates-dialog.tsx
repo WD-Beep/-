@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Copy, Download, ExternalLink, Loader2, X } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import {
   COLLECTION_TASK_POLL_INTERVAL_MS,
   downloadCollectionTaskCandidatesExport,
+  enrichLinkSeedProfiles,
   fetchCollectionTaskCandidates,
   isCollectionTaskRunning,
   type CollectionTask,
@@ -18,6 +19,9 @@ import {
   CANDIDATE_FAILURE_LABELS,
   CANDIDATE_SOURCE_TYPE_LABELS,
   CANDIDATE_STATUS_LABELS,
+  candidateSeedEnrichmentStatus,
+  candidateSeedPlatformLabel,
+  platformLabel,
 } from "@/lib/labels";
 
 type TaskCandidatesDialogProps = {
@@ -29,10 +33,36 @@ type TaskCandidatesDialogProps = {
 const STATUS_FILTER_OPTIONS = [
   { value: "", label: "全部状态" },
   { value: "inserted", label: "已入库" },
+  { value: "not_inserted", label: "未入库" },
   { value: "pending_profile", label: "待补采" },
   { value: "profile_failed", label: "补采失败" },
   { value: "filtered_out", label: "已过滤" },
   { value: "duplicate", label: "重复" },
+];
+
+const QUALITY_FILTER_OPTIONS = [
+  { value: "", label: "高价值 / 全部" },
+  { value: "high", label: "仅高价值" },
+  { value: "low", label: "非高价值" },
+];
+
+const CONTACT_FILTER_OPTIONS = [
+  { value: "", label: "联系方式 / 全部" },
+  { value: "email", label: "有邮箱" },
+  { value: "contact", label: "有联系方式" },
+  { value: "pending", label: "待补采" },
+  { value: "missing", label: "无联系方式" },
+];
+
+const PLATFORM_FILTER_OPTIONS = [
+  { value: "", label: "全部平台" },
+  { value: "instagram", label: "Instagram" },
+  { value: "youtube", label: "YouTube" },
+  { value: "tiktok", label: "TikTok" },
+  { value: "facebook", label: "Facebook" },
+  { value: "pinterest", label: "Pinterest" },
+  { value: "ltk", label: "LTK" },
+  { value: "shopmy", label: "ShopMy" },
 ];
 
 const SOURCE_TYPE_FILTER_OPTIONS = [
@@ -57,12 +87,33 @@ const SOURCE_DISCOVERY_FILTER_OPTIONS = [
 const FAILURE_FILTER_OPTIONS = [
   { value: "", label: "全部原因" },
   { value: "below_min_followers", label: "粉丝未达标" },
+  { value: "below_min_engagement_rate", label: "互动率未达标" },
+  { value: "above_max_followers", label: "粉丝超过上限" },
+  { value: "missing_engagement_rate", label: "互动率缺失" },
+  { value: "missing_email", label: "未发现邮箱" },
+  { value: "missing_contact", label: "未发现联系方式" },
   { value: "excluded_keyword", label: "排除词" },
   { value: "profile_fetch_failed", label: "补采失败" },
   { value: "private_account", label: "私密账号" },
   { value: "missing_profile_detail", label: "数据缺失" },
   { value: "duplicate", label: "重复" },
 ];
+
+function contactStatusLabel(candidate: CollectionTaskCandidate): string {
+  if (candidate.contact_status === "pending") return "待补采";
+  if (candidate.has_email) return "有邮箱";
+  if (candidate.has_contact) return "有联系方式";
+  if (candidate.contact_status === "missing") return "无联系方式";
+  return "-";
+}
+
+function blockedReason(candidate: CollectionTaskCandidate): string {
+  if (candidate.insert_blocked_reason) return candidate.insert_blocked_reason;
+  if (candidate.failure_reason) {
+    return CANDIDATE_FAILURE_LABELS[candidate.failure_reason] ?? candidate.failure_reason;
+  }
+  return "-";
+}
 
 function formatFollowers(value: number | null): string {
   if (value == null) return "-";
@@ -102,7 +153,74 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
   const [failureFilter, setFailureFilter] = useState("");
   const [sourceTypeFilter, setSourceTypeFilter] = useState("");
   const [sourceDiscoveryFilter, setSourceDiscoveryFilter] = useState("");
+  const [qualityFilter, setQualityFilter] = useState("");
+  const [contactFilter, setContactFilter] = useState("");
+  const [platformFilter, setPlatformFilter] = useState("");
+  const [minFollowersFilter, setMinFollowersFilter] = useState("");
+  const [maxFollowersFilter, setMaxFollowersFilter] = useState("");
+  const [minEngagementFilter, setMinEngagementFilter] = useState("");
+  const [maxEngagementFilter, setMaxEngagementFilter] = useState("");
   const [search, setSearch] = useState("");
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [statsMismatch, setStatsMismatch] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open || !task) return;
+    queueMicrotask(() => {
+      setExportError(null);
+      setStatsMismatch(null);
+      setPage(1);
+      if ((task.inserted_count ?? task.result_count ?? 0) > 0) {
+        setStatusFilter("inserted");
+      } else {
+        setStatusFilter("");
+      }
+    });
+  }, [open, task]);
+
+  const buildCandidateQuery = useCallback((pageNumber = page) => {
+    const minFollowers = minFollowersFilter.trim() ? Number(minFollowersFilter) : undefined;
+    const maxFollowers = maxFollowersFilter.trim() ? Number(maxFollowersFilter) : undefined;
+    const minEngagement = minEngagementFilter.trim() ? Number(minEngagementFilter) : undefined;
+    const maxEngagement = maxEngagementFilter.trim() ? Number(maxEngagementFilter) : undefined;
+    return {
+      page: pageNumber,
+      page_size: 20,
+      status: statusFilter || undefined,
+      failure_reason: failureFilter || undefined,
+      source_type: sourceTypeFilter || undefined,
+      source_discovery_type: sourceDiscoveryFilter || undefined,
+      platform: platformFilter || undefined,
+      high_value: qualityFilter === "high" ? true : qualityFilter === "low" ? false : undefined,
+      has_email: contactFilter === "email" ? true : undefined,
+      has_contact: contactFilter === "contact" ? true : undefined,
+      contact_status:
+        contactFilter === "pending" ? "pending" : contactFilter === "missing" ? "missing" : undefined,
+      min_followers_count:
+        minFollowers != null && Number.isFinite(minFollowers) ? minFollowers : undefined,
+      max_followers_count:
+        maxFollowers != null && Number.isFinite(maxFollowers) ? maxFollowers : undefined,
+      min_engagement_rate:
+        minEngagement != null && Number.isFinite(minEngagement) ? minEngagement : undefined,
+      max_engagement_rate:
+        maxEngagement != null && Number.isFinite(maxEngagement) ? maxEngagement : undefined,
+      search: search.trim() || undefined,
+    };
+  }, [
+    page,
+    statusFilter,
+    failureFilter,
+    sourceTypeFilter,
+    sourceDiscoveryFilter,
+    platformFilter,
+    qualityFilter,
+    contactFilter,
+    minFollowersFilter,
+    maxFollowersFilter,
+    minEngagementFilter,
+    maxEngagementFilter,
+    search,
+  ]);
 
   useEffect(() => {
     if (!open || !task) return;
@@ -113,19 +231,23 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
       if (!silent) setLoading(true);
       setError(null);
       try {
-        const result = await fetchCollectionTaskCandidates(activeTask.id, {
-          page,
-          page_size: 20,
-          status: statusFilter || undefined,
-          failure_reason: failureFilter || undefined,
-          source_type: sourceTypeFilter || undefined,
-          source_discovery_type: sourceDiscoveryFilter || undefined,
-          search: search.trim() || undefined,
-        });
+        const result = await fetchCollectionTaskCandidates(activeTask.id, buildCandidateQuery());
         if (cancelled) return;
         setItems(result.items);
         setTotal(result.total);
         setPages(result.pages);
+        const insertedExpected = activeTask.inserted_count ?? activeTask.result_count ?? 0;
+        if (
+          statusFilter === "inserted" &&
+          insertedExpected > 0 &&
+          result.total === 0
+        ) {
+          setStatsMismatch(
+            "任务统计显示有入库数据，但当前筛选下暂无候选记录。系统已尝试补齐历史明细；请切换到「全部状态」查看，或重新运行任务。",
+          );
+        } else {
+          setStatsMismatch(null);
+        }
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "加载候选列表失败");
@@ -154,11 +276,19 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
     failureFilter,
     sourceTypeFilter,
     sourceDiscoveryFilter,
+    qualityFilter,
+    contactFilter,
+    platformFilter,
+    minFollowersFilter,
+    maxFollowersFilter,
+    minEngagementFilter,
+    maxEngagementFilter,
     search,
     task?.status,
     task?.updated_at,
     task?.discovered_count,
     task?.inserted_count,
+    buildCandidateQuery,
   ]);
   function resetFilters() {
     setPage(1);
@@ -167,14 +297,16 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
   if (!open || !task) return null;
 
   const showCompetitorColumns = task.collection_mode === "competitor_product";
+  const seedEnrichment = (task.run_checkpoint?.link_seed_enrichment ?? null) as
+    | { attempted?: number; social_profiles_found?: number; low_value_seed_count?: number }
+    | null;
+  const canEnrichLinkSeeds =
+    task.collection_mode === "link_import" &&
+    (task.platforms ?? []).some((p) => ["ltk", "shopmy", "pinterest"].includes(String(p).toLowerCase()));
 
-  const exportQuery = {
-    status: statusFilter || undefined,
-    failure_reason: failureFilter || undefined,
-    source_type: sourceTypeFilter || undefined,
-    source_discovery_type: sourceDiscoveryFilter || undefined,
-    search: search.trim() || undefined,
-  };
+  const exportQuery = buildCandidateQuery(1);
+  delete (exportQuery as { page?: number; page_size?: number }).page;
+  delete (exportQuery as { page?: number; page_size?: number }).page_size;
 
   const statusMeta = (status: string) =>
     CANDIDATE_STATUS_LABELS[status] ?? { label: status, variant: "secondary" as const };
@@ -184,11 +316,14 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
       <div
         role="dialog"
         aria-modal="true"
+        aria-labelledby="task-candidates-title"
         className="flex max-h-[90vh] w-full max-w-6xl flex-col rounded-lg border bg-background shadow-lg"
       >
         <div className="flex items-start justify-between gap-4 border-b px-4 py-3">
           <div>
-            <h2 className="text-lg font-semibold">候选池 · {task.name}</h2>
+            <h2 id="task-candidates-title" className="text-lg font-semibold">
+              候选池 · {task.name}
+            </h2>
             <p className="mt-1 text-sm text-muted-foreground">
               {isCollectionTaskRunning(task) ? (
                 <span className="inline-flex items-center gap-1.5">
@@ -205,16 +340,43 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
               {(task.filtered_excluded_keyword_count ?? 0) > 0
                 ? ` · 排除词 ${task.filtered_excluded_keyword_count}`
                 : ""}
+              {seedEnrichment?.attempted
+                ? ` · LTK 补全：尝试 ${seedEnrichment.attempted} 条，找到社媒 ${seedEnrichment.social_profiles_found ?? 0} 个`
+                : ""}
+              {canEnrichLinkSeeds && !isCollectionTaskRunning(task)
+                ? " · 仅 LTK 链接无法判断红人价值，可继续补采 Instagram/TikTok/YouTube"
+                : ""}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            {canEnrichLinkSeeds ? (
+              <Button
+                size="sm"
+                variant="secondary"
+                className="h-8 gap-1.5"
+                disabled={isCollectionTaskRunning(task)}
+                title="通过 Instagram/TikTok/YouTube 反查补全 LTK seed 资料"
+                onClick={() => {
+                  void enrichLinkSeedProfiles(task.id).catch(() => undefined);
+                }}
+              >
+                继续补采社媒资料
+              </Button>
+            ) : null}
             <Button
               size="sm"
               variant="outline"
               className="h-8 gap-1.5"
               title="导出当前筛选条件下的候选池 Excel"
               onClick={() => {
-                void downloadCollectionTaskCandidatesExport(task.id, exportQuery);
+                setExportError(null);
+                void downloadCollectionTaskCandidatesExport(task.id, exportQuery).catch((err) => {
+                  setExportError(
+                    err instanceof Error
+                      ? err.message
+                      : "导出失败，请清空筛选或切换到「全部状态」后重试",
+                  );
+                });
               }}
             >
               <Download className="h-3.5 w-3.5" />
@@ -292,10 +454,104 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
               </option>
             ))}
           </select>
+          <select
+            className="h-8 rounded-md border bg-background px-2 text-sm"
+            value={qualityFilter}
+            onChange={(e) => {
+              setQualityFilter(e.target.value);
+              resetFilters();
+            }}
+          >
+            {QUALITY_FILTER_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+          <select
+            className="h-8 rounded-md border bg-background px-2 text-sm"
+            value={contactFilter}
+            onChange={(e) => {
+              setContactFilter(e.target.value);
+              resetFilters();
+            }}
+          >
+            {CONTACT_FILTER_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+          <select
+            className="h-8 rounded-md border bg-background px-2 text-sm"
+            value={platformFilter}
+            onChange={(e) => {
+              setPlatformFilter(e.target.value);
+              resetFilters();
+            }}
+          >
+            {PLATFORM_FILTER_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+          <Input
+            className="h-8 w-28"
+            type="number"
+            min={0}
+            placeholder="最低粉丝"
+            value={minFollowersFilter}
+            onChange={(e) => {
+              setMinFollowersFilter(e.target.value);
+              resetFilters();
+            }}
+          />
+          <Input
+            className="h-8 w-28"
+            type="number"
+            min={0}
+            placeholder="最高粉丝"
+            value={maxFollowersFilter}
+            onChange={(e) => {
+              setMaxFollowersFilter(e.target.value);
+              resetFilters();
+            }}
+          />
+          <Input
+            className="h-8 w-24"
+            type="number"
+            min={0}
+            step={0.01}
+            placeholder="最低互动率%"
+            value={minEngagementFilter}
+            onChange={(e) => {
+              setMinEngagementFilter(e.target.value);
+              resetFilters();
+            }}
+          />
+          <Input
+            className="h-8 w-24"
+            type="number"
+            min={0}
+            step={0.01}
+            placeholder="最高互动率%"
+            value={maxEngagementFilter}
+            onChange={(e) => {
+              setMaxEngagementFilter(e.target.value);
+              resetFilters();
+            }}
+          />
           <span className="text-xs text-muted-foreground">共 {total} 条</span>
         </div>
 
         <div className="min-h-0 flex-1 overflow-auto px-4 py-2">
+          {exportError ? <p className="py-2 text-sm text-destructive">{exportError}</p> : null}
+          {statsMismatch ? (
+            <p className="mb-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              {statsMismatch}
+            </p>
+          ) : null}
           {error ? <p className="py-4 text-sm text-destructive">{error}</p> : null}
           {loading ? (
             <div className="flex items-center justify-center py-12 text-muted-foreground">
@@ -304,7 +560,9 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
             </div>
           ) : items.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
-              暂无候选记录。任务运行完成后会写入发现、补采失败与过滤账号。
+              {statusFilter
+                ? "当前筛选无候选记录。请清空筛选或切换到「全部状态」。"
+                : "暂无候选记录。任务运行完成后会写入发现、补采失败与过滤账号。"}
             </p>
           ) : (
             <table className="w-full text-sm">
@@ -317,9 +575,12 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
                   ) : null}
                   <th className="py-2 pr-2 font-medium">粉丝</th>
                   <th className="py-2 pr-2 font-medium">互动率</th>
+                  <th className="py-2 pr-2 font-medium">联系方式</th>
+                  <th className="py-2 pr-2 font-medium">高价值</th>
                   <th className="py-2 pr-2 font-medium">状态</th>
                   <th className="py-2 pr-2 font-medium">未入库原因</th>
                   <th className="py-2 pr-2 font-medium">来源帖/评论</th>
+                  <th className="py-2 pr-2 font-medium">来源输入链接</th>
                   <th className="py-2 font-medium">操作</th>
                 </tr>
               </thead>
@@ -327,9 +588,7 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
                 {items.map((c) => {
                   const sm = statusMeta(c.status);
                   const meta = c.source_meta;
-                  const reasonLabel = c.failure_reason
-                    ? (CANDIDATE_FAILURE_LABELS[c.failure_reason] ?? c.failure_reason)
-                    : "-";
+                  const reasonLabel = blockedReason(c);
                   const sourceRef =
                     meta?.source_caption?.slice(0, 80) ||
                     c.source_caption?.slice(0, 80) ||
@@ -341,7 +600,21 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
                     <tr key={c.id} className="border-b align-top last:border-0">
                       <td className="py-2 pr-2">
                         <div className="font-medium">@{c.username}</div>
-                        <div className="max-w-[140px] truncate text-xs text-muted-foreground" title={c.profile_url}>
+                        <div className="text-xs text-muted-foreground">
+                          平台: {platformLabel(c.platform)}
+                          {candidateSeedPlatformLabel(c)
+                            ? ` · 来源: ${candidateSeedPlatformLabel(c)}`
+                            : ""}
+                        </div>
+                        {candidateSeedEnrichmentStatus(c) ? (
+                          <div className="mt-0.5 text-xs text-muted-foreground">
+                            {candidateSeedEnrichmentStatus(c)}
+                          </div>
+                        ) : null}
+                        <div
+                          className="max-w-[140px] truncate text-xs text-muted-foreground"
+                          title={c.profile_url}
+                        >
                           {c.profile_url}
                         </div>
                       </td>
@@ -375,6 +648,20 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
                       ) : null}
                       <td className="py-2 pr-2 whitespace-nowrap">{formatFollowers(c.followers_count)}</td>
                       <td className="py-2 pr-2 whitespace-nowrap">{formatEngagement(c.engagement_rate)}</td>
+                      <td className="py-2 pr-2 text-xs whitespace-nowrap">{contactStatusLabel(c)}</td>
+                      <td className="py-2 pr-2">
+                        {c.is_high_value == null ? (
+                          <span className="text-xs text-muted-foreground">-</span>
+                        ) : c.is_high_value ? (
+                          <Badge variant="success" className="text-xs">
+                            高价值
+                          </Badge>
+                        ) : (
+                          <Badge variant="secondary" className="text-xs">
+                            未达标
+                          </Badge>
+                        )}
+                      </td>
                       <td className="py-2 pr-2">
                         <Badge variant={sm.variant} className="text-xs">
                           {sm.label}
@@ -393,6 +680,18 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
                           {sourceRef}
                         </div>
                       </td>
+                      <td className="max-w-[180px] py-2 pr-2">
+                        {c.source_input_url ? (
+                          <div
+                            className="line-clamp-2 break-all text-xs text-muted-foreground"
+                            title={c.source_input_url}
+                          >
+                            {c.source_input_url}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">-</span>
+                        )}
+                      </td>
                       <td className="py-2">
                         <div className="flex flex-wrap gap-1">
                           <Button
@@ -409,12 +708,25 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
                               size="sm"
                               variant="ghost"
                               className="h-7 px-2"
-                              title="打开来源帖子"
+                              title="打开来源作品链接"
                               onClick={() =>
                                 window.open(c.source_post_url!, "_blank", "noopener,noreferrer")
                               }
                             >
                               帖
+                            </Button>
+                          ) : null}
+                          {c.source_input_url ? (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 px-2"
+                              title="打开来源输入链接"
+                              onClick={() =>
+                                window.open(c.source_input_url!, "_blank", "noopener,noreferrer")
+                              }
+                            >
+                              入
                             </Button>
                           ) : null}
                           <Button

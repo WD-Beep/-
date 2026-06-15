@@ -119,6 +119,15 @@ class TikTokApifyProvider:
             )
 
         keywords = [k.strip().lstrip("#") for k in (task.keywords or []) if k and str(k).strip()]
+        from app.services.competitor_product_discovery import (
+            competitor_discovery_apify_timeout_seconds,
+            competitor_discovery_keyword_timeout_seconds,
+            filter_competitor_phrase_keywords,
+            is_competitor_product_task,
+        )
+
+        if is_competitor_product_task(task):
+            keywords = filter_competitor_phrase_keywords(keywords)
         if not keywords:
             msg = "TikTok 采集至少需要一个关键词或 hashtag"
             return PlatformDiscoveryResult(platform="tiktok", errors=[msg], skip_reason=msg)
@@ -126,6 +135,11 @@ class TikTokApifyProvider:
         limit = discovery_fetch_limit(task)
         max_results = min(max(limit * 3, 20), 100)
         keyword_timeout = max(1, settings.apify_tiktok_timeout_seconds)
+        if is_competitor_product_task(task):
+            keyword_timeout = competitor_discovery_keyword_timeout_seconds(keyword_timeout)
+            apify_timeout = competitor_discovery_apify_timeout_seconds(keyword_timeout)
+        else:
+            apify_timeout = keyword_timeout
         concurrency = max(1, settings.tiktok_apify_keyword_concurrency)
         region = tiktok_region_from_task(task)
 
@@ -154,7 +168,7 @@ class TikTokApifyProvider:
                     run_actor_sync(
                         settings.apify_tiktok_actor_id,
                         run_input,
-                        timeout=keyword_timeout,
+                        timeout=apify_timeout,
                         max_retries=settings.apify_tiktok_max_retries,
                     ),
                     timeout=keyword_timeout + 5,

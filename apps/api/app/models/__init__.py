@@ -14,12 +14,14 @@ from app.models.influencer_followup import InfluencerFollowup
 from app.models.link_import_batch import LinkImportBatch
 from app.models.message_template import MessageTemplate
 from app.models.product_influencer import ProductInfluencer
+from app.models.product_influencer_source import ProductInfluencerSource
 from app.models.tenant import Product, User, Workspace, WorkspaceMember
 
 __all__ = [
     "Influencer",
     "GlobalInfluencerProfile",
     "ProductInfluencer",
+    "ProductInfluencerSource",
     "InfluencerFollowup",
     "CollectionTask",
     "CollectionTaskCandidate",

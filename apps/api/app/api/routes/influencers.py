@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.deps.tenant import TenantContext, get_tenant_context
-from app.services.influencer_projection import merged_influencer_for_ai, to_influencer_read
+from app.services.influencer_projection import merged_influencer_for_ai
 from app.services.product_influencer_service import ProductInfluencerService
 from app.schemas.common import PaginatedResponse
 from app.schemas.contact import ContactRefreshResult
@@ -20,6 +20,7 @@ from app.schemas.influencer_lead import FollowupCreate, FollowupRead, Influencer
 from app.services.contact_discovery import ContactDiscoveryService
 from app.services.export import build_influencer_library_excel
 from app.services.influencer_lead import InfluencerLeadService
+from app.services.influencer_source import InfluencerSourceService
 
 router = APIRouter(prefix="/influencers", tags=["influencers"])
 
@@ -212,7 +213,14 @@ async def export_influencers_excel(
             detail="没有符合筛选条件的红人数据，无法导出。请调整筛选条件后重试。",
         )
 
-    content, filename = build_influencer_library_excel(influencers)
+    influencer_ids = [item.id for item in influencers if item.id is not None]
+    sources_by_influencer_id = await InfluencerSourceService.list_for_product_influencers(
+        db, influencer_ids
+    )
+    content, filename = build_influencer_library_excel(
+        influencers,
+        sources_by_influencer_id=sources_by_influencer_id,
+    )
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
 
     return StreamingResponse(
@@ -234,7 +242,7 @@ async def create_influencer(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    return to_influencer_read(product_row, global_row)
+    return await ProductInfluencerService.influencer_read_with_sources(db, product_row, global_row)
 
 
 @router.get("/{influencer_id}", response_model=InfluencerRead)
@@ -249,7 +257,7 @@ async def get_influencer(
     if not pair:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Influencer not found")
     product_row, global_row = pair
-    return to_influencer_read(product_row, global_row)
+    return await ProductInfluencerService.influencer_read_with_sources(db, product_row, global_row)
 
 
 @router.patch("/{influencer_id}", response_model=InfluencerRead)
@@ -266,7 +274,7 @@ async def update_influencer(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    return to_influencer_read(product_row, global_row)
+    return await ProductInfluencerService.influencer_read_with_sources(db, product_row, global_row)
 
 
 @router.patch("/{influencer_id}/lead", response_model=InfluencerRead)
@@ -281,7 +289,7 @@ async def update_influencer_lead(
         product_row = await InfluencerLeadService.update_product_lead(db, product_row, data)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return to_influencer_read(product_row, global_row)
+    return await ProductInfluencerService.influencer_read_with_sources(db, product_row, global_row)
 
 
 @router.get("/{influencer_id}/followups", response_model=list[FollowupRead])
@@ -327,7 +335,9 @@ async def refresh_influencer_contact(
     await db.refresh(global_row)
     await db.refresh(product_row)
     return ContactRefreshResult(
-        influencer=to_influencer_read(product_row, global_row),
+        influencer=await ProductInfluencerService.influencer_read_with_sources(
+            db, product_row, global_row
+        ),
         contact_fetch_status=result.contact_fetch_status,
         contact_fetch_error=result.contact_fetch_error,
         contact_discovered_at=result.contact_discovered_at,

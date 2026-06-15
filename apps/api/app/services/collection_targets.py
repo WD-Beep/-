@@ -92,6 +92,10 @@ def should_stop_overfetch_round(*, new_unique_count: int) -> str | None:
 
 def max_overfetch_rounds_for_task(task: CollectionTask) -> int:
     """小目标减少补采轮次，降低无效等待。"""
+    from app.services.competitor_product_discovery import is_competitor_product_task
+
+    if is_competitor_product_task(task):
+        return 1
     target = target_qualified_count(task)
     if target <= 14:
         return 2

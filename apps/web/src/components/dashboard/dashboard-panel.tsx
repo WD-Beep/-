@@ -182,7 +182,7 @@ export function DashboardPanel() {
 
   useEffect(() => {
     if (productId === null) {
-      setLoading(false);
+      queueMicrotask(() => setLoading(false));
       return;
     }
     queueMicrotask(() => {

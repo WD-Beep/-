@@ -7,6 +7,12 @@ class PlatformCapabilityRead(BaseModel):
     status: str
     message: str
     endpoints: list[str] = Field(default_factory=list)
+    keyword_discovery: bool = False
+    link_import: bool = False
+    product_seed: bool = False
+    link_import_hint: str | None = None
+    discovery_category: str = "link_completion"
+    external_link_discovery: bool = False
 
 
 class PlatformCapabilitiesResponse(BaseModel):

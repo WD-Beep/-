@@ -632,11 +632,24 @@ def test_list_platform_capabilities_includes_four_platforms():
     with patch.object(settings, "api_direct_api_key", "test-key"):
         caps = list_platform_capabilities()
     platforms = {cap.platform for cap in caps}
-    assert platforms == {"instagram", "tiktok", "youtube", "facebook", "pinterest", "ltk", "shopmy"}
+    assert platforms == {
+        "instagram",
+        "tiktok",
+        "youtube",
+        "facebook",
+        "pinterest",
+        "ltk",
+        "shopmy",
+        "amazon",
+    }
     status_by_platform = {cap.platform: cap.status for cap in caps}
     assert status_by_platform["pinterest"] == "url_only"
     assert status_by_platform["ltk"] == "url_only"
     assert status_by_platform["shopmy"] == "url_only"
+    flags = {cap.platform: cap.keyword_discovery for cap in caps}
+    assert flags["instagram"] is True
+    assert flags["pinterest"] is False
+    assert flags["amazon"] is False
 
 
 def test_url_only_platforms_parse_input_urls():
@@ -743,7 +756,7 @@ def test_get_collector_allows_instagram_when_api_direct_missing_for_other_platfo
         collection_mode="discovery",
     )
     with patch.object(settings, "api_direct_api_key", ""):
-        with patch("app.collectors.ensure_instagram_provider_ready"):
+        with patch("app.services.instagram_provider.ensure_instagram_provider_ready"):
             collector = get_collector(task)
     assert collector is not None
 
@@ -905,7 +918,7 @@ def test_platform_candidate_rows_match_upsert_outcomes():
     )
     key = profile_outcome_key("tiktok", profile.profile_url)
     outcomes = {
-        key: {"status": "inserted", "item": item, "influencer_id": 42},
+        key: {"status": "inserted", "item": item, "product_influencer_id": 42, "global_influencer_id": 7},
     }
     rows = CollectionRunnerService._build_platform_candidate_rows(
         task,
@@ -915,7 +928,8 @@ def test_platform_candidate_rows_match_upsert_outcomes():
     )
     assert len(rows) == 1
     assert rows[0]["status"] == CandidateStatus.INSERTED.value
-    assert rows[0]["influencer_id"] == 42
+    assert rows[0]["product_influencer_id"] == 42
+    assert rows[0]["global_influencer_id"] == 7
     assert rows[0]["platform"] == "tiktok"
 
 

@@ -28,6 +28,8 @@ YOUTUBE_PROFILE_URL_RE = re.compile(
 FACEBOOK_PROFILE_URL_RE = re.compile(r"^https?://(www\.)?facebook\.com/[\w.\-]+/?$", re.I)
 FACEBOOK_RESERVED_PATHS = ("watch", "groups", "pages", "profile.php", "login", "share", "reel", "video")
 PINTEREST_PROFILE_URL_RE = re.compile(r"^https?://(www\.)?pinterest\.com/[A-Za-z0-9_.-]+/?$", re.I)
+PINTEREST_PIN_URL_RE = re.compile(r"^https?://(www\.)?pinterest\.com/pin/[A-Za-z0-9_-]+/?$", re.I)
+PINTEREST_PIN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 PINTEREST_RESERVED_PATHS = ("about", "business", "categories", "ideas", "login", "pin", "search", "settings", "today")
 LTK_PROFILE_URL_RE = re.compile(r"^https?://(www\.)?shopltk\.com/explore/[A-Za-z0-9_.-]+/?$", re.I)
 SHOPMY_PROFILE_URL_RE = re.compile(r"^https?://(www\.)?shopmy\.us/[A-Za-z0-9_.-]+/?$", re.I)
@@ -125,6 +127,9 @@ def is_valid_platform_username(platform: str | None, username: str | None) -> bo
     name = _normalize_platform(platform)
     if name == "instagram":
         return is_valid_instagram_username(username)
+    if name == "pinterest" and username and str(username).strip().startswith("pin:"):
+        pin_id = str(username).strip()[4:]
+        return bool(PINTEREST_PIN_ID_RE.match(pin_id))
     if not username or not str(username).strip():
         return False
     value = str(username).strip().lstrip("@")
@@ -154,6 +159,11 @@ def is_valid_platform_profile_url(platform: str | None, url: str | None) -> bool
     if name == "pinterest":
         lowered = text.lower()
         if "pinterest.com" not in lowered:
+            return False
+        if PINTEREST_PIN_URL_RE.match(text):
+            parts = [part for part in urlparse(text).path.split("/") if part]
+            if len(parts) == 2 and parts[0].lower() == "pin":
+                return bool(PINTEREST_PIN_ID_RE.match(parts[1]))
             return False
         if _first_url_path_part(text) in PINTEREST_RESERVED_PATHS:
             return False

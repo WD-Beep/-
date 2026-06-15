@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.tenant import Product, User, WorkspaceMember
 from app.schemas.tenant import ProductCreate, ProductRead, ProductUpdate, UserRead
+from app.services.product_visibility import infer_test_flags, is_product_visible
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -29,17 +30,36 @@ def normalize_product_slug(slug: str) -> str:
 
 class TenantService:
     @staticmethod
-    async def list_accessible_products(db: AsyncSession, *, user_id: int, is_admin: bool) -> list[ProductRead]:
+    def _sort_products(products: list[Product]) -> list[Product]:
+        return sorted(
+            products,
+            key=lambda row: (
+                0 if row.is_default else 1,
+                row.display_order if row.display_order is not None else 10_000,
+                row.name.lower(),
+                row.id,
+            ),
+        )
+
+    @staticmethod
+    async def list_accessible_products(
+        db: AsyncSession,
+        *,
+        user_id: int,
+        is_admin: bool,
+        include_test: bool = False,
+    ) -> list[ProductRead]:
         if is_admin:
-            rows = await db.execute(select(Product).order_by(Product.is_default.desc(), Product.id.asc()))
+            rows = await db.execute(select(Product))
         else:
             rows = await db.execute(
                 select(Product)
                 .join(WorkspaceMember, WorkspaceMember.workspace_id == Product.workspace_id)
                 .where(WorkspaceMember.user_id == user_id)
-                .order_by(Product.is_default.desc(), Product.id.asc())
             )
-        return [ProductRead.model_validate(row) for row in rows.scalars().all()]
+        products = TenantService._sort_products(list(rows.scalars().all()))
+        visible = [row for row in products if is_product_visible(row, include_test=include_test)]
+        return [ProductRead.model_validate(row) for row in visible]
 
     @staticmethod
     async def get_user(db: AsyncSession, user_id: int) -> UserRead | None:
@@ -106,13 +126,23 @@ class TenantService:
         if data.is_default:
             await TenantService._clear_default_products(db, workspace_id)
 
+        brand = (data.brand or "").strip() or None
+        is_test, is_hidden, created_source = infer_test_flags(
+            name=data.name.strip(),
+            slug=slug,
+            brand=brand,
+        )
+
         row = Product(
             workspace_id=workspace_id,
             name=data.name.strip(),
             slug=slug,
-            brand=(data.brand or "").strip() or None,
+            brand=brand,
             description=(data.description or "").strip() or None,
             is_default=data.is_default,
+            is_test=is_test,
+            is_hidden=is_hidden,
+            created_source=created_source or "user",
         )
         db.add(row)
         await db.commit()

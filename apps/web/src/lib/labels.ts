@@ -1,4 +1,4 @@
-import type { CollectionMode, CollectionTaskStatus, EmailLogStatus } from "@/lib/api";
+import type { CollectionMode, CollectionTaskStatus, EmailLogStatus, TaskSourceMethod } from "@/lib/api";
 
 /** 侧边栏导航 */
 export const NAV_ITEMS = [
@@ -27,8 +27,82 @@ export const PLATFORM_CAPABILITY_STATUS_LABELS: Record<string, string> = {
   supported: "API Direct 已支持",
   not_configured: "API Direct 未配置",
   not_available: "API Direct 未接入",
-  url_only: "仅 URL 导入",
+  url_only: "链接补全 / 外链发现",
 };
+
+export const PLATFORM_DISCOVERY_CATEGORY_LABELS: Record<string, string> = {
+  search_discovery: "可搜索发现",
+  external_link_discovery: "外链发现",
+  link_completion: "链接补全",
+};
+
+export const PLATFORM_DISCOVERY_CATEGORY_HINTS: Record<string, string> = {
+  search_discovery:
+    "支持关键词、话题/标签、竞品商品词扩展，以及从帖子/视频/评论/主页发现红人。",
+  external_link_discovery:
+    "可从 Instagram/TikTok/YouTube/Facebook 的 bio、视频描述、主页外链，或已采集红人的 other_social_links 中识别。",
+  link_completion:
+    "主要通过链接导入定向补全资料，也可从其他社媒外链反向发现；不保证粉丝/互动/联系方式完整。",
+};
+
+/** 支持关键词 / 自动发现的平台 */
+export const KEYWORD_DISCOVERY_PLATFORMS = ["instagram", "youtube", "tiktok", "facebook"] as const;
+
+/** 链接导入模式支持的平台（含仅链接导入平台） */
+export const LINK_IMPORT_PLATFORMS = [
+  "instagram",
+  "youtube",
+  "tiktok",
+  "facebook",
+  "pinterest",
+  "ltk",
+  "shopmy",
+] as const;
+
+/** 仅支持链接导入的平台 */
+export const URL_ONLY_PLATFORMS = ["pinterest", "ltk", "shopmy"] as const;
+
+export const URL_ONLY_PLATFORM_VALIDATION_MSG =
+  "当前主要通过链接导入或其他社媒外链发现，请切换到「链接导入」模式。";
+
+export const NO_CONFIGURED_KEYWORD_PLATFORMS_MSG =
+  "没有已配置的关键词采集平台，请先完成 Instagram / YouTube / TikTok / Facebook 的配置";
+
+/** 已验证可主动关键词采集的平台说明 */
+export const VERIFIED_KEYWORD_PLATFORM_HINT = "支持关键词发现和链接导入";
+
+/** 链接补全 / 外链发现平台说明 */
+export const LINK_ONLY_PENDING_KEYWORD_HINT =
+  "当前主要通过链接导入或社媒外链发现；站内关键词采集暂未接入";
+
+/** 链接补全平台卡片说明（分行展示） */
+export const LINK_ONLY_PLATFORM_CARD_LINES = [
+  "当前主要通过链接导入或其他社媒外链发现",
+  "可从已采集红人的主页外链中识别",
+  "链接导入用于定向补全资料，不保证粉丝/互动/联系方式完整",
+  "仅导入到基础链接资料会标记为低信息量结果",
+] as const;
+
+/** Amazon 链接导入说明 */
+export const AMAZON_LINK_ONLY_HINT =
+  "Amazon 商品链接用于竞品商品发现线索；主要通过链接导入，不是红人主页平台";
+
+/** 链接导入模式使用说明 */
+export const LINK_IMPORT_USAGE_LINES = [
+  "无需手动选择平台，系统会根据 URL 自动识别",
+  "想采集某个平台，请粘贴该平台主页/频道/创作者/Pin/商品链接",
+  "LTK / ShopMy / Pinterest 也可从其他社媒 bio 外链或已采集红人反向发现",
+  "链接导入用于定向补全资料，不保证能获取完整粉丝、互动和联系方式",
+  "Amazon 是商品链接线索，仅用于竞品商品发现，不要与红人主页链接混在同一任务",
+] as const;
+
+/** 链接导入 URL 示例（可尝试，采集成功率仍在验证中） */
+export const LINK_IMPORT_URL_EXAMPLES: { platform: string; url: string }[] = [
+  { platform: "Pinterest", url: "https://www.pinterest.com/example_user/" },
+  { platform: "LTK", url: "https://www.shopltk.com/explore/example_user" },
+  { platform: "ShopMy", url: "https://shopmy.us/example_user" },
+  { platform: "Instagram", url: "https://www.instagram.com/creator/" },
+];
 
 export const COLLECTION_MODE_LABELS: Record<CollectionMode, string> = {
   discovery: "自动发现",
@@ -39,7 +113,40 @@ export const COLLECTION_MODE_LABELS: Record<CollectionMode, string> = {
   mixed: "混合采集",
   comment_authors: "链接采集",
   competitor_product: "竞品商品发现",
+  link_import: "链接导入",
 };
+
+export const TASK_SOURCE_METHOD_OPTIONS: {
+  value: TaskSourceMethod;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    value: "keyword_discovery",
+    label: "关键词发现",
+    hint: "按关键词、类目、链接种子或多平台自动发现红人",
+  },
+  {
+    value: "link_import",
+    label: "链接导入",
+    hint: "粘贴红人主页、导购平台或 Amazon 商品链接；用于定向补全资料，也可配合外链发现",
+  },
+];
+
+export function taskSourceMethodForMode(mode: CollectionMode | string): TaskSourceMethod {
+  return mode === "link_import" ? "link_import" : "keyword_discovery";
+}
+
+export function taskSourceLabelForMode(mode: CollectionMode | string): string {
+  if (mode === "link_import") return "链接导入";
+  if (mode === "competitor_product") return "竞品商品发现";
+  const sourceMethod = taskSourceMethodForMode(mode);
+  return TASK_SOURCE_METHOD_OPTIONS.find((item) => item.value === sourceMethod)?.label ?? "关键词发现";
+}
+
+export function taskModeBadgeLabel(mode: CollectionMode | string): string {
+  return COLLECTION_MODE_LABELS[mode as CollectionMode] ?? String(mode);
+}
 
 export const SOURCE_DISCOVERY_LABELS: Record<string, string> = {
   comment_author: "评论区",
@@ -73,18 +180,25 @@ export const CANDIDATE_STATUS_LABELS: Record<
   profile_fetched: { label: "已补采", variant: "default" },
   profile_failed: { label: "补采失败", variant: "destructive" },
   filtered_out: { label: "已过滤", variant: "warning" },
+  not_inserted: { label: "未入库", variant: "warning" },
   inserted: { label: "已入库", variant: "success" },
   duplicate: { label: "重复账号", variant: "secondary" },
 };
 
 export const CANDIDATE_FAILURE_LABELS: Record<string, string> = {
   below_min_followers: "粉丝未达标",
+  below_min_engagement_rate: "互动率未达标",
+  above_max_followers: "粉丝超过上限",
+  missing_engagement_rate: "互动率缺失",
+  missing_email: "未发现邮箱",
+  missing_contact: "未发现联系方式",
   excluded_keyword: "命中排除词",
   profile_fetch_failed: "主页补采失败",
   private_account: "私密账号",
   disabled_or_deleted: "账号不存在",
   invalid_username: "无效用户名",
   missing_profile_detail: "主页数据缺失",
+  low_value_seed: "资料不足（seed）",
   duplicate: "重复",
   api_failed: "API 失败",
   unknown: "未知原因",
@@ -177,15 +291,205 @@ export function platformLabel(platform: string): string {
   return PLATFORM_LABELS[platform] ?? platform;
 }
 
+const SEED_PLATFORMS = new Set(["ltk", "shopmy", "pinterest"]);
+
+export type LinkSeedEnrichmentMeta = {
+  link_seed_platform?: string;
+  primary_platform?: string;
+  enrichment_attempted?: boolean;
+  is_valuable?: boolean;
+};
+
+export function candidateLinkSeedMeta(candidate: {
+  source_meta?: Record<string, unknown> | null;
+}): LinkSeedEnrichmentMeta | null {
+  const enrichment = candidate.source_meta?.link_seed_enrichment;
+  if (!enrichment || typeof enrichment !== "object") return null;
+  return enrichment as LinkSeedEnrichmentMeta;
+}
+
+export function candidateSeedPlatformLabel(candidate: {
+  platform: string;
+  source_meta?: Record<string, unknown> | null;
+  source_input_url?: string | null;
+}): string | null {
+  const enrichment = candidateLinkSeedMeta(candidate);
+  if (enrichment?.link_seed_platform) return platformLabel(enrichment.link_seed_platform);
+  const plat = candidate.platform?.toLowerCase();
+  if (plat && SEED_PLATFORMS.has(plat)) return platformLabel(plat);
+  const url = (candidate.source_input_url || "").toLowerCase();
+  if (url.includes("shopltk.com")) return platformLabel("ltk");
+  if (url.includes("shopmy")) return platformLabel("shopmy");
+  if (url.includes("pinterest.com")) return platformLabel("pinterest");
+  return null;
+}
+
+export function candidateSeedEnrichmentStatus(candidate: {
+  platform: string;
+  source_meta?: Record<string, unknown> | null;
+  source_input_url?: string | null;
+  failure_reason?: string | null;
+}): string | null {
+  const seedLabel = candidateSeedPlatformLabel(candidate);
+  if (!seedLabel) return null;
+  if (candidate.failure_reason === "low_value_seed") {
+    return `未补全（${seedLabel} seed 资料不足）`;
+  }
+  const enrichment = candidateLinkSeedMeta(candidate);
+  const seedKey = enrichment?.link_seed_platform?.toLowerCase() || "";
+  const finalKey =
+    candidate.platform?.toLowerCase() || enrichment?.primary_platform?.toLowerCase() || "";
+  if (enrichment?.enrichment_attempted) {
+    if (finalKey && seedKey && finalKey !== seedKey) {
+      return `已通过 ${seedLabel} seed 补全为 ${platformLabel(finalKey)}`;
+    }
+  } else if (finalKey && seedKey && finalKey !== seedKey) {
+    return `已通过 ${seedLabel} seed 补全为 ${platformLabel(finalKey)}`;
+  }
+  return null;
+}
+
 /** 粉丝/订阅者展示文案：YouTube 用订阅者，其余平台保持粉丝。 */
 export function followersAudienceLabel(platform: string): string {
   return platform === "youtube" ? "订阅者" : "粉丝";
 }
 
-export function taskPlatforms(task: { platform: string; platforms?: string[] }): string[] {
+/** 竞品商品发现默认后续发现平台（与后端 COMPETITOR_DISCOVERY_PLATFORMS 一致） */
+export const COMPETITOR_DISCOVERY_PLATFORMS = ["instagram", "youtube", "tiktok", "facebook"] as const;
+
+export function taskPlatforms(task: {
+  platform: string;
+  platforms?: string[];
+  collection_mode?: CollectionMode | string;
+  run_checkpoint?: Record<string, unknown>;
+}): string[] {
+  if (task.collection_mode === "competitor_product") {
+    const discovery = task.run_checkpoint?.competitor_discovery_platforms;
+    if (Array.isArray(discovery) && discovery.length) {
+      return discovery.filter((item): item is string => typeof item === "string");
+    }
+    if (task.platforms?.length) return task.platforms;
+    return [...COMPETITOR_DISCOVERY_PLATFORMS];
+  }
+  const checkpointPlatforms = task.run_checkpoint?.link_import_platforms;
+  if (task.collection_mode === "link_import" && Array.isArray(checkpointPlatforms) && checkpointPlatforms.length) {
+    return checkpointPlatforms.filter((item): item is string => typeof item === "string");
+  }
   if (task.platforms?.length) return task.platforms;
   if (task.platform === "multi") return [];
-  return [task.platform || "instagram"];
+  if (task.platform) return [task.platform];
+  return [];
+}
+
+export function taskPlatformGroupLabel(mode: CollectionMode | string): string | null {
+  if (mode === "link_import") return "链接来源平台";
+  if (mode === "competitor_product") return "后续发现平台";
+  if (
+    mode === "keyword" ||
+    mode === "discovery" ||
+    mode === "category_discovery" ||
+    mode === "mixed" ||
+    mode === "urls" ||
+    mode === "clustering" ||
+    mode === "comment_authors"
+  ) {
+    return "采集平台";
+  }
+  return null;
+}
+
+export function taskProductClueGroupLabel(mode: CollectionMode | string): string | null {
+  return mode === "competitor_product" ? "商品线索" : null;
+}
+
+export function taskDisplayPlatforms(task: {
+  platform: string;
+  platforms?: string[];
+  collection_mode?: CollectionMode | string;
+  run_checkpoint?: Record<string, unknown>;
+}): string[] {
+  const mode = task.collection_mode;
+  const platforms = taskPlatforms(task);
+  if (mode === "competitor_product") {
+    return platforms.filter((name) => name !== "amazon");
+  }
+  if (mode === "link_import") {
+    return platforms.filter((name) => name !== "amazon" && name !== "multi");
+  }
+  if (task.platform === "multi" && task.platforms?.length) {
+    return task.platforms;
+  }
+  return platforms.filter((name) => name !== "multi");
+}
+
+export function taskPlatformSummaryLabel(task: {
+  platform: string;
+  platforms?: string[];
+  collection_mode?: CollectionMode | string;
+  run_checkpoint?: Record<string, unknown>;
+}): string | null {
+  const platforms = taskDisplayPlatforms(task);
+  if (platforms.length === 0) return null;
+  if (platforms.length === 1) return platformLabel(platforms[0]!);
+  return `多平台 · ${platforms.map(platformLabel).join(" / ")}`;
+}
+
+export type AmazonProductSeed = {
+  url?: string;
+  normalized_url?: string;
+  asin?: string;
+  marketplace?: string;
+};
+
+export function extractAmazonProductSeeds(
+  checkpoint: Record<string, unknown> | undefined,
+): AmazonProductSeed[] {
+  const raw = checkpoint?.amazon_product_seeds;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (item): item is AmazonProductSeed => typeof item === "object" && item !== null,
+  );
+}
+
+export function formatAmazonProductClueLine(seed: AmazonProductSeed): string {
+  const parts: string[] = [];
+  if (seed.asin) parts.push(`ASIN ${seed.asin}`);
+  if (seed.normalized_url) parts.push(seed.normalized_url);
+  if (seed.url && seed.url !== seed.normalized_url) parts.push(`原始 ${seed.url}`);
+  return parts.join(" · ") || "-";
+}
+
+export function formatTaskKeywordsOrLinks(task: {
+  platform: string;
+  platforms?: string[];
+  collection_mode: CollectionMode | string;
+  keywords?: string[];
+  input_urls?: string[];
+  run_checkpoint?: Record<string, unknown>;
+}): string {
+  const mode = task.collection_mode;
+  const keywords = task.keywords ?? [];
+  const urls = task.input_urls ?? [];
+
+  if (mode === "link_import") {
+    const summary = taskPlatformSummaryLabel(task);
+    const count = urls.length;
+    return summary ? `${count} 条链接 · ${summary}` : `${count} 条链接`;
+  }
+
+  if (mode === "competitor_product") {
+    const seeds = extractAmazonProductSeeds(task.run_checkpoint);
+    if (seeds.length) {
+      return seeds.map(formatAmazonProductClueLine).join("；");
+    }
+    if (keywords.length) return keywords.join(", ");
+    if (urls.length) return urls.join(", ");
+    return "-";
+  }
+
+  if (keywords.length) return keywords.join(", ");
+  if (urls.length) return `${urls.length} 条链接种子`;
+  return "-";
 }
 
 export function outreachLabel(provider: string): string {

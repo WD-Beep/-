@@ -1,11 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Loader2, List, Mail, Pencil, Play, Plus, RefreshCw, Trash2, X } from "lucide-react";
 
 import { AdminShell } from "@/components/layout/admin-shell";
 import { useActiveProductId } from "@/components/providers/product-provider";
+import { TaskDeleteConfirmDialog } from "@/components/collection-tasks/task-delete-confirm-dialog";
 import { TaskFormDialog } from "@/components/collection-tasks/task-form-dialog";
 import { TaskCandidatesDialog } from "@/components/collection-tasks/task-candidates-dialog";
 import { EmptyState, ErrorAlert, LoadingState, SuccessAlert } from "@/components/shared/page-states";
@@ -23,29 +25,52 @@ import {
 import {
   buildCollectionTaskCompletionMessage,
   buildInfluencersPageUrl,
+  bulkDeleteCollectionTasks,
   COLLECTION_TASK_POLL_INTERVAL_MS,
   COLLECTION_TASK_SLOW_HINT_MS,
   createCollectionTask,
-  deleteCollectionTask,
+  deleteLinkImportBatch,
   fetchCollectionTasks,
+  fetchLinkImportBatches,
   getCollectionTaskRunningElapsedMs,
   isCollectionTaskRunning,
   isCollectionTaskRunningStale,
   isCollectionTaskSettled,
   runCollectionTask,
+  runLinkImportBatch,
   sendCollectionTaskEmail,
   updateCollectionTask,
   type CollectionTask,
   type CollectionTaskPayload,
   type CollectionTaskStatus,
+  type LinkImportBatch,
+  type TaskSourceMethod,
 } from "@/lib/api";
 import {
-  COLLECTION_MODE_LABELS,
+  extractAmazonProductSeeds,
+  formatAmazonProductClueLine,
+  formatTaskKeywordsOrLinks,
   platformLabel,
-  taskPlatforms,
+  taskDisplayPlatforms,
+  taskModeBadgeLabel,
+  taskPlatformGroupLabel,
+  taskProductClueGroupLabel,
   TASK_STATUS_LABELS,
+  taskSourceLabelForMode,
   translateErrorMessage,
 } from "@/lib/labels";
+import {
+  buildTaskDeleteConfirmCopy,
+  buildTaskDeleteResultMessage,
+  isLegacyBatchIneffective,
+  isTaskRowIneffective,
+  matchesEffectivenessFilter,
+  matchesLegacyBatchFilter,
+  taskEffectivenessCategory,
+  taskEffectivenessCategoryLabel,
+  taskHasRetentionData,
+  type TaskEffectivenessFilter,
+} from "@/lib/task-effectiveness";
 
 function formatDate(value: string | null): string {
   if (!value) return "-";
@@ -176,21 +201,58 @@ type TaskToast = {
   message: string;
 };
 
+type TaskListRow =
+  | { kind: "task"; task: CollectionTask; sortAt: number }
+  | { kind: "legacy_batch"; batch: LinkImportBatch; sortAt: number };
+
+function legacyBatchStatus(status: string): CollectionTaskStatus {
+  switch (status) {
+    case "running":
+      return "running";
+    case "completed":
+      return "completed_with_results";
+    case "failed":
+      return "failed";
+    default:
+      return "draft";
+  }
+}
+
+function legacyBatchSortTime(batch: LinkImportBatch): number {
+  const value = batch.completed_at ?? batch.created_at;
+  return value ? new Date(value).getTime() : 0;
+}
+
 export function CollectionTasksPanel() {
   const productId = useActiveProductId();
+  const searchParams = useSearchParams();
   const [tasks, setTasks] = useState<CollectionTask[]>([]);
+  const [legacyBatches, setLegacyBatches] = useState<LinkImportBatch[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogMode, setDialogMode] = useState<"create" | "edit">("create");
+  const [defaultSourceMethod, setDefaultSourceMethod] = useState<TaskSourceMethod>("keyword_discovery");
   const [editingTask, setEditingTask] = useState<CollectionTask | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [actionTaskId, setActionTaskId] = useState<number | null>(null);
+  const [actionLegacyBatchId, setActionLegacyBatchId] = useState<number | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [candidatesTask, setCandidatesTask] = useState<CollectionTask | null>(null);
   const [candidatesOpen, setCandidatesOpen] = useState(false);
   const [toast, setToast] = useState<TaskToast | null>(null);
+  const [effectivenessFilter, setEffectivenessFilter] = useState<TaskEffectivenessFilter>("all");
+  const [selectedTaskIds, setSelectedTaskIds] = useState<number[]>([]);
+  const [deleteDialog, setDeleteDialog] = useState<{
+    open: boolean;
+    title: string;
+    body: string;
+    confirmLabel: string;
+    taskIds: number[];
+    legacyBatchIds: number[];
+  } | null>(null);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const prevStatusRef = useRef<Map<number, CollectionTaskStatus>>(new Map());
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -216,8 +278,21 @@ export function CollectionTasksPanel() {
     }
     setError(null);
     try {
-      const data = await fetchCollectionTasks(1, 100);
-      applyTaskList(data.items, data.total);
+      const apiEffectiveness =
+        effectivenessFilter === "all" ? undefined : effectivenessFilter;
+      const [data, batchData] = await Promise.all([
+        fetchCollectionTasks(1, 100, { effectiveness: apiEffectiveness }),
+        fetchLinkImportBatches(1, 100).catch(() => ({ items: [] as LinkImportBatch[], total: 0 })),
+      ]);
+      const filteredTasks = data.items.filter((task) =>
+        matchesEffectivenessFilter(effectivenessFilter, task),
+      );
+      const filteredLegacy = batchData.items.filter((batch) =>
+        matchesLegacyBatchFilter(effectivenessFilter, batch),
+      );
+      applyTaskList(filteredTasks, filteredTasks.length + filteredLegacy.length);
+      setLegacyBatches(filteredLegacy);
+      setSelectedTaskIds((prev) => prev.filter((id) => filteredTasks.some((task) => task.id === id)));
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载任务列表失败");
     } finally {
@@ -225,17 +300,44 @@ export function CollectionTasksPanel() {
         setLoading(false);
       }
     }
-  }, [applyTaskList]);
+  }, [applyTaskList, effectivenessFilter]);
+
+  const listRows = useMemo<TaskListRow[]>(() => {
+    const rows: TaskListRow[] = [
+      ...tasks.map((task) => ({
+        kind: "task" as const,
+        task,
+        sortAt: new Date(task.updated_at ?? task.created_at).getTime(),
+      })),
+      ...legacyBatches.map((batch) => ({
+        kind: "legacy_batch" as const,
+        batch,
+        sortAt: legacyBatchSortTime(batch),
+      })),
+    ];
+    return rows.sort((a, b) => b.sortAt - a.sortAt);
+  }, [legacyBatches, tasks]);
 
   useEffect(() => {
     if (productId === null) {
-      setLoading(false);
+      queueMicrotask(() => setLoading(false));
       return;
     }
     queueMicrotask(() => {
       void loadTasks();
     });
-  }, [loadTasks, productId]);
+  }, [loadTasks, productId, effectivenessFilter]);
+
+  useEffect(() => {
+    if (searchParams.get("create") === "link_import") {
+      queueMicrotask(() => {
+        setDialogMode("create");
+        setEditingTask(null);
+        setDefaultSourceMethod("link_import");
+        setDialogOpen(true);
+      });
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     return () => {
@@ -278,9 +380,10 @@ export function CollectionTasksPanel() {
     }
   }, [tasks, showToast]);
 
-  function openCreateDialog() {
+  function openCreateDialog(sourceMethod: TaskSourceMethod = "keyword_discovery") {
     setDialogMode("create");
     setEditingTask(null);
+    setDefaultSourceMethod(sourceMethod);
     setDialogOpen(true);
   }
 
@@ -384,40 +487,190 @@ export function CollectionTasksPanel() {
     }
   }
 
-  async function handleDelete(task: CollectionTask) {
-    if (isCollectionTaskRunning(task)) {
-      setError("任务正在运行中，无法删除");
-      return;
-    }
-    if (!confirm(`确定删除任务「${task.name}」吗？\n已采集到红人库的数据不会删除。`)) {
-      return;
-    }
+  const ineffectiveTaskIds = useMemo(
+    () => tasks.filter((task) => isTaskRowIneffective(task)).map((task) => task.id),
+    [tasks],
+  );
 
-    setActionTaskId(task.id);
-    setMessage(null);
+  const selectableTaskIds = ineffectiveTaskIds;
+
+  function openDeleteDialog(options: {
+    taskIds: number[];
+    legacyBatchIds?: number[];
+    taskName?: string;
+    hasRetentionData?: boolean;
+  }) {
+    const selectedTasks = tasks.filter((task) => options.taskIds.includes(task.id));
+    const hasRetentionData =
+      options.hasRetentionData ??
+      selectedTasks.some((task) => taskHasRetentionData(task));
+    const copy = buildTaskDeleteConfirmCopy({
+      count: options.taskIds.length + (options.legacyBatchIds?.length ?? 0),
+      hasRetentionData,
+      taskName: options.taskName,
+    });
+    setDeleteDialog({
+      open: true,
+      title: copy.title,
+      body: copy.body,
+      confirmLabel: copy.confirmLabel,
+      taskIds: options.taskIds,
+      legacyBatchIds: options.legacyBatchIds ?? [],
+    });
+  }
+
+  async function executeDeleteDialog() {
+    if (!deleteDialog) return;
+    setDeleteSubmitting(true);
     setError(null);
     try {
-      await deleteCollectionTask(task.id);
-      setMessage("任务已删除");
+      if (deleteDialog.taskIds.length > 0) {
+        const result = await bulkDeleteCollectionTasks(deleteDialog.taskIds);
+        setMessage(buildTaskDeleteResultMessage(result));
+      }
+      for (const batchId of deleteDialog.legacyBatchIds) {
+        await deleteLinkImportBatch(batchId);
+      }
+      if (deleteDialog.taskIds.length === 0) {
+        setMessage(
+          deleteDialog.legacyBatchIds.length > 1
+            ? "历史导入批次已批量删除"
+            : "历史导入批次已删除",
+        );
+      }
+      setDeleteDialog(null);
+      setSelectedTaskIds([]);
       await loadTasks();
     } catch (err) {
       setError(err instanceof Error ? err.message : "删除失败");
     } finally {
+      setDeleteSubmitting(false);
       setActionTaskId(null);
+      setActionLegacyBatchId(null);
     }
   }
 
+  async function handleDelete(task: CollectionTask) {
+    if (!isTaskRowIneffective(task)) {
+      setError("只能删除无效果任务");
+      return;
+    }
+    if (isCollectionTaskRunning(task)) {
+      setError("任务正在运行中，无法删除");
+      return;
+    }
+    setActionTaskId(task.id);
+    openDeleteDialog({
+      taskIds: [task.id],
+      taskName: task.name,
+      hasRetentionData: taskHasRetentionData(task),
+    });
+  }
+
+  function toggleTaskSelection(taskId: number) {
+    if (!selectableTaskIds.includes(taskId)) return;
+    setSelectedTaskIds((prev) =>
+      prev.includes(taskId) ? prev.filter((id) => id !== taskId) : [...prev, taskId],
+    );
+  }
+
+  function handleBulkDeleteSelected() {
+    const deletableIds = selectedTaskIds.filter((id) => selectableTaskIds.includes(id));
+    if (deletableIds.length === 0) {
+      setError("只能删除无效果任务");
+      return;
+    }
+    const selectedTasks = tasks.filter((task) => deletableIds.includes(task.id));
+    openDeleteDialog({
+      taskIds: deletableIds,
+      hasRetentionData: selectedTasks.some((task) => taskHasRetentionData(task)),
+    });
+  }
+
+  function clearTaskSelection() {
+    setSelectedTaskIds([]);
+  }
+
+  function handleDeleteAllIneffectiveOnPage() {
+    openDeleteDialog({ taskIds: ineffectiveTaskIds });
+  }
+
+  async function handleRunLegacyBatch(batch: LinkImportBatch) {
+    if (batch.status === "running") return;
+    setActionLegacyBatchId(batch.id);
+    setMessage(null);
+    setError(null);
+    try {
+      await runLinkImportBatch(batch.id);
+      setMessage("历史链接导入批次已完成");
+      await loadTasks();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "运行导入失败");
+    } finally {
+      setActionLegacyBatchId(null);
+    }
+  }
+
+  async function handleDeleteLegacyBatch(batch: LinkImportBatch) {
+    if (batch.status === "running") {
+      setError("批次正在运行中，无法删除");
+      return;
+    }
+    setActionLegacyBatchId(batch.id);
+    openDeleteDialog({
+      taskIds: [],
+      legacyBatchIds: [batch.id],
+      taskName: batch.name,
+      hasRetentionData: (batch.new_count ?? 0) + (batch.updated_count ?? 0) > 0,
+    });
+  }
+
   return (
-    <AdminShell title="Instagram 采集任务" description="创建任务后采集 Instagram 数据，并自动生成 Kimi 画像与合作评分">
+    <AdminShell title="采集任务" description="在同一处创建关键词发现或链接导入任务，运行后写入红人库">
       <div className="mb-4 flex flex-wrap items-center gap-3">
-        <Button onClick={openCreateDialog}>
+        <Button onClick={() => openCreateDialog("keyword_discovery")}>
           <Plus className="h-4 w-4" />
           创建任务
+        </Button>
+        <Button variant="outline" onClick={() => openCreateDialog("link_import")}>
+          链接导入
         </Button>
         <Button variant="outline" onClick={() => void loadTasks()} disabled={loading}>
           {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
           刷新
         </Button>
+        <div className="flex flex-wrap items-center gap-1 rounded-md border p-1">
+          {(
+            [
+              ["all", "全部任务"],
+              ["effective", "有效果任务"],
+              ["low_value_result", "无价值结果"],
+              ["no_result", "无结果任务"],
+            ] as const
+          ).map(([value, label]) => (
+            <Button
+              key={value}
+              size="sm"
+              variant={effectivenessFilter === value ? "default" : "ghost"}
+              onClick={() => {
+                setEffectivenessFilter(value);
+                setSelectedTaskIds([]);
+              }}
+            >
+              {label}
+            </Button>
+          ))}
+        </div>
+        {effectivenessFilter !== "effective" && ineffectiveTaskIds.length > 0 ? (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={deleteSubmitting}
+            onClick={handleDeleteAllIneffectiveOnPage}
+          >
+            删除本页无效果任务 ({ineffectiveTaskIds.length})
+          </Button>
+        ) : null}
       </div>
 
       {activeRunningTask ? (
@@ -463,20 +716,50 @@ export function CollectionTasksPanel() {
       <Card>
         <CardHeader>
           <CardTitle>任务列表</CardTitle>
-          <CardDescription>共 {total} 个采集任务，采集完成后会自动写入红人库与 AI 评分</CardDescription>
+          <CardDescription>
+            共 {total} 个任务（含历史链接导入批次）
+            {effectivenessFilter === "low_value_result"
+              ? " · 当前仅显示有入库但资料几乎为空的任务"
+              : effectivenessFilter === "no_result"
+                ? " · 当前仅显示完全无入库结果的任务"
+                : effectivenessFilter === "effective"
+                  ? " · 当前仅显示已产生可用资料的有效果任务"
+                  : ""}
+          </CardDescription>
         </CardHeader>
         <CardContent className="pt-0">
+          {(effectivenessFilter === "low_value_result" ||
+            effectivenessFilter === "no_result" ||
+            effectivenessFilter === "ineffective") &&
+          selectedTaskIds.length > 0 ? (
+            <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+              <span className="font-medium">已选择 {selectedTaskIds.length} 个任务</span>
+              <Button
+                variant="destructive"
+                size="sm"
+                disabled={deleteSubmitting}
+                onClick={handleBulkDeleteSelected}
+              >
+                {deleteSubmitting ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+                批量删除
+              </Button>
+              <Button variant="outline" size="sm" disabled={deleteSubmitting} onClick={clearTaskSelection}>
+                取消选择
+              </Button>
+            </div>
+          ) : null}
           {loading ? (
             <LoadingState label="加载任务列表..." />
-          ) : tasks.length === 0 ? (
+          ) : listRows.length === 0 ? (
             <EmptyState
               title="暂无采集任务"
-              description="点击「创建任务」配置采集模式、关键词或链接后开始采集。"
+              description="点击「创建任务」配置关键词发现，或使用「链接导入」批量粘贴主页链接。"
             />
           ) : (
             <div className="overflow-x-auto rounded-md border">
               <table className="w-full table-fixed text-sm">
                 <colgroup>
+                  <col className="w-10" />
                   <col className="w-[24%]" />
                   <col className="w-[10%]" />
                   <col className="w-[12%]" />
@@ -487,9 +770,23 @@ export function CollectionTasksPanel() {
                 </colgroup>
                 <thead className="bg-muted/40">
                   <tr className="border-b text-left text-muted-foreground">
+                    <th className="w-10 px-2 py-2.5">
+                      <input
+                        type="checkbox"
+                        aria-label="全选当前页无效果任务"
+                        checked={
+                          selectableTaskIds.length > 0 &&
+                          selectableTaskIds.every((id) => selectedTaskIds.includes(id))
+                        }
+                        disabled={selectableTaskIds.length === 0}
+                        onChange={(event) => {
+                          setSelectedTaskIds(event.target.checked ? selectableTaskIds : []);
+                        }}
+                      />
+                    </th>
                     <th className="px-4 py-2.5 font-medium">任务</th>
-                    <th className="px-4 py-2.5 font-medium">模式/平台</th>
-                    <th className="px-4 py-2.5 font-medium">关键词</th>
+                    <th className="px-4 py-2.5 font-medium">来源/模式</th>
+                    <th className="px-4 py-2.5 font-medium">关键词/链接</th>
                     <th className="px-4 py-2.5 font-medium">状态</th>
                     <th className="px-4 py-2.5 font-medium">采集结果</th>
                     <th className="whitespace-nowrap px-4 py-2.5 font-medium">最近运行</th>
@@ -497,7 +794,87 @@ export function CollectionTasksPanel() {
                   </tr>
                 </thead>
                 <tbody>
-                  {tasks.map((task) => {
+                  {listRows.map((row) => {
+                    if (row.kind === "legacy_batch") {
+                      const batch = row.batch;
+                      const status = statusMeta(legacyBatchStatus(batch.status));
+                      const isBusy = actionLegacyBatchId === batch.id;
+                      const isRunning = batch.status === "running";
+                      return (
+                        <tr key={`legacy-${batch.id}`} className="group border-b align-middle last:border-0 hover:bg-muted/20">
+                          <td className="px-2 py-3" />
+                          <td className="min-w-0 px-4 py-3">
+                            <div className="truncate font-medium" title={batch.name}>
+                              {batch.name}
+                            </div>
+                            <div className="mt-1 truncate text-xs text-muted-foreground">历史链接导入批次</div>
+                            {batch.error_message ? (
+                              <p className="mt-1 line-clamp-2 text-xs text-destructive" title={batch.error_message}>
+                                {batch.error_message}
+                              </p>
+                            ) : null}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            <div className="flex flex-col gap-1.5">
+                              <Badge variant="outline" className="w-fit text-xs">
+                                链接导入
+                              </Badge>
+                              <Badge variant="secondary" className="w-fit text-xs">
+                                历史批次
+                              </Badge>
+                            </div>
+                          </td>
+                          <td className="max-w-[160px] px-4 py-3">
+                            <p className="line-clamp-2">{batch.total_count} 条链接</p>
+                          </td>
+                          <td className={COLLECTION_TASK_TABLE_LAYOUT.statusCell}>
+                            <div className="flex flex-col gap-1">
+                              <Badge variant={status.variant} className={COLLECTION_TASK_TABLE_LAYOUT.statusBadge}>
+                                {status.label}
+                              </Badge>
+                              {isLegacyBatchIneffective(batch) ? (
+                                <Badge variant="outline" className="w-fit text-[10px]">
+                                  无效果
+                                </Badge>
+                              ) : null}
+                            </div>
+                          </td>
+                          <td className="min-w-0 px-4 py-3 align-top text-sm text-muted-foreground">
+                            成功 {batch.success_count ?? 0}/{batch.total_count} · 新增 {batch.new_count ?? 0} · 更新{" "}
+                            {batch.updated_count ?? 0}
+                          </td>
+                          <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">
+                            {formatDate(batch.completed_at ?? batch.created_at)}
+                          </td>
+                          <td className={COLLECTION_TASK_TABLE_LAYOUT.actionsCell}>
+                            <div className={COLLECTION_TASK_TABLE_LAYOUT.actionsGroup}>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className={COLLECTION_TASK_TABLE_LAYOUT.actionButton}
+                                disabled={isBusy || isRunning}
+                                onClick={() => void handleRunLegacyBatch(batch)}
+                                title="运行历史导入批次"
+                              >
+                                {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className={`${COLLECTION_TASK_TABLE_LAYOUT.actionButton} text-destructive hover:bg-destructive/10 hover:text-destructive`}
+                                disabled={isBusy || isRunning}
+                                onClick={() => void handleDeleteLegacyBatch(batch)}
+                                title="删除历史批次"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    const task = row.task;
                     const status = statusMeta(task.status);
                     const isBusy = actionTaskId === task.id;
                     const isRunning = isCollectionTaskRunning(task);
@@ -516,9 +893,29 @@ export function CollectionTasksPanel() {
                     const keywords = task.keywords ?? [];
                     const followerRange = formatFollowerRange(task);
                     const keywordFilters = formatKeywordFilters(task);
+                    const platformGroupLabel = taskPlatformGroupLabel(mode);
+                    const productClueGroupLabel = taskProductClueGroupLabel(mode);
+                    const displayPlatforms = taskDisplayPlatforms(task);
+                    const amazonSeeds = extractAmazonProductSeeds(task.run_checkpoint);
+                    const keywordsOrLinksText = formatTaskKeywordsOrLinks(task);
+                    const keywordsOrLinksTitle =
+                      mode === "competitor_product" || mode === "link_import"
+                        ? keywordsOrLinksText
+                        : keywords.join(", ") || (task.input_urls ?? []).join(", ");
+                    const showModeBadge =
+                      taskModeBadgeLabel(mode) !== taskSourceLabelForMode(mode);
 
                     return (
                       <tr key={task.id} className="group border-b align-middle last:border-0 hover:bg-muted/20">
+                        <td className="px-2 py-3">
+                          <input
+                            type="checkbox"
+                            aria-label={`选择任务 ${task.name}`}
+                            checked={selectedTaskIds.includes(task.id)}
+                            disabled={!isTaskRowIneffective(task)}
+                            onChange={() => toggleTaskSelection(task.id)}
+                          />
+                        </td>
                         <td className="min-w-0 px-4 py-3">
                           <div className="truncate font-medium" title={task.name}>
                             {task.name}
@@ -547,18 +944,50 @@ export function CollectionTasksPanel() {
                         <td className="px-4 py-3 whitespace-nowrap">
                           <div className="flex flex-col gap-1.5">
                             <Badge variant="outline" className="w-fit text-xs">
-                              {COLLECTION_MODE_LABELS[mode] ?? mode}
+                              {taskSourceLabelForMode(mode)}
                             </Badge>
-                            {(taskPlatforms(task).length ? taskPlatforms(task) : [task.platform]).map((p) => (
-                              <Badge key={p} variant="secondary" className="w-fit text-xs">
-                                {platformLabel(p)}
+                            {showModeBadge ? (
+                              <Badge variant="outline" className="w-fit text-xs">
+                                {taskModeBadgeLabel(mode)}
                               </Badge>
-                            ))}
+                            ) : null}
+                            {displayPlatforms.length && platformGroupLabel ? (
+                              <div className="flex flex-col gap-1">
+                                <span className="text-[10px] leading-none text-muted-foreground">
+                                  {platformGroupLabel}
+                                </span>
+                                <div className="flex flex-wrap gap-1">
+                                  {displayPlatforms.map((p) => (
+                                    <Badge key={p} variant="secondary" className="w-fit text-xs">
+                                      {platformLabel(p)}
+                                    </Badge>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : null}
+                            {productClueGroupLabel && amazonSeeds.length > 0 ? (
+                              <div className="flex flex-col gap-1">
+                                <span className="text-[10px] leading-none text-muted-foreground">
+                                  {productClueGroupLabel}
+                                </span>
+                                <div className="space-y-1 text-[11px] leading-snug text-muted-foreground">
+                                  {amazonSeeds.map((seed, index) => (
+                                    <p
+                                      key={`${seed.asin ?? seed.normalized_url ?? index}`}
+                                      className="line-clamp-2"
+                                      title={formatAmazonProductClueLine(seed)}
+                                    >
+                                      {formatAmazonProductClueLine(seed)}
+                                    </p>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : null}
                           </div>
                         </td>
                         <td className="max-w-[160px] px-4 py-3">
-                          <p className="line-clamp-2" title={keywords.join(", ")}>
-                            {keywords.length ? keywords.join(", ") : "-"}
+                          <p className="line-clamp-2" title={keywordsOrLinksTitle}>
+                            {keywordsOrLinksText}
                           </p>
                           {(task.country || task.category) && (
                             <p className="mt-1 truncate text-xs text-muted-foreground">
@@ -567,9 +996,16 @@ export function CollectionTasksPanel() {
                           )}
                         </td>
                         <td className={COLLECTION_TASK_TABLE_LAYOUT.statusCell}>
-                          <Badge variant={status.variant} className={COLLECTION_TASK_TABLE_LAYOUT.statusBadge}>
-                            {status.label}
-                          </Badge>
+                          <div className="flex flex-col gap-1">
+                            <Badge variant={status.variant} className={COLLECTION_TASK_TABLE_LAYOUT.statusBadge}>
+                              {status.label}
+                            </Badge>
+                            {isTaskRowIneffective(task) ? (
+                              <Badge variant="outline" className="w-fit text-[10px]">
+                                {taskEffectivenessCategoryLabel(taskEffectivenessCategory(task))}
+                              </Badge>
+                            ) : null}
+                          </div>
                         </td>
                         <td className="min-w-0 px-4 py-3 align-top">
                           {formatCollectionResultCell(task, {
@@ -637,16 +1073,21 @@ export function CollectionTasksPanel() {
                             >
                               <Mail className="h-4 w-4" />
                             </Button>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className={`${COLLECTION_TASK_TABLE_LAYOUT.actionButton} text-destructive hover:bg-destructive/10 hover:text-destructive`}
-                              disabled={isBusy || isRunning}
-                              onClick={() => handleDelete(task)}
-                              title="删除任务"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
+                            {isTaskRowIneffective(task) &&
+                            (effectivenessFilter === "low_value_result" ||
+                              effectivenessFilter === "no_result" ||
+                              effectivenessFilter === "ineffective") ? (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className={`${COLLECTION_TASK_TABLE_LAYOUT.actionButton} text-destructive hover:bg-destructive/10 hover:text-destructive`}
+                                disabled={isBusy || isRunning}
+                                onClick={() => handleDelete(task)}
+                                title="删除或归档无效果任务"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            ) : null}
                           </div>
                         </td>
                       </tr>
@@ -663,6 +1104,7 @@ export function CollectionTasksPanel() {
         open={dialogOpen}
         mode={dialogMode}
         initialTask={editingTask}
+        defaultSourceMethod={defaultSourceMethod}
         submitting={submitting}
         onClose={() => setDialogOpen(false)}
         onSubmit={handleSubmit}
@@ -674,6 +1116,18 @@ export function CollectionTasksPanel() {
         onClose={() => {
           setCandidatesOpen(false);
           setCandidatesTask(null);
+        }}
+      />
+
+      <TaskDeleteConfirmDialog
+        open={Boolean(deleteDialog?.open)}
+        title={deleteDialog?.title ?? ""}
+        body={deleteDialog?.body ?? ""}
+        confirmLabel={deleteDialog?.confirmLabel}
+        loading={deleteSubmitting}
+        onConfirm={() => void executeDeleteDialog()}
+        onCancel={() => {
+          if (!deleteSubmitting) setDeleteDialog(null);
         }}
       />
     </AdminShell>

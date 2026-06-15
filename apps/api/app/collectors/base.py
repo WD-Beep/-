@@ -67,6 +67,7 @@ class CollectedInfluencer:
     score: float | None = None
     source_discovery_type: str | None = None
     source_post_url: str | None = None
+    source_input_url: str | None = None
     source_comment_url: str | None = None
     source_comment_text: str | None = None
     contact_discovered_at: datetime | None = None

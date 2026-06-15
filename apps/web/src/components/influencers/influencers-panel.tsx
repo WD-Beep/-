@@ -333,7 +333,7 @@ export function InfluencersPanel() {
 
   useEffect(() => {
     if (productId === null) {
-      setLoading(false);
+      queueMicrotask(() => setLoading(false));
       return;
     }
     queueMicrotask(() => {
@@ -349,7 +349,7 @@ export function InfluencersPanel() {
   }, [statsFilters, loadStats, productId]);
 
   useEffect(() => {
-    setPage(1);
+    queueMicrotask(() => setPage(1));
   }, [activePlatform]);
 
   const handlePlatformChange = (platform: PlatformFilterKey) => {

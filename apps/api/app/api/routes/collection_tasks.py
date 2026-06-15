@@ -1,17 +1,22 @@
 import logging
 
+from typing import Literal
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.session import async_session_factory, get_db
-from app.deps.tenant import TenantContext, get_tenant_context, resolve_write_product_id
-from app.services.tenant_scope import scoped_product_id
+from app.deps.tenant import TenantContext, get_tenant_context, require_write_product_id
 from app.services.task_access import ensure_task_access
-from app.models.enums import CollectionTaskStatus
+from app.models.collection_task import CollectionTask
+from app.models.enums import CollectionTaskStatus, CandidateStatus
 from app.schemas.email import EmailSendResult
 from app.schemas.collection_task import (
+    CollectionTaskBulkDelete,
+    CollectionTaskBulkDeleteResult,
+    CollectionTaskDeleteResult,
     CollectionTaskCandidateFilter,
     CollectionTaskCandidateRead,
     CollectionTaskCreate,
@@ -19,10 +24,12 @@ from app.schemas.collection_task import (
     CollectionTaskRead,
     CollectionRunResult,
     CollectionTaskUpdate,
+    collection_task_candidate_read,
 )
 from app.schemas.common import PaginatedResponse
 from app.services.export import build_collection_task_candidates_excel
 from app.services.task_candidate import TaskCandidateService
+from app.services.task_retention import task_has_retention_traces
 from app.schemas.scheduler import SchedulerRefreshResponse
 from app.scheduler import refresh_scheduler
 from app.schemas.platform_capabilities import PlatformCapabilitiesResponse, PlatformCapabilityRead
@@ -100,13 +107,19 @@ async def list_collection_tasks(
     platform: str | None = None,
     status: CollectionTaskStatus | None = None,
     search: str | None = None,
+    effectiveness: Literal["effective", "ineffective", "low_value_result", "no_result"] | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> PaginatedResponse[CollectionTaskRead]:
+    product_id = require_write_product_id(ctx)
     filters = CollectionTaskFilter(
-        product_id=scoped_product_id(ctx.product_id), platform=platform, status=status, search=search
+        product_id=product_id,
+        platform=platform,
+        status=status,
+        search=search,
+        effectiveness=effectiveness,
     )
     return await CollectionTaskService.list_tasks(db, filters, page, page_size)
 
@@ -122,7 +135,7 @@ async def create_collection_task(
         data,
         user_id=ctx.user_id,
         workspace_id=ctx.workspace_id,
-        product_id=await resolve_write_product_id(db, ctx),
+        product_id=require_write_product_id(ctx),
     )
     await refresh_scheduler()
     return CollectionTaskService.task_read(task)
@@ -139,6 +152,36 @@ async def refresh_collection_scheduler() -> SchedulerRefreshResponse:
     )
 
 
+@router.post("/bulk-delete", response_model=CollectionTaskBulkDeleteResult)
+async def bulk_delete_collection_tasks(
+    data: CollectionTaskBulkDelete,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> CollectionTaskBulkDeleteResult:
+    product_id = require_write_product_id(ctx)
+    tasks: list = []
+    for task_id in data.task_ids:
+        task = await db.get(CollectionTask, task_id)
+        if not task or task.is_archived:
+            continue
+        ensure_task_access(task, ctx)
+        if task.product_id != product_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权删除该任务")
+        tasks.append(task)
+    result = await CollectionTaskService.delete_tasks_bulk(
+        db, tasks, require_ineffective=True
+    )
+    await refresh_scheduler()
+    return CollectionTaskBulkDeleteResult(
+        deleted_count=len(result["deleted_ids"]),
+        archived_count=len(result["archived_ids"]),
+        skipped_count=len(result["skipped_ids"]),
+        deleted_ids=result["deleted_ids"],
+        archived_ids=result["archived_ids"],
+        skipped_ids=result["skipped_ids"],
+    )
+
+
 @router.get("/{task_id}", response_model=CollectionTaskRead)
 async def get_collection_task(
     task_id: int,
@@ -146,7 +189,8 @@ async def get_collection_task(
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> CollectionTaskRead:
     task = ensure_task_access(await CollectionTaskService.get_task(db, task_id), ctx)
-    return CollectionTaskService.task_read(task)
+    retention = await task_has_retention_traces(db, task.id, task=task)
+    return CollectionTaskService.task_read(task, has_retention_traces=retention)
 
 
 @router.patch("/{task_id}", response_model=CollectionTaskRead)
@@ -162,18 +206,19 @@ async def update_collection_task(
     return CollectionTaskService.task_read(updated)
 
 
-@router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{task_id}", response_model=CollectionTaskDeleteResult)
 async def delete_collection_task(
     task_id: int,
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
-) -> None:
+) -> CollectionTaskDeleteResult:
     task = ensure_task_access(await CollectionTaskService.get_task(db, task_id), ctx)
     try:
-        await CollectionTaskService.delete_task(db, task)
+        action = await CollectionTaskService.delete_task(db, task)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     await refresh_scheduler()
+    return CollectionTaskDeleteResult(action=action, task_id=task_id)
 
 
 @router.get("/{task_id}/candidates", response_model=PaginatedResponse[CollectionTaskCandidateRead])
@@ -183,13 +228,25 @@ async def list_collection_task_candidates(
     failure_reason: str | None = Query(default=None),
     source_type: str | None = Query(default=None),
     source_discovery_type: str | None = Query(default=None),
+    platform: str | None = Query(default=None),
+    high_value: bool | None = Query(default=None),
+    has_email: bool | None = Query(default=None),
+    has_contact: bool | None = Query(default=None),
+    min_followers_count: int | None = Query(default=None, ge=0),
+    max_followers_count: int | None = Query(default=None, ge=0),
+    min_engagement_rate: float | None = Query(default=None, ge=0, le=100),
+    max_engagement_rate: float | None = Query(default=None, ge=0, le=100),
+    insert_blocked_reason: str | None = Query(default=None),
+    contact_status: str | None = Query(default=None),
     search: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> PaginatedResponse[CollectionTaskCandidateRead]:
-    ensure_task_access(await CollectionTaskService.get_task(db, task_id), ctx)
+    task = ensure_task_access(await CollectionTaskService.get_task_including_archived(db, task_id), ctx)
+    await TaskCandidateService.ensure_candidates_for_task(db, task)
+    await db.flush()
     result = await TaskCandidateService.list_for_task(
         db,
         task_id,
@@ -199,10 +256,20 @@ async def list_collection_task_candidates(
         failure_reason=failure_reason,
         source_type=source_type,
         source_discovery_type=source_discovery_type,
+        platform=platform,
+        high_value=high_value,
+        has_email=has_email,
+        has_contact=has_contact,
+        min_followers_count=min_followers_count,
+        max_followers_count=max_followers_count,
+        min_engagement_rate=min_engagement_rate,
+        max_engagement_rate=max_engagement_rate,
+        insert_blocked_reason=insert_blocked_reason,
+        contact_status=contact_status,
         search=search,
     )
     return PaginatedResponse(
-        items=[CollectionTaskCandidateRead.model_validate(row) for row in result.items],
+        items=[collection_task_candidate_read(row) for row in result.items],
         total=result.total,
         page=result.page,
         page_size=result.page_size,
@@ -217,29 +284,73 @@ async def export_collection_task_candidates(
     failure_reason: str | None = Query(default=None),
     source_type: str | None = Query(default=None),
     source_discovery_type: str | None = Query(default=None),
+    platform: str | None = Query(default=None),
+    high_value: bool | None = Query(default=None),
+    has_email: bool | None = Query(default=None),
+    has_contact: bool | None = Query(default=None),
+    min_followers_count: int | None = Query(default=None, ge=0),
+    max_followers_count: int | None = Query(default=None, ge=0),
+    min_engagement_rate: float | None = Query(default=None, ge=0, le=100),
+    max_engagement_rate: float | None = Query(default=None, ge=0, le=100),
+    insert_blocked_reason: str | None = Query(default=None),
+    contact_status: str | None = Query(default=None),
     search: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> StreamingResponse:
-    ensure_task_access(await CollectionTaskService.get_task(db, task_id), ctx)
+    task = ensure_task_access(await CollectionTaskService.get_task_including_archived(db, task_id), ctx)
+    await TaskCandidateService.ensure_candidates_for_task(db, task)
+    await db.flush()
+    export_high_value = high_value
+    if export_high_value is None and getattr(task, "export_qualified_only", False):
+        export_high_value = True
 
     rows = await TaskCandidateService.list_for_export(
         db,
         task_id,
-        product_id=ctx.product_id,
+        product_id=task.product_id,
         status=status,
         failure_reason=failure_reason,
         source_type=source_type,
         source_discovery_type=source_discovery_type,
+        platform=platform,
+        high_value=export_high_value,
+        has_email=has_email,
+        has_contact=has_contact,
+        min_followers_count=min_followers_count,
+        max_followers_count=max_followers_count,
+        min_engagement_rate=min_engagement_rate,
+        max_engagement_rate=max_engagement_rate,
+        insert_blocked_reason=insert_blocked_reason,
+        contact_status=contact_status,
         search=search,
     )
+    if not rows and (task.inserted_count or 0) > 0 and status == CandidateStatus.INSERTED.value:
+        rows = await TaskCandidateService.list_for_export(
+            db,
+            task_id,
+            product_id=task.product_id,
+            status=CandidateStatus.INSERTED.value,
+        )
     if not rows:
+        inserted = task.inserted_count or 0
+        if inserted > 0:
+            detail = (
+                "当前筛选无数据，但任务显示有入库记录。请清空筛选或切换到「全部状态」后再导出；"
+                "若仍无数据，可能是历史任务缺少候选池明细，请重新运行任务或从红人库导出。"
+            )
+        else:
+            detail = "没有符合筛选条件的候选数据，无法导出。请调整筛选条件后重试。"
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="没有符合筛选条件的候选数据，无法导出。请调整筛选条件后重试。",
+            detail=detail,
         )
 
-    content, filename = build_collection_task_candidates_excel(rows, task_id=task_id)
+    content, filename = build_collection_task_candidates_excel(
+        rows,
+        task_id=task_id,
+        task_name=task.name,
+    )
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
 
     return StreamingResponse(
@@ -247,6 +358,43 @@ async def export_collection_task_candidates(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers=headers,
     )
+
+
+@router.post("/{task_id}/enrich-link-seeds", response_model=CollectionRunResult)
+async def enrich_link_seed_profiles(
+    task_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> CollectionRunResult:
+    """继续补采 LTK/ShopMy/Pinterest seed 的社媒资料（重新执行链接导入补全）。"""
+    from app.models.enums import CollectionMode
+
+    task = ensure_task_access(await CollectionTaskService.get_task(db, task_id), ctx)
+    if task.collection_mode != CollectionMode.LINK_IMPORT.value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="仅链接导入任务支持继续补采社媒资料",
+        )
+    platforms = [str(p).lower() for p in (task.platforms or []) if p]
+    if not any(p in {"ltk", "shopmy", "pinterest"} for p in platforms):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="当前任务不包含 LTK/ShopMy/Pinterest 链接，无需 seed 补全",
+        )
+    blocking_task = await CollectionTaskService.get_blocking_running_task(db, exclude_id=task_id)
+    if blocking_task is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"已有采集任务运行中（{blocking_task.name}），请稍后再试",
+        )
+    task.status = CollectionTaskStatus.RUNNING.value
+    task.current_stage = STAGE_DISCOVERY
+    task.status_summary = "正在补采社媒资料（Instagram/TikTok/YouTube 反查）"
+    reset_run_progress(task)
+    await db.commit()
+    background_tasks.add_task(_run_collection_task_in_background, task_id, resume=True)
+    return _run_result_snapshot(task, message=task.status_summary)
 
 
 @router.post("/{task_id}/run", response_model=CollectionRunResult)
