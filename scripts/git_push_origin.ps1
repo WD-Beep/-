@@ -10,9 +10,13 @@ Set-Location (Split-Path $PSScriptRoot -Parent)
 Write-Host "=== AutoQuote GitHub upload ===" -ForegroundColor Cyan
 Write-Host ""
 
-# Ignore the machine-wide gitclone rewrite for this process so Git talks to GitHub directly.
-$env:GIT_CONFIG_GLOBAL = "NUL"
-$env:GIT_CONFIG_SYSTEM = "NUL"
+# Remove the machine-wide gitclone rewrite so Git talks to GitHub directly while
+# still keeping Git Credential Manager available for authentication.
+$gitcloneRewrite = git config --global --get url.https://gitclone.com/github.com/.insteadof 2>$null
+if ($gitcloneRewrite) {
+    Write-Host "Removing global gitclone rewrite: $gitcloneRewrite" -ForegroundColor Yellow
+    git config --global --unset url.https://gitclone.com/github.com/.insteadof
+}
 
 $remoteUrl = git config --get "remote.$Remote.url" 2>$null
 if (-not $remoteUrl) {
