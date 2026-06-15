@@ -1,6 +1,6 @@
 param(
     [string]$Remote = "wdbeep",
-    [string]$Branch = "main",
+    [string]$Branch = "autoquote-optimized-latest",
     [string]$Message = ""
 )
 
