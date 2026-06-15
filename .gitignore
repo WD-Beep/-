@@ -27,6 +27,7 @@ data/.embedding_cache/
 data/quote_product_images/
 data/price_review/
 data/*.jsonl
+data/_dbg_sync/
 data/company_payment_accounts.json
 
 # Business exports / office files
@@ -64,3 +65,4 @@ Desktop.ini
 *.bak
 *.bak-*
 *.pre_recover_*.bak
+scripts/fix_wecom_nginx_proxy.sh
