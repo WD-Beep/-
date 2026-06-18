@@ -1,0 +1,68 @@
+---
+description: Bug 修复后小步验收、scoped commit、push_after_fix 自动 push；与 git_push_origin 分离
+alwaysApply: true
+---
+
+# 小步验收 + Git 提交 + 自动 Push（强制）
+
+## 修改前
+
+1. 运行 `git status --short`，确认工作区状态。
+2. 只改本次需求相关文件；不回滚、不覆盖无关改动。
+3. 禁止 `git reset --hard`、`git checkout --`、`git restore` 覆盖用户改动（除非用户明确要求）。
+
+## 修改中
+
+- 小范围 diff；不改无关页面、路由、PDF、报价核心计价、管理员修正、历史记录、全局配置。
+- 测试只覆盖本次行为；新增文件需说明原因。
+
+## 修改后验收（必须通过才 commit）
+
+默认至少：
+
+```powershell
+node --check static/app.js
+$env:PYTHONPATH='.'; python -m pytest tests/test_material_piece_summary.py tests/test_admin_bom_edit_route.py
+```
+
+涉及其它模块时追加对应测试。失败则不 commit、不 push。
+
+## Commit（scoped）
+
+- 禁止 `git add .`
+- 只 `git add` 本次相关文件
+- `git diff --cached --stat` 确认暂存范围；含无关文件则 `git restore --staged` 取消
+- 英文 commit message，如 `fix material measurement rules`
+
+## Push（与 git_push_origin 分离）
+
+验收 + commit 成功后自动：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/push_after_fix.ps1
+```
+
+- **`push_after_fix.ps1`**：只 push 当前 HEAD；不 add、不 commit
+- 工作区若有**无关**未提交改动：脚本会 WARN 但仍 push 已 commit 内容
+- 若**本次修复尚未 commit**：先完成 scoped commit 再 push
+
+**禁止**在小步修复后用 `scripts/git_push_origin.ps1`（该脚本 `git add -A` 全量提交）。
+
+手动整包同步 GitHub 时，用户自行运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/git_push_origin.ps1
+```
+
+## 服务器
+
+- Push GitHub ≠ 服务器已更新
+- 默认不自动 redeploy；需上生产时手动 `pack_for_server.ps1` + 服务器 `redeploy_server.sh`
+
+## 禁止提交
+
+`.env`、日志、缓存、压缩包、临时文件、无关 Cursor 配置、与本次无关的未提交改动。
+
+## 完成后输出
+
+- 修改文件、验收命令与结果、commit hash、commit message、push 结果、是否还有未提交无关改动

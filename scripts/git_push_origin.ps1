@@ -4,6 +4,14 @@ param(
     [string]$Message = ""
 )
 
+# MANUAL full upload: git add -A, auto-commit if needed, then push.
+# Use when you intentionally sync the whole working tree to GitHub.
+#
+# Do NOT use after agent bug-fix / small-step workflow — that flow must:
+#   verify -> scoped git add -> git commit -> scripts/push_after_fix.ps1
+#
+# push_after_fix.ps1 only pushes an existing commit; it never stages or commits.
+
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
