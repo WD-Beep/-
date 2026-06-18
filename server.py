@@ -29,6 +29,16 @@ from admin_auth import (
     set_logout_cookie_header,
     verify_backend_admin_cookie,
 )
+from admin_bom_requirement_view import build_admin_bom_requirement_view
+
+
+def _enrich_quote_material_display(quote: dict) -> None:
+    """材料裁片/面积展示 enrich（不参与报价计价）。"""
+    if not isinstance(quote, dict):
+        return
+    from material_piece_summary import enrich_quote_material_piece_summaries
+
+    enrich_quote_material_piece_summaries(quote)
 
 from dual_intent_route import apply_dual_mode_envelope
 from demand_parser import (
@@ -545,11 +555,11 @@ def merge_structure_confirmation_user_items(
             idx = int(raw_idx)
         except (TypeError, ValueError):
             continue
-        is_new_row = idx >= len(out) and not bool(entry.get("deleted") or entry.get("_deleted") or entry.get("delete"))
+        is_new_row = idx >= len(out) and not _is_row_delete_marked(entry)
         if idx < 0 or (idx >= len(out) and not is_new_row):
             continue
         row = {} if is_new_row else out[idx]
-        if bool(entry.get("deleted") or entry.get("_deleted") or entry.get("delete")):
+        if _is_row_delete_marked(entry):
             row["exclude_from_cost"] = True
             row["amount_in_cost"] = False
             row["_structure_deleted"] = True
@@ -648,6 +658,141 @@ def merge_structure_confirmation_user_items(
             appended.append(row)
     merged = [row for row in out + appended if not row.get("_structure_deleted")]
     return promote_quotable_rows_for_quote(merged)
+
+
+def _is_row_delete_marked(row: object) -> bool:
+    if not isinstance(row, dict):
+        return False
+    for key in ("deleted", "_deleted", "delete", "removed", "is_deleted"):
+        val = row.get(key)
+        if val is True:
+            return True
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and val == 1:
+            return True
+        if isinstance(val, str) and val.strip().lower() in {"1", "true", "yes", "y", "on", "deleted", "removed"}:
+            return True
+    return False
+
+
+def filter_deleted_quote_rows(rows: object) -> list[dict]:
+    if not isinstance(rows, list):
+        return []
+    return [r for r in rows if isinstance(r, dict) and not _is_row_delete_marked(r)]
+
+
+def _manual_requirement_text(value: object) -> str:
+    return str(value if value is not None else "").strip()
+
+
+def _is_blank_requirement_text(value: object) -> bool:
+    text = _manual_requirement_text(value)
+    return text.lower() in {"", "-", "—", "none", "null", "undefined", "nan", "无", "鏃?"}
+
+
+def _is_material_detail_header_like(row: dict) -> bool:
+    blob = " ".join(
+        _manual_requirement_text(row.get(key))
+        for key in ("type", "standard_name_code", "calculation_size", "remark")
+    )
+    return any(token in blob for token in ("类型", "标准名", "编码", "核算尺寸", "备注说明"))
+
+
+def _clean_manual_material_detail_rows(rows: object) -> list[dict[str, str]]:
+    if not isinstance(rows, list):
+        return []
+    cleaned: list[dict[str, str]] = []
+    for raw in rows:
+        if not isinstance(raw, dict) or _is_row_delete_marked(raw):
+            continue
+        row = {
+            "type": _manual_requirement_text(raw.get("type")),
+            "standard_name_code": _manual_requirement_text(raw.get("standard_name_code")),
+            "calculation_size": _manual_requirement_text(raw.get("calculation_size")),
+            "remark": _manual_requirement_text(raw.get("remark")),
+            "source": "manual",
+        }
+        if _is_material_detail_header_like(row):
+            continue
+        if all(_is_blank_requirement_text(row.get(key)) for key in ("type", "standard_name_code", "calculation_size", "remark")):
+            continue
+        if _is_blank_requirement_text(row.get("standard_name_code")):
+            continue
+        cleaned.append(row)
+    return cleaned
+
+
+def _manual_requirement_size(fields: dict) -> dict[str, float]:
+    mapping = (("length_cm", "L(cm)", "length"), ("width_cm", "W(cm)", "width"), ("height_cm", "H(cm)", "height"))
+    out: dict[str, float] = {}
+    for out_key, *keys in mapping:
+        for key in keys:
+            raw = fields.get(key)
+            if raw is None:
+                continue
+            try:
+                val = float(str(raw).strip())
+            except (TypeError, ValueError):
+                continue
+            if val > 0:
+                out[out_key] = val
+                break
+    return out
+
+
+def _manual_requirement_quantities(fields: dict) -> list[int]:
+    out: list[int] = []
+    for key in ("quantity_1", "quantity_2", "quantity_3", "数量1", "数量2", "数量3"):
+        raw = fields.get(key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        try:
+            qty = int(float(text))
+        except (TypeError, ValueError):
+            continue
+        if qty > 0 and qty not in out:
+            out.append(qty)
+    return out
+
+
+def apply_manual_requirement_overrides_to_payload(payload: dict) -> None:
+    if not isinstance(payload, dict):
+        return
+    manual_fields = payload.get("manual_requirement_fields")
+    if isinstance(manual_fields, dict):
+        merged_fields = dict(payload.get("requirement_fields") or {})
+        for key, value in manual_fields.items():
+            if key is None:
+                continue
+            merged_fields[str(key)] = _manual_requirement_text(value)
+        payload["requirement_fields"] = merged_fields
+        size = _manual_requirement_size(merged_fields)
+        if size:
+            current_size = payload.get("product_size") if isinstance(payload.get("product_size"), dict) else {}
+            payload["product_size"] = {**current_size, **size}
+        quantities = _manual_requirement_quantities(merged_fields)
+        if quantities:
+            payload["quantities"] = quantities
+        for key in ("product_name_model", "产品名称/款号"):
+            name = _manual_requirement_text(merged_fields.get(key))
+            if name:
+                payload["product_name"] = name
+                break
+    manual_rows = _clean_manual_material_detail_rows(payload.get("manual_materials_detail_rows"))
+    if manual_rows:
+        payload["materials_detail_rows"] = manual_rows
+        from sheet_parser import material_detail_rows_to_items
+
+        items = material_detail_rows_to_items(manual_rows)
+        for item in items:
+            item["source"] = "manual"
+            item["confirmation_source"] = "manual_requirement_fields"
+            item["source_type"] = "c_material_detail"
+            item["field_source_type"] = "c_material_detail"
+            item["demand_source"] = "c_material_detail"
+        payload["items"] = items
 
 
 def build_structure_confirmation_payload(
@@ -783,7 +928,16 @@ def build_structure_confirmation_payload(
         "items_preview": preview,
         "items_confirmation": confirmation_rows,
         "missing_data_enrichment": er,
+        "demand_template": bool(payload.get("demand_template")),
     }
+    resp["bom_requirement_view"] = build_admin_bom_requirement_view(payload, {})
+    enrich_ctx = dict(payload)
+    enrich_ctx["bom_requirement_view"] = resp["bom_requirement_view"]
+    _enrich_quote_material_display(enrich_ctx)
+    if enrich_ctx.get("material_piece_summaries"):
+        resp["material_piece_summaries"] = enrich_ctx["material_piece_summaries"]
+    if enrich_ctx.get("material_area_overview"):
+        resp["material_area_overview"] = enrich_ctx["material_area_overview"]
     if isinstance(structure_checklist, dict):
         resp["structure_checklist"] = structure_checklist
         resp["structure_items"] = structure_checklist.get("items") or []
@@ -1331,6 +1485,8 @@ def _persist_quote_with_sales_user(
             "structure_checklist",
             "structure_gap_hints",
             "anomaly_review_hints",
+            "requirement_fields",
+            "materials_detail_rows",
         ):
             val = payload.get(key)
             if val is None or val == "":
@@ -3953,6 +4109,12 @@ class QuoteHandler(BaseHTTPRequestHandler):
                 or payload.get("structure_confirmed_by_user")
                 or payload.get("confirm_structure")
             )
+            if structure_confirmed_early and isinstance(payload.get("items"), list):
+                payload["_structure_confirmed_frontend_items"] = copy.deepcopy(
+                    filter_deleted_quote_rows(payload.get("items"))
+                )
+            if structure_confirmed_early:
+                apply_manual_requirement_overrides_to_payload(payload)
             request_route = route_quote_request(
                 payload,
                 has_upload=self.has_sheet_blob_in_payload(payload),
@@ -4102,6 +4264,15 @@ class QuoteHandler(BaseHTTPRequestHandler):
                 demand=bool(demand_parse_result),
                 simple_bom=bool(simple_bom_result),
             )
+            frontend_confirmed_items = payload.get("_structure_confirmed_frontend_items")
+            if structure_confirmed_early and isinstance(frontend_confirmed_items, list) and frontend_confirmed_items:
+                payload["items"] = copy.deepcopy(frontend_confirmed_items)
+                if isinstance(sheet_parse_result, dict):
+                    sheet_parse_result["item_count"] = len(frontend_confirmed_items)
+                    sheet_parse_result["row_count"] = len(frontend_confirmed_items)
+                    sheet_parse_result["structure_confirmed_frontend_items"] = True
+            if structure_confirmed_early:
+                apply_manual_requirement_overrides_to_payload(payload)
 
             enrich_payload_size_variants(payload)
             if isinstance(sheet_parse_result, dict) and payload.get("size_variants"):
@@ -4681,6 +4852,8 @@ class QuoteHandler(BaseHTTPRequestHandler):
                 return
             if payload.get("multi_size"):
                 payload["_size_variant_items_template"] = copy.deepcopy(payload.get("items") or [])
+            if isinstance(payload.get("items"), list):
+                payload["items"] = filter_deleted_quote_rows(payload.get("items"))
             _log_quote_stage(
                 self,
                 "pre_calculate",
@@ -4705,6 +4878,21 @@ class QuoteHandler(BaseHTTPRequestHandler):
                 return
             merge_quote_sales_from_payload(response, payload)
             self._apply_quote_output_gate(response, payload)
+            for requirement_key in (
+                "requirement_fields",
+                "bom_requirement_fields",
+                "quote_sheet_fields",
+                "quote_sheet_meta",
+                "quote_params",
+                "sheet_metadata",
+                "materials_detail_rows",
+            ):
+                if response.get(requirement_key) in (None, "", {}) and payload.get(requirement_key) not in (None, "", {}):
+                    response[requirement_key] = payload.get(requirement_key)
+            response["bom_requirement_view"] = build_admin_bom_requirement_view(response, {})
+            _enrich_quote_material_display(response)
+            if isinstance(response.get("detail_rows"), list):
+                response["detail_rows"] = filter_deleted_quote_rows(response.get("detail_rows"))
             response["quote_ready"] = True
             response["quote_id"] = str(uuid.uuid4())
             response["llm_status"] = llm_status
@@ -5173,6 +5361,10 @@ class QuoteHandler(BaseHTTPRequestHandler):
             "F": demand.sections.get("F", {}),
             "G": demand.sections.get("G", {}),
         }
+        if isinstance(demand.requirement_fields, dict):
+            payload["requirement_fields"] = dict(demand.requirement_fields)
+        if isinstance(demand.materials_detail_rows, list):
+            payload["materials_detail_rows"] = list(demand.materials_detail_rows)
         apply_sales_fields_to_payload(payload)
         payload["product_size"] = demand.product_size or {}
         payload["demand_field_sources"] = dict(demand.field_sources or {})
@@ -5203,6 +5395,8 @@ class QuoteHandler(BaseHTTPRequestHandler):
             "quantities": list(demand.quantities),
             "inline_prices": demand.inline_prices,
             "reference_prices": demand.reference_prices,
+            "requirement_fields": demand.requirement_fields,
+            "materials_detail_rows": demand.materials_detail_rows,
             "auxiliary_bom_sheet_names": list(demand.auxiliary_bom_sheet_names),
             "processing_fee_locked": bool(demand.quote_settings.get("processing_fee_locked")),
             "processing_fee_rule": str(demand.quote_settings.get("processing_fee_rule") or ""),
@@ -5394,6 +5588,10 @@ class QuoteHandler(BaseHTTPRequestHandler):
             payload["items"],
         )
         payload["quote_params"] = parsed.get("quote_params", {})
+        if isinstance(parsed.get("requirement_fields"), dict):
+            payload["requirement_fields"] = parsed.get("requirement_fields")
+        if isinstance(parsed.get("materials_detail_rows"), list):
+            payload["materials_detail_rows"] = parsed.get("materials_detail_rows")
         apply_sales_fields_to_payload(payload)
         sheet_product_name = str(parsed.get("sheet_product_name") or "").strip()
         if sheet_product_name:
@@ -5411,6 +5609,7 @@ class QuoteHandler(BaseHTTPRequestHandler):
             "media_summary": media_summary,
             "sheet_product_name": parsed.get("sheet_product_name", ""),
             "quote_params": parsed.get("quote_params", {}),
+            "materials_detail_rows": parsed.get("materials_detail_rows", []),
         }
 
     def log_sheet_parse(self, parsed: dict) -> None:

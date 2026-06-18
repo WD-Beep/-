@@ -102,6 +102,10 @@ function resolveQuoteApiOrigin() {
       return fromGlobal;
     }
   }
+  const { protocol, host } = window.location;
+  if (protocol === "http:" || protocol === "https:") {
+    return `${protocol}//${host}`;
+  }
   try {
     const fromLs = normalizeApiOrigin(localStorage.getItem(LS_QUOTE_API_ORIGIN_KEY));
     if (fromLs) {
@@ -109,10 +113,6 @@ function resolveQuoteApiOrigin() {
     }
   } catch {
     // ignore storage
-  }
-  const { protocol, host } = window.location;
-  if (protocol === "http:" || protocol === "https:") {
-    return `${protocol}//${host}`;
   }
   return "";
 }
@@ -806,6 +806,8 @@ async function requestQuote(options = {}) {
           structureEditMode: false,
           structureSavedForQuote: true,
           structureDirty: false,
+          requirementViewEditing: false,
+          requirementViewSnapshot: null,
           pendingScrollToNewRowIndex: null,
           structureRowOverrides: {},
           structureAddedRows: [],
@@ -1414,6 +1416,642 @@ function buildSalesSheetCheckpointsHtml(quote) {
 }
 
 /** 报价单为 EXW-only（未展示 FOB）时，对「成本/件」侧展示 13% 含税参考价。 */
+function buildBomRequirementViewHtmlLegacy(quote) {
+  const data = quote;
+  const view = quote?.bom_requirement_view || data?.bom_requirement_view;
+  const sections = Array.isArray(view?.sections) ? view.sections : [];
+  if (!sections.length) {
+    return "";
+  }
+  const emptyText = String(view.empty_text || "无");
+  const sourceLabel = (field) => {
+    if (field?.source === "structure_description" || field?.inferred) return "结构说明推断";
+    if (field?.source === "c_material_detail") return "C区材料明细";
+    if (field?.source === "excel") return "原表";
+    return "";
+  };
+  const detailRowsHtml = (section) => {
+    const rows = cleanRequirementDetailRowRemarks(
+      (Array.isArray(section?.detail_rows) ? section.detail_rows : []).filter(isValidRequirementMaterialDetailRow),
+    );
+    if (!rows.length) return "";
+    return renderMaterialDetailTableSection(quote, rows, { emptyText });
+  };
+  const sectionHtml = sections
+    .map((section) => {
+      const fields = Array.isArray(section?.fields) ? section.fields : [];
+      if (!fields.length) {
+        return "";
+      }
+      const rows = fields
+        .map((field) => {
+          const label = String(field?.label || field?.key || "").trim() || emptyText;
+          const rawValue = field?.value;
+          const value = String(rawValue == null || rawValue === "" ? emptyText : rawValue).trim() || emptyText;
+          const src = sourceLabel(field);
+          const badge = src ? `<span class="bom-requirement-source">${escapeHtml(src)}</span>` : "";
+          return `<tr><th>${escapeHtml(label)}</th><td>${escapeNl(value)}${badge}</td></tr>`;
+        })
+        .join("");
+      const title = String(section?.title || section?.key || "").trim() || "报价需求表字段";
+      return `
+        <div class="bom-requirement-section">
+          <h5>${escapeHtml(title)}</h5>
+          <div class="table-wrap bom-requirement-wrap">
+            <table class="bom-requirement-table">
+              <thead><tr><th>字段名</th><th>字段值</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+          ${String(section?.key || "") === "C" ? detailRowsHtml(section) : ""}
+        </div>
+      `;
+    })
+    .join("");
+  if (!sectionHtml.trim()) {
+    return "";
+  }
+  return `
+    <section class="table-section bom-requirement-view">
+      <h4>结构化需求字段</h4>
+      ${sectionHtml}
+    </section>
+  `;
+}
+
+function cloneRequirementView(view) {
+  return view && typeof view === "object" ? JSON.parse(JSON.stringify(view)) : null;
+}
+
+function isDemandRequirementConfirmation(data) {
+  return Boolean(data?.demand_template || data?.sheet_parse?.demand_template);
+}
+
+function requirementViewSourceLabel(source, inferred) {
+  if (source === "manual") return "人工修改";
+  if (source === "structure_description" || inferred) return "结构说明推断";
+  if (source === "excel") return "原表";
+  if (source === "c_material_detail") return "C区材料明细";
+  return "";
+}
+
+function isRequirementEditableField(sectionKey, fieldKey) {
+  if (sectionKey === "B") {
+    return ["product_name_model", "length_cm", "width_cm", "height_cm", "structure_complexity"].includes(fieldKey);
+  }
+  if (sectionKey === "C") return true;
+  if (sectionKey === "F") return ["quantity_1", "quantity_2", "quantity_3"].includes(fieldKey);
+  return false;
+}
+
+function requirementMissingText(value) {
+  const text = String(value == null ? "" : value).trim().toLowerCase();
+  return !text || ["-", "—", "无", "none", "null", "undefined", "nan", "鏃?"].includes(text);
+}
+
+function isValidRequirementMaterialDetailRow(row) {
+  if (!row || typeof row !== "object" || row._deleted === true || row.deleted === true) return false;
+  const values = ["type", "standard_name_code", "calculation_size", "remark"].map((key) =>
+    String(row[key] == null ? "" : row[key]).trim(),
+  );
+  if (/类型|标准名|编码|核算尺寸|备注说明/.test(values.join(" "))) return false;
+  if (values.every((value) => requirementMissingText(value))) return false;
+  return !requirementMissingText(row.standard_name_code);
+}
+
+function shouldShowRequirementMaterialDetailRow(row, editing) {
+  if (isValidRequirementMaterialDetailRow(row)) return true;
+  if (!editing) return false;
+  const values = ["type", "standard_name_code", "calculation_size", "remark"].map((key) =>
+    String(row[key] == null ? "" : row[key]).trim(),
+  );
+  if (/类型|标准名|编码|核算尺寸|备注说明/.test(values.join(" "))) return false;
+  return values.every((value) => requirementMissingText(value));
+}
+
+function remarkSegmentReferencesSiblingType(segment, siblingTypes, ownType) {
+  const text = String(segment || "").trim();
+  if (!text || requirementMissingText(text)) return true;
+  const compact = text.replace(/\s+/g, "");
+  for (const typ of siblingTypes) {
+    const typeText = String(typ || "").trim();
+    if (!typeText || typeText === ownType) continue;
+    const typeCompact = typeText.replace(/\s+/g, "");
+    if (compact === typeCompact) return true;
+    for (const prefix of ["内部为", "内部", "内为", "内含", "对应", "配套"]) {
+      if (compact === `${prefix}${typeCompact}`) return true;
+    }
+    if (new RegExp(`^(?:内部为?|内为|内含|对应|配套)\\s*${typeText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`).test(text)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function cleanRequirementDetailRowRemarks(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const siblingTypes = list
+    .map((row) => String(row?.type || "").trim())
+    .filter((typ) => typ && !requirementMissingText(typ));
+  return list.map((row) => {
+    const next = { ...row };
+    const remark = String(row?.remark || "").trim();
+    if (requirementMissingText(remark)) return next;
+    const ownType = String(row?.type || "").trim();
+    const kept = remark
+      .split(/[\n/、;；]+/)
+      .map((seg) => seg.trim())
+      .filter((seg) => seg && !remarkSegmentReferencesSiblingType(seg, siblingTypes, ownType));
+    next.remark = kept.length ? kept.join(" / ") : "无";
+    return next;
+  });
+}
+
+function buildRequirementItemsFromDetailRows(rows) {
+  return cleanRequirementDetailRowRemarks(Array.isArray(rows) ? rows : [])
+    .filter(isValidRequirementMaterialDetailRow)
+    .map((row, index) => {
+      const remark = String(row.remark || "").trim();
+      return {
+        index,
+        name: String(row.standard_name_code || "").trim(),
+        role: String(row.type || "").trim() || "C区材料明细",
+        spec: requirementMissingText(row.calculation_size) ? "-" : String(row.calculation_size || "").trim(),
+        usage: "-",
+        unit_price: "-",
+        amount: 0,
+        calc_note: requirementMissingText(remark) ? "" : remark,
+        calc_method: requirementMissingText(remark) ? "" : remark,
+        source: "manual",
+        source_type: "c_material_detail",
+        field_source_type: "c_material_detail",
+        demand_source: "c_material_detail",
+        confirmation_source: "manual_requirement_fields",
+      };
+    });
+}
+
+function requirementViewToPayload(data) {
+  const view = data?.bom_requirement_view;
+  const fields = {};
+  const rows = [];
+  for (const section of Array.isArray(view?.sections) ? view.sections : []) {
+    for (const field of Array.isArray(section?.fields) ? section.fields : []) {
+      const label = String(field?.label || field?.key || "").trim();
+      const key = String(field?.key || "").trim();
+      const value = String(field?.value == null ? "" : field.value).trim();
+      if (label) fields[label] = value;
+      if (key) fields[key] = value;
+    }
+    if (String(section?.key || "") === "C") {
+      for (const row of Array.isArray(section?.detail_rows) ? section.detail_rows : []) {
+        if (isValidRequirementMaterialDetailRow(row)) {
+          rows.push({
+            type: String(row.type || "").trim(),
+            standard_name_code: String(row.standard_name_code || "").trim(),
+            calculation_size: String(row.calculation_size || "").trim(),
+            remark: String(row.remark || "").trim(),
+            source: "manual",
+          });
+        }
+      }
+    }
+  }
+  const productSize = {};
+  const len = Number(fields.length_cm || fields["L(cm)"]);
+  const wid = Number(fields.width_cm || fields["W(cm)"]);
+  const hei = Number(fields.height_cm || fields["H(cm)"]);
+  if (Number.isFinite(len) && len > 0) productSize.length_cm = len;
+  if (Number.isFinite(wid) && wid > 0) productSize.width_cm = wid;
+  if (Number.isFinite(hei) && hei > 0) productSize.height_cm = hei;
+  const quantities = ["quantity_1", "quantity_2", "quantity_3"]
+    .map((key) => Number(fields[key]))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return {
+    manual_requirement_fields: fields,
+    manual_materials_detail_rows: rows,
+    bom_requirement_view: view,
+    items: buildRequirementItemsFromDetailRows(rows),
+    product_size: productSize,
+    quantities,
+    product_name: String(fields.product_name_model || fields["产品名称/款号"] || "").trim(),
+  };
+}
+
+function materialSummaryStatusIcon(status) {
+  if (status === "inferred") return " ⚠️";
+  if (status === "pending" || status === "conflict") return " ❌";
+  return "";
+}
+
+function normalizeMaterialMatchKey(name, type) {
+  return `${String(name || "").trim().toLowerCase()}::${String(type || "").trim().toLowerCase()}`;
+}
+
+function buildMaterialSummaryLookup(quote) {
+  const summaries = Array.isArray(quote?.material_piece_summaries) ? quote.material_piece_summaries : [];
+  const byMaterialId = new Map();
+  const byKeyQueues = new Map();
+  const byIndex = new Map();
+  summaries.forEach((summary, index) => {
+    if (!summary || typeof summary !== "object") return;
+    byIndex.set(index, summary);
+    const materialId = String(summary.material_id || "").trim();
+    if (materialId) byMaterialId.set(materialId, summary);
+    const key = normalizeMaterialMatchKey(summary.material_name, summary.material_type);
+    if (!byKeyQueues.has(key)) byKeyQueues.set(key, []);
+    byKeyQueues.get(key).push(summary);
+  });
+  return { byMaterialId, byKeyQueues, byIndex, summaries, consumedKeys: new Map() };
+}
+
+function lookupMaterialPieceSummary(lookup, row, index) {
+  if (!lookup) return null;
+  if (lookup.byIndex.has(index)) return lookup.byIndex.get(index);
+  const materialId = String(row?.material_id || "").trim();
+  if (materialId && lookup.byMaterialId?.has(materialId)) {
+    return lookup.byMaterialId.get(materialId);
+  }
+  const key = normalizeMaterialMatchKey(row?.standard_name_code, row?.type);
+  const queue = lookup.byKeyQueues?.get(key);
+  if (queue?.length) {
+    const consumed = lookup.consumedKeys.get(key) || 0;
+    if (consumed < queue.length) {
+      lookup.consumedKeys.set(key, consumed + 1);
+      return queue[consumed];
+    }
+  }
+  return null;
+}
+
+function materialHasAreaSummary(summary) {
+  if (!summary || typeof summary !== "object") return false;
+  if (summary.measure_summary && typeof summary.measure_summary === "object") return true;
+  if (summary.size_conflict) return true;
+  if (summary.total_area_cm2 != null) return true;
+  if (Array.isArray(summary.pieces) && summary.pieces.length > 0) return true;
+  if (Array.isArray(summary.review_hints) && summary.review_hints.some(Boolean)) return true;
+  if (Array.isArray(summary.covered_parts) && summary.covered_parts.length > 0) return true;
+  if (summary.is_measurable === false && summary.material_measure_kind) return true;
+  if (summary.is_area_measurable === false && summary.material_measure_kind) return true;
+  return false;
+}
+
+function materialSummaryKindLabel(summary) {
+  return String(summary?.material_measure_kind_label || summary?.material_measure_kind || "").trim();
+}
+
+function isZipperMeasureSummary(summary) {
+  return summary?.material_measure_kind === "count_with_length" && summary?.measure_summary;
+}
+
+function isBadgeCountMeasureSummary(summary) {
+  return summary?.material_measure_kind === "count" && summary?.measure_summary?.is_badge_count;
+}
+
+function isNonAreaMeasureSummary(summary) {
+  const kind = summary?.material_measure_kind;
+  return kind === "length" || kind === "count" || kind === "process";
+}
+
+function materialSummaryAlertTags(summary) {
+  if (!summary) return [];
+  const tags = [];
+  const seen = new Set();
+  const add = (text, tone) => {
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    tags.push({ text, tone });
+  };
+  if (summary.size_conflict) add("尺寸待核", "warn");
+  if (isZipperMeasureSummary(summary)) add("按条计量", "info");
+  else if (isBadgeCountMeasureSummary(summary)) add("按个计量", "info");
+  else if (isNonAreaMeasureSummary(summary)) add(materialSummaryKindLabel(summary) || "非面积项", "muted");
+  const hints = Array.isArray(summary.review_hints) ? summary.review_hints.filter(Boolean) : [];
+  if (hints.some((hint) => /重复/.test(hint))) add("可能重复", "warn");
+  if (isZipperMeasureSummary(summary)) {
+    if (hints.some((hint) => /拉链/.test(hint))) add("需复核拉链", "info");
+  } else if (
+    !isBadgeCountMeasureSummary(summary) &&
+    hints.some((hint) => /结构|不一致|待纸样|待补充|覆盖范围/.test(hint))
+  ) {
+    add("需复核结构尺寸", "info");
+  }
+  const pieces = Array.isArray(summary.pieces) ? summary.pieces : [];
+  if (pieces.some((piece) => piece.status === "pending" || piece.status === "conflict")) add("待核", "muted");
+  return tags;
+}
+
+function renderMaterialAlertTagsHtml(tags) {
+  if (!Array.isArray(tags) || !tags.length) return "";
+  return tags
+    .map(
+      (tag) =>
+        `<span class="mat-detail-tag mat-detail-tag--${escapeHtml(String(tag.tone || "muted"))}">${escapeHtml(String(tag.text || ""))}</span>`,
+    )
+    .join("");
+}
+
+function formatAreaM2FromCm2(cm2) {
+  const n = Number(cm2);
+  if (!Number.isFinite(n)) return "-";
+  const m2 = n / 10000;
+  const text = m2.toFixed(4).replace(/\.?0+$/, "");
+  return `${text}㎡`;
+}
+
+function formatAreaM2Value(m2, cm2Fallback) {
+  if (m2 != null && Number.isFinite(Number(m2))) {
+    const text = Number(m2).toFixed(4).replace(/\.?0+$/, "");
+    return `${text}㎡`;
+  }
+  if (cm2Fallback != null) return formatAreaM2FromCm2(cm2Fallback);
+  return "-";
+}
+
+function renderMaterialDisplaySummaryHtml(summary) {
+  const ds = summary?.display_summary;
+  if (!ds || typeof ds !== "object") return "";
+  const parts = [];
+  if (ds.base_usage_m2 != null) {
+    const areaText =
+      ds.base_usage_m2_display && String(ds.base_usage_m2_display) !== "—"
+        ? `${String(ds.base_usage_m2_display)}㎡`
+        : formatAreaM2Value(ds.base_usage_m2);
+    parts.push(`汇总面积 ${areaText}`);
+  }
+  const lossDisp = ds.with_loss_m2_display || {};
+  if (lossDisp["10"] != null && lossDisp["15"] != null) {
+    parts.push(`采购建议 10%→${lossDisp["10"]}㎡ · 15%→${lossDisp["15"]}㎡`);
+  }
+  const covered = Array.isArray(ds.covered_parts) ? ds.covered_parts.filter(Boolean) : [];
+  if (covered.length) parts.push(`覆盖：${covered.join("、")}`);
+  const pending = Array.isArray(ds.pending_parts) ? ds.pending_parts.filter(Boolean) : [];
+  if (pending.length) parts.push(`待复核：${pending.join("、")}`);
+  if (ds.size_conflict) parts.push("尺寸待核");
+  if (!parts.length) return "";
+  return `<div class="mat-area-brief">${parts
+    .map((part) => `<span class="mat-area-brief-item">${escapeHtml(part)}</span>`)
+    .join("")}</div>`;
+}
+
+function renderMaterialMeasureBriefHtml(summary) {
+  const ms = summary.measure_summary || {};
+  const parts = [];
+  if (isZipperMeasureSummary(summary)) {
+    parts.push(`计量：${ms.quantity != null ? `${ms.quantity}条` : "—"}`);
+    parts.push(`规格：${String(ms.spec_text || "—")}`);
+    if (ms.total_length_m != null) parts.push(`合计长度参考：${Number(ms.total_length_m).toFixed(1)}m`);
+    parts.push("非㎡裁片，不计面积");
+    if (ms.status_label) parts.push(String(ms.status_label));
+    return parts;
+  }
+  if (isNonAreaMeasureSummary(summary)) {
+    if (isBadgeCountMeasureSummary(summary)) {
+      parts.push("按个计量");
+      if (ms.quantity != null) parts.push(`数量：${ms.quantity}${ms.measure_unit || "个"}`);
+      else parts.push("数量待补充");
+      parts.push("非㎡裁片，不计面积");
+      return parts;
+    }
+    parts.push(materialSummaryKindLabel(summary) || "非㎡裁片");
+    if (ms.quantity != null) parts.push(`数量：${ms.quantity}${ms.measure_unit || ""}`);
+    if (ms.total_length_m != null) parts.push(`合计长度参考：${Number(ms.total_length_m).toFixed(1)}m`);
+    parts.push("非㎡裁片，不计矩形展开");
+    return parts;
+  }
+  return null;
+}
+
+function renderMaterialAreaBriefHtml(summary) {
+  const measureParts = renderMaterialMeasureBriefHtml(summary);
+  if (measureParts) {
+    return `<div class="mat-area-brief">${measureParts
+      .map((part) => `<span class="mat-area-brief-item">${escapeHtml(part)}</span>`)
+      .join("")}</div>`;
+  }
+  const structured = renderMaterialDisplaySummaryHtml(summary);
+  if (structured) return structured;
+  const parts = [];
+  const kindLabel = materialSummaryKindLabel(summary);
+  if (kindLabel) parts.push(kindLabel);
+  const areaText =
+    summary.total_area_m2 != null
+      ? `汇总面积 ${formatAreaM2Value(summary.total_area_m2, summary.total_area_cm2)}`
+      : summary.is_area_measurable === false || summary.is_measurable === false
+        ? "非㎡裁片，不计矩形展开"
+        : "面积待估算 / 缺少覆盖范围";
+  parts.push(areaText);
+  if (Array.isArray(summary.covered_parts) && summary.covered_parts.length) {
+    parts.push(`覆盖：${summary.covered_parts.join("、")}`);
+  }
+  const loss = summary.loss_suggestions_m2 || {};
+  if (loss["10"] != null && loss["15"] != null) {
+    parts.push(`含损耗总用量 10%→${loss["10"]}㎡ · 15%→${loss["15"]}㎡`);
+  }
+  if (summary.size_conflict) {
+    parts.push("尺寸待核");
+  }
+  return `<div class="mat-area-brief">${parts
+    .map((part) => `<span class="mat-area-brief-item">${escapeHtml(part)}</span>`)
+    .join("")}</div>`;
+}
+
+function renderMaterialMeasureTableHtml(summary) {
+  const ms = summary.measure_summary || {};
+  if (!ms || typeof ms !== "object") return "";
+  const label = isZipperMeasureSummary(summary) ? "拉链" : "计量项";
+  return `<table class="bom-requirement-table mat-sum-pieces-table mat-sum-measure-table"><thead><tr>
+    <th>项目</th><th>规格/单条长度</th><th>数量</th><th>合计长度参考</th><th>计量方式</th><th>状态</th>
+  </tr></thead><tbody><tr>
+    <td>${escapeHtml(label)}</td>
+    <td>${escapeHtml(String(ms.spec_text || (ms.unit_length_cm != null ? `${ms.unit_length_cm}CM` : "—")))}</td>
+    <td>${ms.quantity != null ? escapeHtml(`${ms.quantity}${ms.measure_unit || ""}`) : "—"}</td>
+    <td>${ms.total_length_m != null ? escapeHtml(`${Number(ms.total_length_m).toFixed(2)}m`) : "—"}</td>
+    <td>${escapeHtml(String(ms.status_label || ms.measure_unit || "—"))}</td>
+    <td>已识别</td>
+  </tr></tbody></table>`;
+}
+
+function renderMaterialAreaPiecesTableHtml(summary) {
+  if (isZipperMeasureSummary(summary) || (isNonAreaMeasureSummary(summary) && summary.measure_summary)) {
+    return renderMaterialMeasureTableHtml(summary);
+  }
+  const pieces = Array.isArray(summary?.pieces) ? summary.pieces : [];
+  if (!pieces.length) return `<p class="muted mat-area-empty">暂无裁片明细，待补充结构说明。</p>`;
+  const pieceRows = pieces
+    .map(
+      (piece, idx) => `<tr>
+        <td>${idx + 1}</td>
+        <td>${escapeHtml(String(piece.piece || "-"))}${materialSummaryStatusIcon(piece.status)}</td>
+        <td>${escapeHtml(String(piece.formula || piece.formula_text || piece.formula_key || "-"))}</td>
+        <td>${escapeHtml(String(piece.size_text || "-"))}</td>
+        <td>${piece.qty != null && piece.qty !== "" ? escapeHtml(String(piece.qty)) : "-"}</td>
+        <td>${piece.total_area_m2 != null || piece.total_area_cm2 != null ? escapeHtml(formatAreaM2Value(piece.total_area_m2, piece.total_area_cm2)) : "-"}</td>
+        <td>${escapeHtml(String(piece.source || "-"))}</td>
+        <td>${escapeHtml(String(piece.status_label || piece.status || "-"))}</td>
+        <td class="mat-piece-note">${escapeHtml(String(piece.note || "-"))}</td>
+      </tr>`,
+    )
+    .join("");
+  return `<table class="bom-requirement-table mat-sum-pieces-table"><thead><tr><th>#</th><th>裁片/部位</th><th>公式</th><th>尺寸/代入</th><th>片数</th><th>小计(㎡)</th><th>来源</th><th>状态</th><th>说明</th></tr></thead><tbody>${pieceRows}</tbody></table>`;
+}
+
+function renderMaterialAreaExpandedHtml(summary) {
+  const hints = Array.isArray(summary.review_hints)
+    ? summary.review_hints.filter(Boolean).map((hint) => `<li class="mat-sum-hint">${escapeHtml(hint)}</li>`).join("")
+    : "";
+  const hintsHtml = hints ? `<ul class="mat-sum-hints">${hints}</ul>` : "";
+  return `<div class="mat-area-expanded-body">
+    ${hintsHtml}
+    ${renderMaterialAreaPiecesTableHtml(summary)}
+  </div>`;
+}
+
+function renderMaterialDetailAreaRowHtml(summary) {
+  if (!materialHasAreaSummary(summary)) return "";
+  const pieces = Array.isArray(summary.pieces) ? summary.pieces : [];
+  const pieceCount = pieces.length;
+  const hasMeasure = Boolean(summary.measure_summary);
+  const hasAreaPieces = pieces.some((p) => p?.status !== "pending" || p?.total_area_cm2 != null);
+  const hasPieceRows = pieceCount > 0 && (hasAreaPieces || hasMeasure || pieces.some((p) => p?.status === "pending"));
+  const expandLabel = isZipperMeasureSummary(summary)
+    ? "展开计量明细"
+    : hasPieceRows
+      ? `展开核算${pieceCount ? `（含 ${pieceCount} 项裁片/部位）` : ""}`
+      : "";
+  return `<tr class="mat-detail-area-row">
+    <td colspan="5">
+      <div class="mat-detail-area">
+        ${renderMaterialAreaBriefHtml(summary)}
+        ${hasPieceRows ? `<details class="mat-detail-details">
+          <summary>${escapeHtml(expandLabel || "展开明细")}</summary>
+          ${renderMaterialAreaExpandedHtml(summary)}
+        </details>` : ""}
+      </div>
+    </td>
+  </tr>`;
+}
+
+function renderMaterialDetailTableBody(quote, rows, options = {}) {
+  const emptyText = String(options.emptyText || "无");
+  const editing = Boolean(options.editing);
+  const token = String(options.token || "").trim();
+  const lookup = buildMaterialSummaryLookup(quote);
+  const body = rows
+    .map((row, index) => {
+      const summary = lookupMaterialPieceSummary(lookup, row, index);
+      const tags = materialSummaryAlertTags(summary);
+      const tagHtml = tags.length ? ` ${renderMaterialAlertTagsHtml(tags)}` : "";
+      const cells = [row?.type, row?.standard_name_code, row?.calculation_size, row?.remark].map(
+        (value) => String(value == null || value === "" ? emptyText : value).trim() || emptyText,
+      );
+      if (editing) {
+        return `<tr data-requirement-detail-row="${index}">
+          <td><input class="requirement-edit-input" data-requirement-detail-field="type" data-requirement-detail-index="${index}" value="${escapeHtml(cells[0])}" /></td>
+          <td><input class="requirement-edit-input" data-requirement-detail-field="standard_name_code" data-requirement-detail-index="${index}" value="${escapeHtml(cells[1])}" /></td>
+          <td><input class="requirement-edit-input" data-requirement-detail-field="calculation_size" data-requirement-detail-index="${index}" value="${escapeHtml(cells[2])}" /></td>
+          <td><input class="requirement-edit-input" data-requirement-detail-field="remark" data-requirement-detail-index="${index}" value="${escapeHtml(cells[3])}" /></td>
+          <td><span class="bom-requirement-source">人工修改</span><button type="button" class="btn-requirement-row-delete" data-requirement-detail-delete="${index}">删除</button></td>
+        </tr>`;
+      }
+      const src = requirementViewSourceLabel(row?.source === "manual" ? "manual" : "c_material_detail", false);
+      const mainRow = `<tr class="mat-detail-main-row${materialHasAreaSummary(summary) ? " mat-detail-has-area" : ""}">
+        <td>${escapeNl(cells[0])}</td>
+        <td>${escapeNl(cells[1])}${tagHtml}</td>
+        <td>${escapeNl(cells[2])}</td>
+        <td>${escapeNl(cells[3])}</td>
+        <td>${escapeHtml(src)}</td>
+      </tr>`;
+      const areaRow = materialHasAreaSummary(summary) ? renderMaterialDetailAreaRowHtml(summary) : "";
+      return mainRow + areaRow;
+    })
+    .join("");
+  const hasSummaries = lookup.summaries.length > 0;
+  return { body, hasSummaries, token, emptyText, editing };
+}
+
+function renderMaterialDetailTableSection(quote, rows, options = {}) {
+  const rendered = renderMaterialDetailTableBody(quote, rows, options);
+  if (!rows.length && !rendered.editing) return "";
+  const lead = rendered.hasSummaries
+    ? `<p class="muted mat-detail-lead">面积核算已并入各行，点击「展开核算」可看裁片明细（仅展示，不改价）。</p>`
+    : "";
+  return `<div class="bom-requirement-detail">
+    <h6>材料明细</h6>
+    ${lead}
+    <div class="table-wrap bom-requirement-wrap">
+      <table class="bom-requirement-table bom-requirement-detail-table mat-detail-table">
+        <thead><tr><th>类型</th><th>标准名/编码</th><th>对应核算尺寸</th><th>备注说明</th><th>来源</th></tr></thead>
+        <tbody>${rendered.body || `<tr><td colspan="5">${escapeHtml(rendered.emptyText)}</td></tr>`}</tbody>
+      </table>
+    </div>
+    ${rendered.editing ? `<button type="button" class="btn-requirement-add-row" data-requirement-detail-add="${escapeHtml(rendered.token)}">新增一行</button>` : ""}
+  </div>`;
+}
+
+function buildBomRequirementViewHtml(quote, options = {}) {
+  const view = quote?.bom_requirement_view;
+  const sections = Array.isArray(view?.sections) ? view.sections : [];
+  if (!sections.length) return "";
+  const emptyText = String(view.empty_text || "无");
+  const token = String(options.token || "").trim();
+  const editing = Boolean(options.editing);
+  const editable = Boolean(options.editable);
+  const detailRowsHtml = (section) => {
+    const rows = cleanRequirementDetailRowRemarks(
+      (Array.isArray(section?.detail_rows) ? section.detail_rows : []).filter((row) =>
+        shouldShowRequirementMaterialDetailRow(row, editing),
+      ),
+    );
+    if (!rows.length && !editing) return "";
+    return renderMaterialDetailTableSection(quote, rows, { emptyText, token, editing });
+  };
+  const sectionHtml = sections
+    .map((section) => {
+      const fields = Array.isArray(section?.fields) ? section.fields : [];
+      if (!fields.length) return "";
+      const sectionKey = String(section?.key || "");
+      const rows = fields
+        .map((field) => {
+          const label = String(field?.label || field?.key || "").trim() || emptyText;
+          const value = String(field?.value == null || field?.value === "" ? emptyText : field.value).trim() || emptyText;
+          const src = requirementViewSourceLabel(field?.source, field?.inferred);
+          const badge = src ? `<span class="bom-requirement-source">${escapeHtml(src)}</span>` : "";
+          const canEdit = editable && editing && isRequirementEditableField(sectionKey, String(field?.key || ""));
+          const valueHtml = canEdit
+            ? `<input class="requirement-edit-input" data-requirement-field-section="${escapeHtml(sectionKey)}" data-requirement-field-key="${escapeHtml(String(field?.key || ""))}" data-requirement-field-label="${escapeHtml(label)}" value="${escapeHtml(value)}" />`
+            : escapeNl(value);
+          return `<tr><th>${escapeHtml(label)}</th><td>${valueHtml}${badge}</td></tr>`;
+        })
+        .join("");
+      const title = String(section?.title || section?.key || "").trim() || "报价需求表字段";
+      return `<div class="bom-requirement-section">
+        <h5>${escapeHtml(title)}</h5>
+        <div class="table-wrap bom-requirement-wrap">
+          <table class="bom-requirement-table">
+            <thead><tr><th>字段名</th><th>字段值</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+        ${sectionKey === "C" ? detailRowsHtml(section) : ""}
+      </div>`;
+    })
+    .join("");
+  if (!sectionHtml.trim()) return "";
+  const toolbar = editable
+    ? `<div class="bom-requirement-toolbar">
+        <button type="button" class="btn-structure-sc-edit" data-requirement-view-edit="${escapeHtml(token)}"${editing ? " disabled" : ""}>编辑</button>
+        <button type="button" class="btn-structure-sc-save" data-requirement-view-save="${escapeHtml(token)}"${editing ? "" : " disabled"}>保存</button>
+        <button type="button" class="btn-structure-sc-cancel" data-requirement-view-cancel="${escapeHtml(token)}"${editing ? "" : " disabled"}>取消</button>
+      </div>`
+    : "";
+  return `<section class="table-section bom-requirement-view">
+    <div class="bom-requirement-head"><h4>结构化需求字段</h4>${toolbar}</div>
+    ${sectionHtml}
+  </section>`;
+}
+
 function quoteIsExwCostVatMode(quote) {
   return !!(quote && quote.include_fob === false);
 }
@@ -1909,6 +2547,7 @@ function buildQuoteCardInnerHtml(quote, fileName, msgId, cardOpts = {}) {
     ${buildAnomalyReviewHintsHtml(quote.anomaly_review_hints)}
     ${buildQuoteParticipationSummaryHtml(quote.quote_participation_summary)}
     ${buildStructureChecklistPanelHtml(quote, detailRootKey, msgId)}
+    ${buildBomRequirementViewHtml(quote)}
     <section class="table-section quote-detail-section" data-quote-detail-root="${escapeHtml(detailRootKey)}">
       <div class="quote-detail-toolbar">
         <h4>明细数据表</h4>
@@ -2443,6 +3082,136 @@ function saveStructurePreviewEdits(token) {
   setComposerStatusLine("明细已保存，可点击「确认结构并开始报价」", "ok");
 }
 
+function findRequirementViewSection(view, sectionKey) {
+  return (Array.isArray(view?.sections) ? view.sections : []).find((section) => String(section?.key || "") === sectionKey);
+}
+
+function enterRequirementViewEditMode(token) {
+  const pend = state.pendingStructureConfirm;
+  const tok = String(token || "").trim();
+  if (!pend || pend.token !== tok) return;
+  pend.requirementViewSnapshot = cloneRequirementView(pend.data?.bom_requirement_view);
+  pend.structureEditMode = true;
+  pend.requirementViewEditing = true;
+  pend.structureSavedForQuote = false;
+  pend.structureDirty = false;
+  renderStructureConfirmView();
+}
+
+function collectRequirementViewDraftFromDom(token) {
+  const pend = state.pendingStructureConfirm;
+  const card = findStructureConfirmationCard(token);
+  const view = cloneRequirementView(pend?.data?.bom_requirement_view);
+  if (!pend || !card || !view) return null;
+  const original = pend.requirementViewSnapshot || view;
+  const originalField = (sectionKey, fieldKey) => {
+    const sec = findRequirementViewSection(original, sectionKey);
+    return (Array.isArray(sec?.fields) ? sec.fields : []).find((field) => String(field?.key || "") === fieldKey);
+  };
+  card.querySelectorAll("[data-requirement-field-key]").forEach((input) => {
+    const sectionKey = String(input.getAttribute("data-requirement-field-section") || "");
+    const fieldKey = String(input.getAttribute("data-requirement-field-key") || "");
+    const sec = findRequirementViewSection(view, sectionKey);
+    const field = (Array.isArray(sec?.fields) ? sec.fields : []).find((item) => String(item?.key || "") === fieldKey);
+    if (!field) return;
+    const next = String(input.value == null ? "" : input.value).trim();
+    const prev = String(originalField(sectionKey, fieldKey)?.value ?? field.value ?? "").trim();
+    field.value = next;
+    if (next !== prev) {
+      field.source = "manual";
+      field.inferred = false;
+    }
+  });
+  const cSection = findRequirementViewSection(view, "C");
+  if (cSection) {
+    const editing = Boolean(pend?.requirementViewEditing);
+    const oldRows = (Array.isArray(cSection.detail_rows) ? cSection.detail_rows : []).filter((row) =>
+      shouldShowRequirementMaterialDetailRow(row, editing),
+    );
+    const nextRows = [];
+    card.querySelectorAll("[data-requirement-detail-row]").forEach((tr) => {
+      const idx = Number(tr.getAttribute("data-requirement-detail-row"));
+      if (!Number.isFinite(idx)) return;
+      const row = { ...(oldRows[idx] || {}) };
+      tr.querySelectorAll("[data-requirement-detail-field]").forEach((input) => {
+        const key = String(input.getAttribute("data-requirement-detail-field") || "");
+        if (key) row[key] = String(input.value == null ? "" : input.value).trim();
+      });
+      row.source = "manual";
+      if (isValidRequirementMaterialDetailRow(row)) nextRows.push(row);
+    });
+    cSection.detail_rows = nextRows;
+  }
+  return view;
+}
+
+function saveRequirementViewEdits(token) {
+  const pend = state.pendingStructureConfirm;
+  const tok = String(token || "").trim();
+  if (!pend || pend.token !== tok) return;
+  const draft = collectRequirementViewDraftFromDom(tok);
+  if (!draft) return;
+  pend.data.bom_requirement_view = draft;
+  const payload = requirementViewToPayload(pend.data);
+  pend.data.requirement_fields = payload.manual_requirement_fields;
+  pend.data.materials_detail_rows = payload.manual_materials_detail_rows;
+  pend.requirementViewEditing = false;
+  pend.structureEditMode = false;
+  pend.structureSavedForQuote = true;
+  pend.structureDirty = false;
+  pend.requirementViewSnapshot = null;
+  renderStructureConfirmView();
+  setComposerStatusLine("结构化需求字段已保存，可继续确认结构并开始报价。", "ok");
+}
+
+function cancelRequirementViewEdits(token) {
+  const pend = state.pendingStructureConfirm;
+  const tok = String(token || "").trim();
+  if (!pend || pend.token !== tok) return;
+  if (pend.requirementViewSnapshot) {
+    pend.data.bom_requirement_view = cloneRequirementView(pend.requirementViewSnapshot);
+  }
+  pend.requirementViewEditing = false;
+  pend.structureEditMode = false;
+  pend.structureSavedForQuote = true;
+  pend.structureDirty = false;
+  pend.requirementViewSnapshot = null;
+  renderStructureConfirmView();
+}
+
+function addRequirementDetailRow(token) {
+  const pend = state.pendingStructureConfirm;
+  const tok = String(token || "").trim();
+  if (!pend || pend.token !== tok) return;
+  const view = pend.data?.bom_requirement_view;
+  const cSection = findRequirementViewSection(view, "C");
+  if (!cSection) return;
+  if (!Array.isArray(cSection.detail_rows)) cSection.detail_rows = [];
+  cSection.detail_rows.push({
+    type: "",
+    standard_name_code: "",
+    calculation_size: "",
+    remark: "",
+    source: "manual",
+  });
+  pend.structureDirty = true;
+  renderStructureConfirmView();
+}
+
+function deleteRequirementDetailRow(token, index) {
+  const pend = state.pendingStructureConfirm;
+  const tok = String(token || "").trim();
+  const idx = Number(index);
+  if (!pend || pend.token !== tok || !Number.isFinite(idx)) return;
+  const draft = collectRequirementViewDraftFromDom(tok);
+  if (draft) pend.data.bom_requirement_view = draft;
+  const cSection = findRequirementViewSection(pend.data?.bom_requirement_view, "C");
+  if (!Array.isArray(cSection?.detail_rows)) return;
+  cSection.detail_rows.splice(idx, 1);
+  pend.structureDirty = true;
+  renderStructureConfirmView();
+}
+
 function buildStructureConfirmationItemsForQuote(pending) {
   const data = pending?.data || {};
   const rows = getPendingStructureRows(data, pending);
@@ -2495,6 +3264,15 @@ function buildStructureConfirmationItemsForQuote(pending) {
     // 结构确认表无小计列：勿把模型旧 amount 带给正式报价，避免只改单价仍按旧小计核算
     return patch;
   });
+}
+
+function filterQuoteActiveRows(rows) {
+  if (!Array.isArray(rows)) {
+    return [];
+  }
+  return rows
+    .filter((row) => row && typeof row === "object" && row.deleted !== true)
+    .map((row, index) => ({ ...row, index }));
 }
 
 function ensurePendingStructureGapState(pend) {
@@ -2992,8 +3770,10 @@ function buildStructureConfirmationHtml(data, token) {
   const pend = state.pendingStructureConfirm;
   const tok = String(token || "").trim();
   const isPending = pend && pend.token === tok;
+  const isDemandMode = isDemandRequirementConfirmation(data);
   const rows = getPendingStructureRows(data, isPending ? pend : null);
   const editing = isPending ? Boolean(pend.structureEditMode) : false;
+  const requirementEditing = isPending ? Boolean(pend.requirementViewEditing) : false;
   const savedOk = isPending ? Boolean(pend.structureSavedForQuote) : true;
   const dirty = isPending ? Boolean(pend.structureDirty) : false;
   const overrides =
@@ -3094,7 +3874,8 @@ function buildStructureConfirmationHtml(data, token) {
         <div><span>物料行</span><strong>${escapeHtml(String(activeRowCount || rows.length || data.item_count || 0))}</strong></div>
       </div>
       ${buildStructureChecklistConfirmPreviewHtml(data, tok, isPending ? pend : null)}
-      <section class="structure-confirm-section structure-confirm-workspace">
+      ${buildBomRequirementViewHtml(data, { token: tok, editable: isDemandMode && isPending, editing: requirementEditing })}
+      ${!isDemandMode ? `<section class="structure-confirm-section structure-confirm-workspace">
         <div class="structure-confirm-edit-shell">
           <div class="structure-confirm-toolbar-sticky">
             <div class="structure-confirm-section-head structure-confirm-toolbar">
@@ -3128,7 +3909,7 @@ function buildStructureConfirmationHtml(data, token) {
             <span class="muted structure-confirm-actions-hint">${confirmHint}</span>
           </div>
         </div>
-      </section>
+      </section>` : ""}
     </div>
   `;
 }
@@ -5769,18 +6550,38 @@ async function confirmStructureAndQuote(btn) {
   scrollToBottom();
   try {
     const patchItems = buildStructureConfirmationItemsForQuote(pending);
+    const activePatchItems = filterQuoteActiveRows(patchItems);
     const aiEstimateCount = countStructureGapAiEstimateRows(pending);
     const payloadExtra = {
       structure_confirmed: true,
       structure_confirmed_by_user: true,
       allow_estimate_with_incomplete_items: true,
     };
+    if (isDemandRequirementConfirmation(pending.data)) {
+      const reqPayload = requirementViewToPayload(pending.data);
+      payloadExtra.manual_requirement_fields = reqPayload.manual_requirement_fields;
+      payloadExtra.manual_materials_detail_rows = reqPayload.manual_materials_detail_rows;
+      payloadExtra.bom_requirement_view = reqPayload.bom_requirement_view;
+      if (Object.keys(reqPayload.product_size || {}).length > 0) {
+        payloadExtra.product_size = reqPayload.product_size;
+      }
+      if (Array.isArray(reqPayload.quantities) && reqPayload.quantities.length > 0) {
+        payloadExtra.quantities = reqPayload.quantities;
+      }
+      if (reqPayload.product_name) {
+        payloadExtra.product_name = reqPayload.product_name;
+      }
+      if (Array.isArray(reqPayload.items) && reqPayload.items.length > 0) {
+        payloadExtra.structure_confirmation_items = reqPayload.items;
+        payloadExtra.items = reqPayload.items;
+      }
+    }
     if (aiEstimateCount > 0) {
       payloadExtra.structure_ai_estimate_count = aiEstimateCount;
     }
-    if (patchItems.length > 0) {
-      payloadExtra.structure_confirmation_items = patchItems;
-      payloadExtra.items = patchItems.filter((row) => row && row.deleted !== true);
+    if (!payloadExtra.items && activePatchItems.length > 0) {
+      payloadExtra.structure_confirmation_items = activePatchItems;
+      payloadExtra.items = activePatchItems;
     }
     if (pending.data?.structure_checklist) {
       payloadExtra.structure_checklist = pending.data.structure_checklist;
@@ -6812,15 +7613,20 @@ function initialize() {
       return;
     }
     if (!inp.hasAttribute("data-structure-row-field")) {
-      return;
+      if (!inp.hasAttribute("data-requirement-field-key") && !inp.hasAttribute("data-requirement-detail-field")) {
+        return;
+      }
     }
     const card = inp.closest(".structure-confirm-card[data-structure-card-token]");
     if (!card) {
       return;
     }
     const tok = String(card.getAttribute("data-structure-card-token") || "").trim();
-    if (tok) {
+    if (tok && inp.hasAttribute("data-structure-row-field")) {
       markStructurePreviewDirty(tok);
+    } else if (tok && state.pendingStructureConfirm?.token === tok) {
+      state.pendingStructureConfirm.structureDirty = true;
+      state.pendingStructureConfirm.structureSavedForQuote = false;
     }
   });
 
@@ -6955,6 +7761,43 @@ function initialize() {
         const msg = humanizeNetworkError(err instanceof Error ? err : new Error(String(err)));
         addMessage("assistant", `结构确认失败：${msg}`);
       });
+      return;
+    }
+
+    const reqEdit = event.target.closest("[data-requirement-view-edit]");
+    if (reqEdit && !state.isRequesting) {
+      event.preventDefault();
+      enterRequirementViewEditMode(String(reqEdit.getAttribute("data-requirement-view-edit") || "").trim());
+      return;
+    }
+
+    const reqSave = event.target.closest("[data-requirement-view-save]");
+    if (reqSave && !state.isRequesting && !reqSave.disabled) {
+      event.preventDefault();
+      saveRequirementViewEdits(String(reqSave.getAttribute("data-requirement-view-save") || "").trim());
+      return;
+    }
+
+    const reqCancel = event.target.closest("[data-requirement-view-cancel]");
+    if (reqCancel && !state.isRequesting && !reqCancel.disabled) {
+      event.preventDefault();
+      cancelRequirementViewEdits(String(reqCancel.getAttribute("data-requirement-view-cancel") || "").trim());
+      return;
+    }
+
+    const reqAdd = event.target.closest("[data-requirement-detail-add]");
+    if (reqAdd && !state.isRequesting) {
+      event.preventDefault();
+      addRequirementDetailRow(String(reqAdd.getAttribute("data-requirement-detail-add") || "").trim());
+      return;
+    }
+
+    const reqDelete = event.target.closest("[data-requirement-detail-delete]");
+    if (reqDelete && !state.isRequesting) {
+      event.preventDefault();
+      const card = reqDelete.closest(".structure-confirm-card[data-structure-card-token]");
+      const tok = String(card?.getAttribute("data-structure-card-token") || "").trim();
+      deleteRequirementDetailRow(tok, reqDelete.getAttribute("data-requirement-detail-delete"));
       return;
     }
 

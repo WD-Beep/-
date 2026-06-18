@@ -81,6 +81,70 @@ class AdminBomEditStaticWiringTest(unittest.TestCase):
         self.assertIn("[data-bom-add-row]", js)
         self.assertIn('btnBomAdd.addEventListener("click"', js)
 
+    def test_admin_js_renders_requirement_view_above_material_rows(self) -> None:
+        js = (ROOT / "static" / "admin" / "admin.js").read_text(encoding="utf-8")
+        self.assertIn("function renderBomRequirementView", js)
+        self.assertIn("quote?.bom_requirement_view", js)
+        self.assertLess(js.index("renderBomRequirementView"), js.index("renderBomEditMaterialTable"))
+
+    def test_sales_app_renders_requirement_view_above_previews(self) -> None:
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("function buildBomRequirementViewHtml", js)
+        self.assertIn("quote?.bom_requirement_view", js)
+        self.assertIn("quote?.bom_requirement_view", js)
+        self.assertLess(js.index("buildBomRequirementViewHtml(quote)"), js.index("quote-detail-section"))
+        self.assertLess(js.index("buildBomRequirementViewHtml(data, {"), js.index("structure-confirm-workspace"))
+
+    def test_sales_app_uses_requirement_view_as_demand_confirmation_editor(self) -> None:
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("function isDemandRequirementConfirmation", js)
+        self.assertIn("function saveRequirementViewEdits", js)
+        self.assertIn("function cancelRequirementViewEdits", js)
+        self.assertIn("data-requirement-view-edit", js)
+        self.assertIn("data-requirement-view-save", js)
+        self.assertIn("data-requirement-view-cancel", js)
+        self.assertIn("manual_requirement_fields", js)
+        self.assertIn("manual_materials_detail_rows", js)
+        self.assertIn("!isDemandMode", js)
+        self.assertLess(js.index("buildBomRequirementViewHtml(data, {"), js.index("!isDemandMode"))
+
+    def test_sales_app_only_expands_piece_details_when_pieces_exist(self) -> None:
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        start = js.index("function renderMaterialDetailAreaRowHtml")
+        end = js.index("function renderMaterialDetailTableBody")
+        block = js[start:end]
+        self.assertIn("hasPieceRows", block)
+        self.assertIn("${hasPieceRows", block)
+        self.assertNotIn('return `<p class="muted mat-area-empty">暂无裁片明细', block)
+
+    def test_sales_app_no_global_material_overview_footer(self) -> None:
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertNotIn("function renderMaterialDetailOverviewFooter", js)
+        self.assertNotIn("mat-detail-overview-row", js)
+        self.assertNotIn("材料面积汇总", js)
+        self.assertNotIn("mat-sum-block", js)
+
+    def test_sales_app_summary_lookup_prefers_row_index(self) -> None:
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("if (lookup.byIndex.has(index)) return lookup.byIndex.get(index)", js)
+        self.assertIn("byKeyQueues", js)
+        self.assertIn("consumedKeys", js)
+
+    def test_sales_app_display_summary_skips_main_table_fields(self) -> None:
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        start = js.index("function renderMaterialDisplaySummaryHtml")
+        end = js.index("function renderMaterialMeasureBriefHtml")
+        block = js[start:end]
+        self.assertNotIn("mat-area-summary-title", block)
+        self.assertNotIn("ds.title", block)
+        self.assertNotIn("核算尺寸", block)
+        self.assertNotIn("结构尺寸", block)
+
+    def test_sales_static_bundle_version_bumped_for_requirement_view(self) -> None:
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("/static/styles.css?v=bom-requirement-af-20260617", html)
+        self.assertIn("/static/app.js?v=bom-requirement-af-20260617", html)
+
 
 class AdminBomEditRouteTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -351,6 +415,21 @@ class AdminBomEditAdminUpdateFlowTest(unittest.TestCase):
         amt = zipper.get("amount")
         if amt is not None:
             self.assertFalse(isinstance(amt, float) and amt != amt)
+
+    def test_admin_bundle_contains_requirement_view_with_missing_values_as_none_text(self) -> None:
+        bundle = get_saved_quote_admin_bundle(self.series_uid)
+        self.assertIsNotNone(bundle)
+        quote = bundle.get("quote") or {}
+        view = quote.get("bom_requirement_view")
+        self.assertIsInstance(view, dict)
+        self.assertEqual(view.get("empty_text"), "无")
+        sections = view.get("sections")
+        self.assertIsInstance(sections, list)
+        self.assertEqual([s.get("key") for s in sections], ["A", "B", "C", "D", "E", "F"])
+        product = next(s for s in sections if s.get("key") == "B")
+        values = {f.get("key"): f.get("value") for f in product.get("fields", [])}
+        self.assertEqual(values.get("product_name_model"), "BOM编辑测试包")
+        self.assertEqual(values.get("length_cm"), "无")
 
     def test_bom_edit_non_count_empty_usage_rejected(self) -> None:
         code, body = self._post_json(
