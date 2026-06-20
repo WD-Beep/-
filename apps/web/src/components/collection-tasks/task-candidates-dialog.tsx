@@ -19,10 +19,13 @@ import {
   CANDIDATE_FAILURE_LABELS,
   CANDIDATE_SOURCE_TYPE_LABELS,
   CANDIDATE_STATUS_LABELS,
+  candidateEnrichmentCandidatesSummary,
+  candidateProfileSnapshotSummary,
   candidateSeedEnrichmentStatus,
   candidateSeedPlatformLabel,
   platformLabel,
 } from "@/lib/labels";
+import { buildTaskResultBreakdown } from "@/lib/collection-task-progress";
 
 type TaskCandidatesDialogProps = {
   task: CollectionTask | null;
@@ -118,6 +121,24 @@ function blockedReason(candidate: CollectionTaskCandidate): string {
 function formatFollowers(value: number | null): string {
   if (value == null) return "-";
   return value.toLocaleString("zh-CN");
+}
+
+function metaValue(meta: CollectionTaskCandidate["source_meta"], key: string): unknown {
+  return meta ? (meta as Record<string, unknown>)[key] : undefined;
+}
+
+function metaString(meta: CollectionTaskCandidate["source_meta"], key: string): string | null {
+  const value = metaValue(meta, key);
+  return typeof value === "string" ? value : null;
+}
+
+function metaStringList(meta: CollectionTaskCandidate["source_meta"], key: string): string[] {
+  const value = metaValue(meta, key);
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function metaBoolean(meta: CollectionTaskCandidate["source_meta"], key: string): boolean {
+  return metaValue(meta, key) === true;
 }
 
 function formatEngagement(value: number | null): string {
@@ -222,6 +243,13 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
     search,
   ]);
 
+  const buildExportQuery = useCallback(() => {
+    const { page: droppedPage, page_size: droppedPageSize, ...rest } = buildCandidateQuery(1);
+    void droppedPage;
+    void droppedPageSize;
+    return rest;
+  }, [buildCandidateQuery]);
+
   useEffect(() => {
     if (!open || !task) return;
     const activeTask = task;
@@ -303,10 +331,9 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
   const canEnrichLinkSeeds =
     task.collection_mode === "link_import" &&
     (task.platforms ?? []).some((p) => ["ltk", "shopmy", "pinterest"].includes(String(p).toLowerCase()));
+  const breakdown = buildTaskResultBreakdown(task);
 
-  const exportQuery = buildCandidateQuery(1);
-  delete (exportQuery as { page?: number; page_size?: number }).page;
-  delete (exportQuery as { page?: number; page_size?: number }).page_size;
+  const exportQuery = buildExportQuery();
 
   const statusMeta = (status: string) =>
     CANDIDATE_STATUS_LABELS[status] ?? { label: status, variant: "secondary" as const };
@@ -331,9 +358,20 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
                   采集中，数据自动刷新…
                 </span>
               ) : null}{" "}
-              发现 {task.discovered_count ?? 0} → 去重 {task.deduped_count ?? 0} → 补采成功{" "}
-              {task.profile_fetched_count ?? 0} / 失败 {task.profile_failed_count ?? 0} → 入库{" "}
-              {task.inserted_count ?? task.result_count ?? 0}
+              <span className="inline-flex flex-wrap items-center gap-1.5">
+                {breakdown.primary[0]}
+                {breakdown.highValue ? (
+                  <Badge variant="success" className="text-[10px]">高价值</Badge>
+                ) : null}
+                {breakdown.singleLinkImport ? (
+                  <Badge variant="outline" className="text-[10px]">单条链接导入</Badge>
+                ) : null}
+              </span>
+              {" · "}
+              {breakdown.funnel.join(" → ")}
+              {(task.email_count ?? 0) > 0 || (task.missing_contact_count ?? 0) > 0 || (task.failed_count ?? task.profile_failed_count ?? 0) > 0 ? (
+                <> · {breakdown.contacts.join(" / ")}</>
+              ) : null}
               {(task.filtered_below_min_followers_count ?? 0) > 0
                 ? ` · 粉丝未达标 ${task.filtered_below_min_followers_count}`
                 : ""}
@@ -341,11 +379,14 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
                 ? ` · 排除词 ${task.filtered_excluded_keyword_count}`
                 : ""}
               {seedEnrichment?.attempted
-                ? ` · LTK 补全：尝试 ${seedEnrichment.attempted} 条，找到社媒 ${seedEnrichment.social_profiles_found ?? 0} 个`
+                ? ` · 导购 seed 补全：尝试 ${seedEnrichment.attempted} 条，找到社媒 ${seedEnrichment.social_profiles_found ?? 0} 个`
                 : ""}
               {canEnrichLinkSeeds && !isCollectionTaskRunning(task)
-                ? " · 仅 LTK 链接无法判断红人价值，可继续补采 Instagram/TikTok/YouTube"
+                ? " · 仅有导购 seed 链接无法判断红人价值，可继续补采 Instagram/TikTok/YouTube/Facebook"
                 : ""}
+              {breakdown.reason ? (
+                <span className="ml-1 line-clamp-2" title={breakdown.reason}>{breakdown.reason}</span>
+              ) : null}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -355,7 +396,7 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
                 variant="secondary"
                 className="h-8 gap-1.5"
                 disabled={isCollectionTaskRunning(task)}
-                title="通过 Instagram/TikTok/YouTube 反查补全 LTK seed 资料"
+                title="通过 Instagram/TikTok/YouTube/Facebook 反查补全导购 seed 资料"
                 onClick={() => {
                   void enrichLinkSeedProfiles(task.id).catch(() => undefined);
                 }}
@@ -589,8 +630,16 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
                   const sm = statusMeta(c.status);
                   const meta = c.source_meta;
                   const reasonLabel = blockedReason(c);
+                  const sourceCaption = metaString(meta, "source_caption");
+                  const asin = metaString(meta, "amazon_asin") ?? metaString(meta, "asin");
+                  const brand = metaString(meta, "amazon_brand") ?? metaString(meta, "brand");
+                  const selectedReason = metaString(meta, "selected_reason");
+                  const matchType = metaString(meta, "match_type");
+                  const matchedPhrases = metaStringList(meta, "matched_phrases");
+                  const matchedKeywords = matchedPhrases.length ? matchedPhrases : metaStringList(meta, "matched_keywords");
+                  const matchReasons = metaStringList(meta, "match_reasons");
                   const sourceRef =
-                    meta?.source_caption?.slice(0, 80) ||
+                    sourceCaption?.slice(0, 80) ||
                     c.source_caption?.slice(0, 80) ||
                     c.source_comment_text?.slice(0, 40) ||
                     c.source_post_url ||
@@ -611,6 +660,22 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
                             {candidateSeedEnrichmentStatus(c)}
                           </div>
                         ) : null}
+                        {candidateEnrichmentCandidatesSummary(c) ? (
+                          <div
+                            className="mt-0.5 text-xs text-muted-foreground"
+                            title={candidateEnrichmentCandidatesSummary(c) ?? ""}
+                          >
+                            补全尝试: {candidateEnrichmentCandidatesSummary(c)}
+                          </div>
+                        ) : null}
+                        {candidateProfileSnapshotSummary(c) ? (
+                          <div
+                            className="mt-0.5 line-clamp-2 text-xs text-muted-foreground"
+                            title={candidateProfileSnapshotSummary(c) ?? ""}
+                          >
+                            详情快照: {candidateProfileSnapshotSummary(c)}
+                          </div>
+                        ) : null}
                         <div
                           className="max-w-[140px] truncate text-xs text-muted-foreground"
                           title={c.profile_url}
@@ -623,19 +688,25 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
                         <td className="max-w-[220px] py-2 pr-2 text-xs">
                           {meta ? (
                             <div className="space-y-1">
-                              {meta.asin ? <div>ASIN: {meta.asin}</div> : null}
-                              {meta.brand ? <div>品牌: {meta.brand}</div> : null}
-                              {meta.matched_keywords?.length ? (
+                              {asin ? <div>ASIN: {asin}</div> : null}
+                              {brand ? <div>品牌: {brand}</div> : null}
+                              {matchType ? (
+                                <div className="text-muted-foreground">匹配: {matchType}</div>
+                              ) : null}
+                              {matchedKeywords.length ? (
                                 <div className="text-muted-foreground">
-                                  命中: {meta.matched_keywords.slice(0, 4).join("、")}
+                                  命中: {matchedKeywords.slice(0, 4).join("、")}
                                 </div>
                               ) : null}
-                              {meta.match_reasons?.length ? (
+                              {selectedReason ? (
+                                <div className="text-muted-foreground">{selectedReason}</div>
+                              ) : null}
+                              {matchReasons.length ? (
                                 <div className="text-muted-foreground">
-                                  {meta.match_reasons.slice(0, 3).join("；")}
+                                  {matchReasons.slice(0, 3).join("；")}
                                 </div>
                               ) : null}
-                              {meta.suspected_collab ? (
+                              {metaBoolean(meta, "suspected_collab") ? (
                                 <Badge variant="outline" className="text-[10px]">
                                   疑似合作
                                 </Badge>

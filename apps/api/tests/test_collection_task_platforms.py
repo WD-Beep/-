@@ -1,4 +1,4 @@
-"""采集任务多平台 schema 校验。"""
+﻿"""采集任务多平台 schema 校验。"""
 
 import pytest
 from pydantic import ValidationError
@@ -38,9 +38,9 @@ def test_create_facebook_single_platform():
     assert task.platforms == ["facebook"]
 
 
-def test_create_rejects_url_only_platforms_in_discovery_mode():
-    for platform in ("pinterest", "ltk", "shopmy"):
-        with pytest.raises(ValidationError, match="链接导入"):
+def test_create_rejects_seed_only_platforms_in_discovery_mode():
+    for platform in ("pinterest", "shopmy"):
+        with pytest.raises(ValidationError, match="seed"):
             CollectionTaskCreate(**_base_payload(platform=platform, platforms=[platform]))
 
 
@@ -71,11 +71,12 @@ def test_create_multi_platform_instagram_youtube():
     assert task.platforms == ["instagram", "youtube"]
 
 
-def test_create_rejects_mixed_keyword_platforms_with_url_only():
-    with pytest.raises(ValidationError, match="链接导入"):
-        CollectionTaskCreate(
-            **_base_payload(platform="multi", platforms=["instagram", "pinterest"])
-        )
+def test_create_allows_mixed_keyword_platforms_with_seed_platforms():
+    task = CollectionTaskCreate(
+        **_base_payload(platform="multi", platforms=["instagram", "pinterest", "shopmy"])
+    )
+    assert task.platform == "multi"
+    assert task.platforms == ["instagram", "pinterest", "shopmy"]
 
 
 def test_create_legacy_instagram_only_platform():
@@ -94,13 +95,39 @@ def test_create_rejects_twitter_in_platforms():
         CollectionTaskCreate(**_base_payload(platform="multi", platforms=["instagram", "twitter"]))
 
 
-def test_update_rejects_url_only_platform_in_discovery_mode():
-    with pytest.raises(ValidationError, match="链接导入"):
+def test_update_rejects_seed_only_platform_in_discovery_mode():
+    with pytest.raises(ValidationError, match="seed"):
         CollectionTaskUpdate(
             collection_mode=CollectionMode.DISCOVERY,
             platform="pinterest",
             platforms=["pinterest"],
         )
+
+
+def test_link_seed_discovery_accepts_seed_only_platforms():
+    task = CollectionTaskCreate(
+        name="seed discovery",
+        collection_mode=CollectionMode.LINK_SEED_DISCOVERY,
+        platform="multi",
+        platforms=["pinterest", "shopmy"],
+        keywords=["amazon finds"],
+    )
+    assert task.collection_mode == CollectionMode.LINK_SEED_DISCOVERY
+    assert task.platforms == ["pinterest", "shopmy"]
+
+
+def test_link_seed_discovery_accepts_asin_only_input():
+    task = CollectionTaskCreate(
+        name="seed asin",
+        collection_mode=CollectionMode.LINK_SEED_DISCOVERY,
+        platform="pinterest",
+        platforms=["pinterest"],
+        input_urls=["B0D9W576KQ"],
+    )
+    assert task.collection_mode == CollectionMode.LINK_SEED_DISCOVERY
+    assert task.input_urls == ["https://www.amazon.com/dp/B0D9W576KQ"]
+    seeds = task.run_checkpoint.get("amazon_product_seeds") or []
+    assert seeds and seeds[0]["asin"] == "B0D9W576KQ"
 
 
 def test_update_platforms_only():

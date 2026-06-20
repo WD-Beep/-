@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.collection_task import CollectionTask
 from app.models.collection_task_candidate import CollectionTaskCandidate
-from app.models.enums import CandidateStatus
+from app.models.enums import CandidateStatus, CollectionMode
 from app.models.global_influencer_profile import GlobalInfluencerProfile
 from app.models.influencer import Influencer
 from app.models.product_influencer import ProductInfluencer
@@ -49,7 +49,9 @@ class TaskInfluencerService:
             )
         )
 
-        if task.platform:
+        if task.collection_mode == CollectionMode.LINK_SEED_DISCOVERY.value:
+            pass
+        elif task.platform:
             platform = task.platform.strip().lower()
             platforms = [
                 str(value).strip().lower()

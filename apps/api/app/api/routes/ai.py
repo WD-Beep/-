@@ -18,10 +18,11 @@ router = APIRouter(prefix="/ai", tags=["ai"])
 
 @router.get("/status", response_model=AiStatusResponse)
 async def get_ai_status() -> AiStatusResponse:
+    provider = settings.active_ai_provider
     return AiStatusResponse(
-        provider="kimi",
-        model=settings.kimi_model if settings.is_kimi_configured else None,
-        configured=settings.is_kimi_configured,
+        provider=provider,
+        model=settings.active_ai_model,
+        configured=settings.is_openai_configured,
         mode=settings.ai_mode,
     )
 

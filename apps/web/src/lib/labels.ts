@@ -21,17 +21,19 @@ export const PLATFORM_LABELS: Record<string, string> = {
   ltk: "LTK",
   shopmy: "ShopMy",
   multi: "多平台",
+  amazon: "Amazon",
 };
 
 export const PLATFORM_CAPABILITY_STATUS_LABELS: Record<string, string> = {
   supported: "API Direct 已支持",
   not_configured: "API Direct 未配置",
   not_available: "API Direct 未接入",
-  url_only: "链接补全 / 外链发现",
+  url_only: "链接导入 / 外部 seed 发现",
 };
 
 export const PLATFORM_DISCOVERY_CATEGORY_LABELS: Record<string, string> = {
   search_discovery: "可搜索发现",
+  external_seed_discovery: "外部 seed 发现",
   external_link_discovery: "外链发现",
   link_completion: "链接补全",
 };
@@ -39,16 +41,25 @@ export const PLATFORM_DISCOVERY_CATEGORY_LABELS: Record<string, string> = {
 export const PLATFORM_DISCOVERY_CATEGORY_HINTS: Record<string, string> = {
   search_discovery:
     "支持关键词、话题/标签、竞品商品词扩展，以及从帖子/视频/评论/主页发现红人。",
+  external_seed_discovery:
+    "支持链接导入、公共网页/商品词 seed 自动发现，以及从已采集社媒主页反向外链扩展；站内关键词直采尚未稳定接入。",
   external_link_discovery:
     "可从 Instagram/TikTok/YouTube/Facebook 的 bio、视频描述、主页外链，或已采集红人的 other_social_links 中识别。",
   link_completion:
     "主要通过链接导入定向补全资料，也可从其他社媒外链反向发现；不保证粉丝/互动/联系方式完整。",
 };
 
-/** 支持关键词 / 自动发现的平台 */
-export const KEYWORD_DISCOVERY_PLATFORMS = ["instagram", "youtube", "tiktok", "facebook"] as const;
+/** 支持普通关键词直采或导购 seed 自动发现快捷入口的平台 */
+export const KEYWORD_SEED_DISCOVERY_PLATFORMS = ["pinterest", "ltk", "shopmy"] as const;
+export const KEYWORD_DISCOVERY_PLATFORMS = [
+  "instagram",
+  "youtube",
+  "tiktok",
+  "facebook",
+  ...KEYWORD_SEED_DISCOVERY_PLATFORMS,
+] as const;
 
-/** 链接导入模式支持的平台（含仅链接导入平台） */
+/** 链接导入模式支持的平台（含支持链接导入的导购/灵感平台） */
 export const LINK_IMPORT_PLATFORMS = [
   "instagram",
   "youtube",
@@ -59,11 +70,11 @@ export const LINK_IMPORT_PLATFORMS = [
   "shopmy",
 ] as const;
 
-/** 仅支持链接导入的平台 */
+/** 导购/灵感平台：支持链接导入、外部 seed 发现、反向外链扩展；不代表完整站内关键词直采 */
 export const URL_ONLY_PLATFORMS = ["pinterest", "ltk", "shopmy"] as const;
 
 export const URL_ONLY_PLATFORM_VALIDATION_MSG =
-  "当前主要通过链接导入或其他社媒外链发现，请切换到「链接导入」模式。";
+  "Pinterest / LTK / ShopMy 普通关键词直采尚未接入；请使用「导购 seed 自动发现」或「链接导入」。";
 
 export const NO_CONFIGURED_KEYWORD_PLATFORMS_MSG =
   "没有已配置的关键词采集平台，请先完成 Instagram / YouTube / TikTok / Facebook 的配置";
@@ -73,14 +84,14 @@ export const VERIFIED_KEYWORD_PLATFORM_HINT = "支持关键词发现和链接导
 
 /** 链接补全 / 外链发现平台说明 */
 export const LINK_ONLY_PENDING_KEYWORD_HINT =
-  "当前主要通过链接导入或社媒外链发现；站内关键词采集暂未接入";
+  "支持链接导入、外部 seed 自动发现和反向外链扩展；站内关键词直采暂未接入";
 
 /** 链接补全平台卡片说明（分行展示） */
 export const LINK_ONLY_PLATFORM_CARD_LINES = [
-  "当前主要通过链接导入或其他社媒外链发现",
-  "可从已采集红人的主页外链中识别",
-  "链接导入用于定向补全资料，不保证粉丝/互动/联系方式完整",
-  "仅导入到基础链接资料会标记为低信息量结果",
+  "支持手动链接导入，用于定向录入和资料补全",
+  "支持 Amazon / 商品词驱动的公共网页 seed 自动发现",
+  "支持从 Instagram / YouTube / TikTok / Facebook 红人主页反向扩展外链",
+  "站内关键词直采尚未稳定接入；低信息量 seed 会标记为待补全",
 ] as const;
 
 /** Amazon 链接导入说明 */
@@ -91,7 +102,7 @@ export const AMAZON_LINK_ONLY_HINT =
 export const LINK_IMPORT_USAGE_LINES = [
   "无需手动选择平台，系统会根据 URL 自动识别",
   "想采集某个平台，请粘贴该平台主页/频道/创作者/Pin/商品链接",
-  "LTK / ShopMy / Pinterest 也可从其他社媒 bio 外链或已采集红人反向发现",
+  "LTK / ShopMy / Pinterest 也可通过导购 seed 自动发现或已采集红人反向外链扩展获得入口",
   "链接导入用于定向补全资料，不保证能获取完整粉丝、互动和联系方式",
   "Amazon 是商品链接线索，仅用于竞品商品发现，不要与红人主页链接混在同一任务",
 ] as const;
@@ -104,6 +115,9 @@ export const LINK_IMPORT_URL_EXAMPLES: { platform: string; url: string }[] = [
   { platform: "Instagram", url: "https://www.instagram.com/creator/" },
 ];
 
+/** 导购 seed 自动发现支持的平台 */
+export const SEED_DISCOVERY_PLATFORMS = ["ltk", "shopmy", "pinterest"] as const;
+
 export const COLLECTION_MODE_LABELS: Record<CollectionMode, string> = {
   discovery: "自动发现",
   keyword: "关键词采集",
@@ -114,6 +128,7 @@ export const COLLECTION_MODE_LABELS: Record<CollectionMode, string> = {
   comment_authors: "链接采集",
   competitor_product: "竞品商品发现",
   link_import: "链接导入",
+  link_seed_discovery: "导购 seed 自动发现",
 };
 
 export const TASK_SOURCE_METHOD_OPTIONS: {
@@ -131,9 +146,15 @@ export const TASK_SOURCE_METHOD_OPTIONS: {
     label: "链接导入",
     hint: "粘贴红人主页、导购平台或 Amazon 商品链接；用于定向补全资料，也可配合外链发现",
   },
+  {
+    value: "shopping_seed_auto",
+    label: "导购 seed 自动发现",
+    hint: "输入主题 / 品牌 / 商品词 / ASIN / Amazon 线索，先找 LTK / ShopMy / Pinterest seed 链接，再批量采集补全",
+  },
 ];
 
 export function taskSourceMethodForMode(mode: CollectionMode | string): TaskSourceMethod {
+  if (mode === "link_seed_discovery") return "shopping_seed_auto";
   return mode === "link_import" ? "link_import" : "keyword_discovery";
 }
 
@@ -165,9 +186,11 @@ export const CANDIDATE_SOURCE_TYPE_LABELS: Record<string, string> = {
   related_profile: "相似账号",
   competitor_product_post_author: "竞品商品帖子作者",
   keyword_video_author: "关键词视频作者",
+  amazon_product_page_video: "Amazon 商品页视频作者",
   keyword_channel: "关键词频道",
   keyword_video_channel: "关键词视频频道",
   input_url: "URL 导入",
+  link_import: "链接导入",
   unknown: "未知来源",
 };
 
@@ -199,6 +222,8 @@ export const CANDIDATE_FAILURE_LABELS: Record<string, string> = {
   invalid_username: "无效用户名",
   missing_profile_detail: "主页数据缺失",
   low_value_seed: "资料不足（seed）",
+  no_same_product_match: "未命中同款商品",
+  amazon_product_page_strong_lead: "Amazon 商品页强线索",
   duplicate: "重复",
   api_failed: "API 失败",
   unknown: "未知原因",
@@ -219,6 +244,11 @@ export const COLLECTION_MODE_OPTIONS: {
     value: "category_discovery",
     label: "类目采集",
     hint: "填写类目后系统自动扩展平台关键词与链接种子，可补充偏好关键词",
+  },
+  {
+    value: "link_seed_discovery",
+    label: "导购 seed 自动发现",
+    hint: "输入 Amazon URL / ASIN / 品牌关键词，自动发现 LTK / ShopMy / Pinterest 导购主页，再补全到 Instagram / TikTok / YouTube / Facebook",
   },
   {
     value: "discovery",
@@ -295,9 +325,28 @@ const SEED_PLATFORMS = new Set(["ltk", "shopmy", "pinterest"]);
 
 export type LinkSeedEnrichmentMeta = {
   link_seed_platform?: string;
+  link_seed_profile_url?: string;
+  link_seed_username?: string;
   primary_platform?: string;
+  enriched_platform?: string;
   enrichment_attempted?: boolean;
+  instagram_detail_fetched?: boolean;
+  platform_detail_fetched?: boolean;
+  social_profiles_found?: number;
+  contact_found?: boolean;
   is_valuable?: boolean;
+  enrichment_notes?: string[];
+  search_keywords?: string[];
+  enrichment_candidates?: Array<{
+    platform?: string;
+    profile_url?: string | null;
+    status?: string;
+    followers_count?: number | null;
+    has_email?: boolean;
+    score?: number;
+    error?: string;
+  }>;
+  selected_reason?: string;
 };
 
 export function candidateLinkSeedMeta(candidate: {
@@ -336,17 +385,70 @@ export function candidateSeedEnrichmentStatus(candidate: {
     return `未补全（${seedLabel} seed 资料不足）`;
   }
   const enrichment = candidateLinkSeedMeta(candidate);
+  const meta = candidate.source_meta ?? {};
+  const selectedReason =
+    enrichment?.selected_reason ??
+    (typeof meta.selected_reason === "string" ? meta.selected_reason : null);
   const seedKey = enrichment?.link_seed_platform?.toLowerCase() || "";
   const finalKey =
-    candidate.platform?.toLowerCase() || enrichment?.primary_platform?.toLowerCase() || "";
-  if (enrichment?.enrichment_attempted) {
+    candidate.platform?.toLowerCase() ||
+    enrichment?.primary_platform?.toLowerCase() ||
+    enrichment?.enriched_platform?.toLowerCase() ||
+    "";
+  const detailFetched =
+    enrichment?.platform_detail_fetched || enrichment?.instagram_detail_fetched;
+
+  const parts: string[] = [];
+  if (enrichment?.enrichment_attempted || (finalKey && seedKey)) {
     if (finalKey && seedKey && finalKey !== seedKey) {
-      return `已通过 ${seedLabel} seed 补全为 ${platformLabel(finalKey)}`;
+      const finalLabel = platformLabel(finalKey);
+      if (detailFetched) {
+        parts.push(`已通过 ${seedLabel} 补全为 ${finalLabel}，并完成详情采集`);
+      } else {
+        parts.push(`已通过 ${seedLabel} seed 补全为 ${finalLabel}`);
+      }
+    } else if (finalKey === seedKey) {
+      parts.push(`${seedLabel} seed（未找到其他社媒主页）`);
     }
-  } else if (finalKey && seedKey && finalKey !== seedKey) {
-    return `已通过 ${seedLabel} seed 补全为 ${platformLabel(finalKey)}`;
   }
-  return null;
+  if (selectedReason) parts.push(selectedReason);
+  return parts.length ? parts.join("；") : null;
+}
+
+export function candidateEnrichmentCandidatesSummary(candidate: {
+  source_meta?: Record<string, unknown> | null;
+}): string | null {
+  const enrichment = candidateLinkSeedMeta(candidate);
+  const meta = candidate.source_meta ?? {};
+  const candidates =
+    enrichment?.enrichment_candidates ??
+    (Array.isArray(meta.enrichment_candidates) ? meta.enrichment_candidates : null);
+  if (!candidates || candidates.length === 0) return null;
+  return candidates
+    .map((row) => {
+      const plat = platformLabel(String(row.platform ?? ""));
+      const status = row.status ?? "unknown";
+      const err = row.error ? ` (${row.error})` : "";
+      return `${plat}:${status}${err}`;
+    })
+    .join(" · ");
+}
+
+export function candidateProfileSnapshotSummary(candidate: {
+  platform: string;
+  source_meta?: Record<string, unknown> | null;
+}): string | null {
+  const snap = candidate.source_meta?.profile_snapshot;
+  if (!snap || typeof snap !== "object") return null;
+  const record = snap as Record<string, unknown>;
+  const parts: string[] = [];
+  if (record.display_name) parts.push(String(record.display_name));
+  const plat = String(record.platform ?? candidate.platform ?? "");
+  if (record.followers_count != null) {
+    parts.push(`${followersAudienceLabel(plat)} ${String(record.followers_count)}`);
+  }
+  if (record.bio) parts.push(String(record.bio).slice(0, 80));
+  return parts.length ? parts.join(" · ") : null;
 }
 
 /** 粉丝/订阅者展示文案：YouTube 用订阅者，其余平台保持粉丝。 */
@@ -497,14 +599,16 @@ export function outreachLabel(provider: string): string {
 }
 
 export function aiModeLabel(mode: string): string {
-  if (mode === "kimi") return "Kimi AI";
-  if (mode === "heuristic") return "规则评分（未配置 Kimi）";
-  if (mode === "heuristic_fallback") return "规则评分（Kimi 失败降级）";
+  if (mode === "openai") return "OpenAI";
+  if (mode === "kimi") return "Kimi AI（兼容）";
+  if (mode === "heuristic") return "规则评分（未配置 OpenAI）";
+  if (mode === "heuristic_fallback") return "规则评分（AI 失败降级）";
   return mode;
 }
 
-const ERROR_TRANSLATIONS: [RegExp, string][] = [
-  [/邮件服务未配置/i, "邮件服务未配置，请在 .env 中填写 SMTP_HOST / SMTP_USER / SMTP_PASSWORD / SMTP_FROM 后重启后端"],
+const ERROR_TRANSLATIONS: Array<[RegExp, string]> = [
+  [/OPENAI_API_KEY/i, "未配置 OpenAI API Key，请在 .env 中设置 OPENAI_API_KEY 与 OPENAI_MODEL 后重启后端"],
+  [/OPENAI_MODEL/i, "OpenAI 模型不可用，请检查 OPENAI_MODEL 环境变量"],
   [/SMTP 认证失败/i, "SMTP 认证失败：请在腾讯企业邮箱后台生成「客户端专用密码」，更新 .env 的 SMTP_PASSWORD 后重启后端"],
   [/535.*authentication failed/i, "SMTP 认证失败：请使用企业邮箱「客户端专用密码」，不要用网页登录密码"],
   [/API_DIRECT_API_KEY/i, "未配置 API Direct 密钥（API_DIRECT_API_KEY）"],

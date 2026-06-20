@@ -1,9 +1,11 @@
 """多平台 API Direct 采集测试。"""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import anyio
+import pytest
 
 from app.core.config import settings
 from app.models.collection_task import CollectionTask
@@ -1174,6 +1176,92 @@ def test_tiktok_apify_profile_maps_author_from_item():
     assert profile.username == "chefmike"
     assert profile.followers_count == 120000
     assert profile.source_meta.get("provider") == "apify"
+
+
+@pytest.mark.anyio
+async def test_tiktok_apify_memory_limit_retries_with_lower_memory(monkeypatch):
+    from app.services.apify_client import ApifyError
+    from app.services.platform_providers.tiktok_apify import TikTokApifyProvider
+
+    monkeypatch.setattr(settings, "apify_token", "apify_api_test")
+    monkeypatch.setattr(settings, "apify_tiktok_timeout_seconds", 30)
+    monkeypatch.setattr(settings, "competitor_product_keyword_timeout_seconds", 30)
+    monkeypatch.setattr(settings, "tiktok_apify_keyword_concurrency", 2)
+    monkeypatch.setattr(settings, "tiktok_apify_memory_mbytes", 2048)
+
+    calls = []
+
+    async def fake_actor(actor_id, run_input, **kwargs):
+        calls.append((run_input["searchQueries"][0], run_input["resultsPerPage"], kwargs.get("memory_mbytes")))
+        if len(calls) == 1:
+            raise ApifyError(
+                "memory-limit-exceeded: current used: 5120MB, requested: 4096MB, account limit: 8192MB"
+            )
+        return [
+            {
+                "authorMeta": {"name": "homehivecreator", "fans": 12000},
+                "text": "HOMEHIVE clear PVC jewelry bags review",
+                "webVideoUrl": "https://www.tiktok.com/@homehivecreator/video/1",
+            }
+        ]
+
+    task = CollectionTask(
+        name="homehive",
+        platform="tiktok",
+        platforms=["tiktok"],
+        keywords=["HOMEHIVE clear PVC jewelry bags"],
+        collection_mode="competitor_product",
+        discovery_limit=5,
+    )
+
+    with patch("app.services.platform_providers.tiktok_apify.run_actor_sync", side_effect=fake_actor):
+        result = await TikTokApifyProvider.discover(task)
+
+    assert result.fatal is False
+    assert result.profiles
+    assert len(calls) == 2
+    assert calls[1][1] < calls[0][1]
+    assert calls[1][2] <= calls[0][2]
+    assert any("内存限制" in err and "降级重试 1 次" in err for err in result.errors)
+
+
+@pytest.mark.anyio
+async def test_tiktok_apify_timeout_continues_other_queries(monkeypatch):
+    from app.services.platform_providers.tiktok_apify import TikTokApifyProvider
+
+    monkeypatch.setattr(settings, "apify_token", "apify_api_test")
+    monkeypatch.setattr(settings, "apify_tiktok_timeout_seconds", 1)
+    monkeypatch.setattr(settings, "competitor_product_keyword_timeout_seconds", 1)
+    monkeypatch.setattr(settings, "tiktok_apify_keyword_concurrency", 1)
+    monkeypatch.setattr(settings, "tiktok_apify_memory_mbytes", 2048)
+
+    async def fake_actor(actor_id, run_input, **kwargs):
+        keyword = run_input["searchQueries"][0]
+        if keyword == "HOMEHIVE clear PVC jewelry bags":
+            raise asyncio.TimeoutError()
+        return [
+            {
+                "authorMeta": {"name": "variantcreator", "fans": 22000},
+                "text": "HOMEHIVE 20 Clear Bags in clear PVC",
+                "webVideoUrl": "https://www.tiktok.com/@variantcreator/video/1",
+            }
+        ]
+
+    task = CollectionTask(
+        name="homehive",
+        platform="tiktok",
+        platforms=["tiktok"],
+        keywords=["HOMEHIVE clear PVC jewelry bags", "HOMEHIVE 20 Clear Bags"],
+        collection_mode="competitor_product",
+        discovery_limit=5,
+    )
+
+    with patch("app.services.platform_providers.tiktok_apify.run_actor_sync", side_effect=fake_actor):
+        result = await TikTokApifyProvider.discover(task)
+
+    assert result.fatal is False
+    assert [profile.username for profile in result.profiles] == ["variantcreator"]
+    assert any("query HOMEHIVE clear PVC jewelry bags" in err and "超时" in err for err in result.errors)
 
 
 def test_youtube_provider_routes_to_apify_when_configured():

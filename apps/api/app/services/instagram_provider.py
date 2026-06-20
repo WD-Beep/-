@@ -151,6 +151,8 @@ async def scrape_instagram_profiles(
     urls_or_usernames: list[str],
     *,
     candidate_meta: dict | None = None,
+    on_item_complete=None,
+    should_stop=None,
 ) -> "ProfileScrapeResult":
     from app.services.apify_instagram import scrape_instagram_profiles as apify_scrape
 
@@ -158,9 +160,19 @@ async def scrape_instagram_profiles(
     if provider == PROVIDER_API_DIRECT:
         from app.services.api_direct_instagram import scrape_instagram_profiles as ad_scrape
 
-        return await ad_scrape(urls_or_usernames, candidate_meta=candidate_meta)
+        return await ad_scrape(
+            urls_or_usernames,
+            candidate_meta=candidate_meta,
+            on_item_complete=on_item_complete,
+            should_stop=should_stop,
+        )
     if provider == PROVIDER_APIFY:
-        return await apify_scrape(urls_or_usernames, candidate_meta=candidate_meta)
+        return await apify_scrape(
+            urls_or_usernames,
+            candidate_meta=candidate_meta,
+            on_item_complete=on_item_complete,
+            should_stop=should_stop,
+        )
     if provider == PROVIDER_HIKERAPI:
         return await _hikerapi_scrape_profiles(urls_or_usernames, candidate_meta=candidate_meta)
     return await _yepapi_scrape_profiles(urls_or_usernames, candidate_meta=candidate_meta)

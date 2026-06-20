@@ -1,5 +1,6 @@
 import { AlertCircle, Inbox, Loader2 } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 export function LoadingState({ label = "加载中..." }: { label?: string }) {
@@ -30,9 +31,11 @@ export function EmptyState({
 export function ErrorAlert({
   message,
   className,
+  onRetry,
 }: {
   message: string;
   className?: string;
+  onRetry?: () => void;
 }) {
   return (
     <div
@@ -41,9 +44,16 @@ export function ErrorAlert({
         className,
       )}
     >
-      <div className="flex items-start gap-2">
-        <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-        <span>{message}</span>
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-2">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{message}</span>
+        </div>
+        {onRetry ? (
+          <Button type="button" size="sm" variant="outline" onClick={onRetry}>
+            重试
+          </Button>
+        ) : null}
       </div>
     </div>
   );

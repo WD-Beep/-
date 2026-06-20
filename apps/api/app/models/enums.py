@@ -30,6 +30,10 @@ class CandidateSourceType(str, enum.Enum):
     INPUT_REEL = "input_reel"
     RELATED_PROFILE = "related_profile"
     COMPETITOR_PRODUCT_POST_AUTHOR = "competitor_product_post_author"
+    INPUT_URL = "input_url"
+    LINK_IMPORT = "link_import"
+    LINK_SEED_DISCOVERED = "link_seed_discovered"
+    SHOPPING_SEED = "shopping_seed"
     UNKNOWN = "unknown"
 
 
@@ -49,6 +53,7 @@ class CandidateFailureReason(str, enum.Enum):
     DUPLICATE = "duplicate"
     API_FAILED = "api_failed"
     LOW_VALUE_SEED = "low_value_seed"
+    NO_SAME_PRODUCT_MATCH = "no_same_product_match"
     UNKNOWN = "unknown"
 
 
@@ -73,6 +78,7 @@ class CollectionMode(str, enum.Enum):
     COMMENT_AUTHORS = "comment_authors"
     COMPETITOR_PRODUCT = "competitor_product"
     LINK_IMPORT = "link_import"
+    LINK_SEED_DISCOVERY = "link_seed_discovery"
 
 
 class LinkImportBatchStatus(str, enum.Enum):
@@ -120,3 +126,10 @@ class ContactChannel(str, enum.Enum):
     WHATSAPP = "whatsapp"
     WEBSITE_FORM = "website_form"
     OTHER = "other"
+
+
+class KnowledgeDocumentStatus(str, enum.Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    READY = "ready"
+    FAILED = "failed"

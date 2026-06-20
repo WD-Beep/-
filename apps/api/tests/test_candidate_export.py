@@ -212,7 +212,7 @@ def test_build_collection_task_candidates_excel_youtube_platform_header():
 
     assert "Instagram 主页" not in headers
     assert headers.index("平台") + 1
-    assert ws.cell(row=2, column=headers.index("平台") + 1).value == "youtube"
+    assert ws.cell(row=2, column=headers.index("平台") + 1).value == "YouTube"
     profile_cell = ws.cell(row=2, column=headers.index("主页链接") + 1)
     assert profile_cell.value == influencer.profile_url
     assert profile_cell.hyperlink.target == influencer.profile_url

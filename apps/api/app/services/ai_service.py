@@ -4,10 +4,9 @@ import random
 import re
 from dataclasses import dataclass
 
-import httpx
-
 from app.core.config import settings
 from app.models.influencer import Influencer
+from app.services.ai.openai_client import OPENAI_NOT_CONFIGURED_MSG, chat_completion_json
 from app.services.business_quality import assess_creator_quality
 
 logger = logging.getLogger(__name__)
@@ -281,48 +280,16 @@ def _parse_llm_json(content: str) -> dict:
 
 
 async def real_llm_analyze(influencer: Influencer) -> AnalysisOutput:
-    """
-    调用 Kimi (Moonshot) 真实 LLM 分析。
+    """调用 OpenAI 真实 LLM 分析。"""
+    if not settings.is_openai_configured:
+        raise ValueError(OPENAI_NOT_CONFIGURED_MSG)
 
-    生产环境可替换为 OpenAI / Claude 等 Provider，保持返回 AnalysisOutput 结构即可。
-    """
-    if not settings.is_kimi_configured:
-        raise ValueError("Kimi API key not configured")
-
-    headers = {
-        "Authorization": f"Bearer {settings.kimi_api_key.strip()}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": settings.kimi_model,
-        "messages": [
-            {"role": "system", "content": "你是海外红人营销分析助手，仅返回合法 JSON。"},
-            {"role": "user", "content": _build_llm_prompt(influencer)},
-        ],
-        # kimi-k2.5 仅允许 temperature=0.6，其它值会 400
-        "temperature": 0.6,
-        "max_tokens": 8192,
-        "thinking": {"type": "disabled"},
-    }
-
-    async with httpx.AsyncClient(timeout=90.0) as client:
-        response = await client.post(
-            f"{settings.kimi_api_base.rstrip('/')}/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            body = (exc.response.text or "")[:500]
-            raise RuntimeError(f"Kimi API HTTP {exc.response.status_code}: {body}") from exc
-        data = response.json()
-
-    message = data["choices"][0]["message"]
-    content = (message.get("content") or message.get("reasoning_content") or "").strip()
-    if not content:
-        raise ValueError("Kimi 返回空内容（content 与 reasoning_content 均为空）")
-    parsed = _parse_llm_json(content)
+    parsed = await chat_completion_json(
+        system_prompt="你是海外红人营销分析助手，仅返回合法 JSON。",
+        user_prompt=_build_llm_prompt(influencer),
+        temperature=0.5,
+        max_tokens=4096,
+    )
     fallback_metrics = _derive_metric_scores(influencer)
 
     return AnalysisOutput(
@@ -332,7 +299,7 @@ async def real_llm_analyze(influencer: Influencer) -> AnalysisOutput:
         tags=[str(tag) for tag in parsed.get("tags", [])][:8],
         risk_level=str(parsed.get("risk_level", _derive_risk_level(influencer))),
         score_reason=str(parsed.get("score_reason", "")),
-        source="kimi",
+        source="openai",
         product_fit=_clamp_score(parsed.get("product_fit"), fallback_metrics["product_fit"]),
         travel_fit_score=_clamp_score(parsed.get("travel_fit_score"), fallback_metrics["travel_fit_score"]),
         purchasing_power_score=_clamp_score(
@@ -361,11 +328,11 @@ def heuristic_analyze(
     metrics = _derive_metric_scores(influencer)
     quality = assess_creator_quality(influencer)
     risk_level = _derive_risk_level(influencer)
-    if reason == "kimi_failed" and error:
+    if reason == "llm_failed" and error:
         score_reason = f"AI 分析失败：{error}。已降级为本地规则评分：{quality.reason_text}"
         source = "heuristic_fallback"
     elif reason == "no_api_key":
-        score_reason = f"未配置 KIMI_API_KEY，已使用本地规则评分：{quality.reason_text}"
+        score_reason = f"未配置 OPENAI_API_KEY，已使用本地规则评分：{quality.reason_text}"
         source = "heuristic"
     else:
         score_reason = f"已使用本地规则评分：{quality.reason_text}"
@@ -384,12 +351,12 @@ def heuristic_analyze(
 
 
 async def analyze_influencer(influencer: Influencer) -> AnalysisOutput:
-    """统一分析入口：优先 Kimi；失败或未配置时使用指标启发式，不使用 mock 假数据。"""
-    if not settings.is_kimi_configured:
+    """统一分析入口：优先 OpenAI；失败或未配置时使用指标启发式，不使用 mock 假数据。"""
+    if not settings.is_openai_configured:
         return heuristic_analyze(influencer, reason="no_api_key")
     try:
         return await real_llm_analyze(influencer)
     except Exception as exc:
         err_text = str(exc).strip() or exc.__class__.__name__
-        logger.warning("Kimi analyze failed for @%s, fallback to heuristic: %s", influencer.username, err_text)
-        return heuristic_analyze(influencer, reason="kimi_failed", error=err_text)
+        logger.warning("OpenAI analyze failed for @%s, fallback to heuristic: %s", influencer.username, err_text)
+        return heuristic_analyze(influencer, reason="llm_failed", error=err_text)

@@ -55,6 +55,35 @@ test("task with valuable data is effective", () => {
   assert.equal(isTaskRowIneffective(row), false);
 });
 
+test("partial failed task with large funnel is high value", () => {
+  const row = task({
+    status: "partial_failed",
+    inserted_count: 21,
+    result_count: 21,
+    discovered_count: 574,
+    profile_fetched_count: 481,
+    filtered_out_count: 109,
+    effectiveness_category: "high_value",
+  });
+  assert.equal(taskEffectivenessCategory(row), "high_value");
+  assert.equal(matchesEffectivenessFilter("high_value", row), true);
+  assert.equal(matchesEffectivenessFilter("low_value_result", row), false);
+  assert.equal(isTaskRowIneffective(row), false);
+});
+
+test("single link import is low value and remains cleanup candidate", () => {
+  const row = task({
+    inserted_count: 1,
+    result_count: 1,
+    discovered_count: 1,
+    profile_fetched_count: 1,
+    effectiveness_category: "low_value_result",
+  });
+  assert.equal(taskEffectivenessCategory(row), "low_value_result");
+  assert.equal(matchesEffectivenessFilter("low_value_result", row), true);
+  assert.equal(isTaskRowIneffective(row), true);
+});
+
 test("zero insert is no_result", () => {
   const row = task({
     inserted_count: 0,

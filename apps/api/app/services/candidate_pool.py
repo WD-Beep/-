@@ -76,6 +76,8 @@ def normalize_profile_failure_reason(reason: str | None) -> str:
 def normalize_hard_filter_reason(reason: str | None) -> str:
     if not reason:
         return CandidateFailureReason.UNKNOWN.value
+    if reason == "no_same_product_match":
+        return CandidateFailureReason.NO_SAME_PRODUCT_MATCH.value
     if reason == "below_min_followers":
         return CandidateFailureReason.BELOW_MIN_FOLLOWERS.value
     if reason == "below_min_engagement_rate":
@@ -114,6 +116,8 @@ def hard_filter_failure_detail(
         if name != "instagram":
             return f"无效 {name} 主页或用户名"
         return "无效 Instagram 主页或用户名"
+    if reason == "no_same_product_match":
+        return "未命中同款商品指纹"
     if reason == "below_min_followers":
         item = SimpleNamespace(platform=platform or "instagram")
         required = required_min_followers_for_item(item, task)

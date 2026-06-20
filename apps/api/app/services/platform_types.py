@@ -27,27 +27,31 @@ PLATFORM_DISCOVERY_CATEGORIES: dict[str, str] = {
     "youtube": "search_discovery",
     "tiktok": "search_discovery",
     "facebook": "search_discovery",
-    "pinterest": "link_completion",
-    "ltk": "link_completion",
-    "shopmy": "link_completion",
+    "pinterest": "external_seed_discovery",
+    "ltk": "external_seed_discovery",
+    "shopmy": "external_seed_discovery",
     "amazon": "link_completion",
 }
 
 DISCOVERY_CATEGORY_LABELS: dict[str, str] = {
     "search_discovery": "可搜索发现",
+    "external_seed_discovery": "外部 seed 发现",
     "external_link_discovery": "外链发现",
     "link_completion": "链接补全",
 }
 
 DISCOVERY_CATEGORY_HINTS: dict[str, str] = {
     "search_discovery": "支持关键词、话题/标签、竞品商品词扩展，以及从帖子/视频/评论/主页发现红人。",
+    "external_seed_discovery": "可通过公共网页搜索、Amazon/商品词 seed 查询和已采集社媒主页反向外链，发现 LTK/ShopMy/Pinterest 创作者入口；站内关键词直采尚未稳定接入。",
     "external_link_discovery": "可从 Instagram/TikTok/YouTube/Facebook 的 bio、视频描述、主页外链，或已采集红人的 other_social_links 中识别；也可作为商业化能力信号。",
     "link_completion": "主要通过链接导入定向补全资料，也可从其他社媒外链反向发现；不保证粉丝/互动/联系方式完整，空资料会标记为低信息量结果。",
 }
 
 LINK_COMPLETION_PLATFORMS = frozenset({"pinterest", "ltk", "shopmy", "amazon"})
 URL_ONLY_PLATFORMS = frozenset({"pinterest", "ltk", "shopmy"})
-EXTERNAL_LINK_PLATFORMS = frozenset({"ltk", "shopmy"})
+EXTERNAL_SEED_DISCOVERY_PLATFORMS = frozenset({"pinterest", "ltk", "shopmy"})
+REVERSE_LINK_EXPANSION_PLATFORMS = frozenset({"pinterest", "ltk", "shopmy"})
+EXTERNAL_LINK_PLATFORMS = REVERSE_LINK_EXPANSION_PLATFORMS
 KEYWORD_DISCOVERY_PLATFORMS = frozenset({"instagram", "tiktok", "youtube", "facebook"})
 
 LINK_IMPORT_PROFILE_PLATFORMS = frozenset(
@@ -55,14 +59,62 @@ LINK_IMPORT_PROFILE_PLATFORMS = frozenset(
 )
 
 PLATFORM_FEATURE_FLAGS: dict[str, dict[str, bool]] = {
-    "instagram": {"keyword_discovery": True, "link_import": True, "product_seed": False},
-    "youtube": {"keyword_discovery": True, "link_import": True, "product_seed": False},
-    "tiktok": {"keyword_discovery": True, "link_import": True, "product_seed": False},
-    "facebook": {"keyword_discovery": True, "link_import": True, "product_seed": False},
-    "pinterest": {"keyword_discovery": False, "link_import": True, "product_seed": False},
-    "ltk": {"keyword_discovery": False, "link_import": True, "product_seed": False},
-    "shopmy": {"keyword_discovery": False, "link_import": True, "product_seed": False},
-    "amazon": {"keyword_discovery": False, "link_import": True, "product_seed": True},
+    "instagram": {
+        "native_keyword_discovery": True,
+        "external_seed_discovery": False,
+        "reverse_link_expansion": False,
+        "link_import": True,
+        "product_seed": False,
+    },
+    "youtube": {
+        "native_keyword_discovery": True,
+        "external_seed_discovery": False,
+        "reverse_link_expansion": False,
+        "link_import": True,
+        "product_seed": False,
+    },
+    "tiktok": {
+        "native_keyword_discovery": True,
+        "external_seed_discovery": False,
+        "reverse_link_expansion": False,
+        "link_import": True,
+        "product_seed": False,
+    },
+    "facebook": {
+        "native_keyword_discovery": True,
+        "external_seed_discovery": False,
+        "reverse_link_expansion": False,
+        "link_import": True,
+        "product_seed": False,
+    },
+    "pinterest": {
+        "native_keyword_discovery": False,
+        "external_seed_discovery": True,
+        "reverse_link_expansion": True,
+        "link_import": True,
+        "product_seed": False,
+    },
+    "ltk": {
+        "native_keyword_discovery": False,
+        "external_seed_discovery": True,
+        "reverse_link_expansion": True,
+        "link_import": True,
+        "product_seed": False,
+    },
+    "shopmy": {
+        "native_keyword_discovery": False,
+        "external_seed_discovery": True,
+        "reverse_link_expansion": True,
+        "link_import": True,
+        "product_seed": False,
+    },
+    "amazon": {
+        "native_keyword_discovery": False,
+        "external_seed_discovery": False,
+        "reverse_link_expansion": False,
+        "link_import": True,
+        "product_seed": True,
+    },
 }
 
 LINK_IMPORT_HINTS: dict[str, str] = {
@@ -70,9 +122,9 @@ LINK_IMPORT_HINTS: dict[str, str] = {
     "youtube": "YouTube：频道链接；也支持关键词/话题发现",
     "tiktok": "TikTok：主页链接；也支持关键词/话题发现",
     "facebook": "Facebook：主页/Page 链接；也支持关键词/话题发现",
-    "pinterest": "Pinterest：主页/Board/Pin 链接；主要通过链接导入或外链发现补全",
-    "ltk": "LTK：创作者/商品链接；可通过链接导入或社媒外链/已采集红人反向发现",
-    "shopmy": "ShopMy：创作者/商品链接；可通过链接导入或社媒外链/已采集红人反向发现",
+    "pinterest": "Pinterest：支持链接导入、外部搜索发现、反向外链扩展；站内关键词直采未稳定接入",
+    "ltk": "LTK：支持链接导入、公共网页搜索发现、反向外链扩展；站内关键词直采未接入",
+    "shopmy": "ShopMy：支持链接导入、公共网页搜索发现、反向外链扩展；站内关键词直采未接入",
     "amazon": "Amazon：商品链接线索；用于竞品商品发现，不是红人主页平台",
 }
 
@@ -84,17 +136,26 @@ def platform_discovery_category(platform: str) -> str:
 def platform_feature_flags(platform: str) -> dict[str, bool]:
     return PLATFORM_FEATURE_FLAGS.get(
         platform.lower(),
-        {"keyword_discovery": False, "link_import": False, "product_seed": False},
+        {
+            "native_keyword_discovery": False,
+            "external_seed_discovery": False,
+            "reverse_link_expansion": False,
+            "link_import": False,
+            "product_seed": False,
+        },
     )
 
 
 def apply_platform_feature_flags(cap: "PlatformCapability") -> "PlatformCapability":
     flags = platform_feature_flags(cap.platform)
-    cap.keyword_discovery = flags["keyword_discovery"]
+    cap.native_keyword_discovery = flags["native_keyword_discovery"]
+    cap.keyword_discovery = flags["native_keyword_discovery"]
+    cap.external_seed_discovery = flags["external_seed_discovery"]
+    cap.reverse_link_expansion = flags["reverse_link_expansion"]
     cap.link_import = flags["link_import"]
     cap.product_seed = flags["product_seed"]
     cap.discovery_category = platform_discovery_category(cap.platform)
-    cap.external_link_discovery = cap.platform.lower() in EXTERNAL_LINK_PLATFORMS
+    cap.external_link_discovery = flags["reverse_link_expansion"]
     return cap
 
 
@@ -142,6 +203,7 @@ class PlatformDiscoveryResult:
     fatal: bool = False
     skipped: bool = False
     skip_reason: str | None = None
+    provider_availability_state: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -152,6 +214,9 @@ class PlatformCapability:
     message: str
     endpoints: list[str] = field(default_factory=list)
     keyword_discovery: bool = False
+    native_keyword_discovery: bool = False
+    external_seed_discovery: bool = False
+    reverse_link_expansion: bool = False
     link_import: bool = False
     product_seed: bool = False
     link_import_hint: str | None = None

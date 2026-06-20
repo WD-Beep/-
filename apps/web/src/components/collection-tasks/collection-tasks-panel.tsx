@@ -16,22 +16,28 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   COLLECTION_TASK_TABLE_LAYOUT,
+  buildTaskResultBreakdown,
+  collectionTaskInterruptedHint,
   collectionTaskRunningHint,
   formatCollectionResultLines,
   formatTargetLabel,
   isCollectionTaskRateLimited,
   isCollectionTaskSlowApi,
+  shouldShowCollectionTaskErrorMessage,
 } from "@/lib/collection-task-progress";
 import {
   buildCollectionTaskCompletionMessage,
   buildInfluencersPageUrl,
   bulkDeleteCollectionTasks,
+  bulkManageCollectionTasks,
+  bulkRunCollectionTasks,
   COLLECTION_TASK_POLL_INTERVAL_MS,
   COLLECTION_TASK_SLOW_HINT_MS,
   createCollectionTask,
   deleteLinkImportBatch,
   fetchCollectionTasks,
   fetchLinkImportBatches,
+  fetchPlatformCapabilities,
   getCollectionTaskRunningElapsedMs,
   isCollectionTaskRunning,
   isCollectionTaskRunningStale,
@@ -43,6 +49,8 @@ import {
   type CollectionTask,
   type CollectionTaskPayload,
   type CollectionTaskStatus,
+  type CollectionTaskBulkManageAction,
+  type CollectionTaskBulkManageResult,
   type LinkImportBatch,
   type TaskSourceMethod,
 } from "@/lib/api";
@@ -64,11 +72,11 @@ import {
   buildTaskDeleteResultMessage,
   isLegacyBatchIneffective,
   isTaskRowIneffective,
-  matchesEffectivenessFilter,
   matchesLegacyBatchFilter,
   taskEffectivenessCategory,
   taskEffectivenessCategoryLabel,
   taskHasRetentionData,
+  taskManagementTags,
   type TaskEffectivenessFilter,
 } from "@/lib/task-effectiveness";
 
@@ -113,13 +121,13 @@ function formatKeywordFilters(task: CollectionTask): string | null {
 
 function formatCollectionResultCell(
   task: CollectionTask,
-  options: { isStaleRunning?: boolean; elapsedMs?: number } = {},
+  options: { isStaleRunning?: boolean; elapsedMs?: number; slowThresholdMs?: number } = {},
 ) {
-  const { isStaleRunning = false, elapsedMs = 0 } = options;
+  const { isStaleRunning = false, elapsedMs = 0, slowThresholdMs = COLLECTION_TASK_SLOW_HINT_MS } = options;
   const lines = formatCollectionResultLines(task);
   const runningHint = collectionTaskRunningHint(task, {
     elapsedMs,
-    slowThresholdMs: COLLECTION_TASK_SLOW_HINT_MS,
+    slowThresholdMs,
     stale: isStaleRunning,
     recoverable: task.recoverable,
   });
@@ -131,6 +139,7 @@ function formatCollectionResultCell(
           <RefreshCw className="h-3.5 w-3.5 shrink-0" />
           任务可能中断，可重新运行继续
         </span>
+        <span className="mt-0.5 block text-xs text-muted-foreground">{collectionTaskInterruptedHint(task)}</span>
         <span className="mt-0.5 block text-xs text-muted-foreground">{lines.primary}</span>
         <span className="mt-0.5 block text-xs text-muted-foreground">{lines.funnel}</span>
       </>
@@ -139,7 +148,7 @@ function formatCollectionResultCell(
 
   if (isCollectionTaskRunning(task)) {
     const rateLimited = isCollectionTaskRateLimited(task);
-    const slowApi = isCollectionTaskSlowApi(task, elapsedMs, COLLECTION_TASK_SLOW_HINT_MS);
+    const slowApi = isCollectionTaskSlowApi(task, elapsedMs, slowThresholdMs);
     return (
       <>
         <span
@@ -162,37 +171,68 @@ function formatCollectionResultCell(
   }
 
   const inserted = task.inserted_count ?? task.result_count ?? 0;
+  const breakdown = buildTaskResultBreakdown(task);
   if (inserted > 0) {
     return (
-      <>
+      <div className="space-y-1 text-xs">
         <Link
           href={buildInfluencersPageUrl({ taskId: task.id, taskName: task.name })}
-          className="block rounded-sm text-primary transition-colors hover:bg-primary/5 hover:underline"
+          className="inline-flex flex-wrap items-center gap-1 rounded-sm text-sm font-medium text-primary transition-colors hover:bg-primary/5 hover:underline"
           title="查看该任务入库红人"
         >
-          {lines.primary}
+          <span>{breakdown.primary[0]}</span>
+          {breakdown.highValue ? (
+            <Badge variant="success" className="text-[10px]">
+              高价值
+            </Badge>
+          ) : null}
+          {breakdown.singleLinkImport ? (
+            <Badge variant="outline" className="text-[10px]">
+              单条链接导入
+            </Badge>
+          ) : null}
         </Link>
-        <span className="mt-0.5 block text-xs text-muted-foreground">
-          {inserted} 条 / 邮箱 {task.email_count ?? 0} / 缺联系 {task.missing_contact_count ?? 0}
-        </span>
-        <span className="mt-0.5 block text-xs text-muted-foreground">{lines.funnel}</span>
-      </>
+        <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-muted-foreground">
+          {breakdown.funnel.map((item) => (
+            <span key={item}>{item}</span>
+          ))}
+        </div>
+        <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-muted-foreground">
+          {breakdown.contacts.map((item) => (
+            <span key={item}>{item}</span>
+          ))}
+        </div>
+        {breakdown.reason ? (
+          <div className="line-clamp-2 text-muted-foreground" title={breakdown.reason}>
+            {breakdown.reason}
+          </div>
+        ) : null}
+      </div>
     );
   }
 
   return (
-    <>
-      <span className="text-muted-foreground">{lines.primary}</span>
-      <span className="mt-0.5 block text-xs text-muted-foreground">{lines.funnel}</span>
-      {lines.hint || task.status_summary ? (
+    <div className="space-y-1 text-xs text-muted-foreground">
+      <span className="block text-sm">{breakdown.primary[0]}</span>
+      <div className="flex flex-wrap gap-x-2 gap-y-0.5">
+        {breakdown.funnel.map((item) => (
+          <span key={item}>{item}</span>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-x-2 gap-y-0.5">
+        {breakdown.contacts.map((item) => (
+          <span key={item}>{item}</span>
+        ))}
+      </div>
+      {breakdown.reason || lines.hint || task.status_summary ? (
         <span
-          className="mt-0.5 block line-clamp-2 text-xs text-muted-foreground"
-          title={lines.hint ?? task.status_summary ?? undefined}
+          className="block line-clamp-2"
+          title={breakdown.reason ?? lines.hint ?? task.status_summary ?? undefined}
         >
-          {lines.hint ?? task.status_summary}
+          {breakdown.reason ?? lines.hint ?? task.status_summary}
         </span>
       ) : null}
-    </>
+    </div>
   );
 }
 
@@ -204,6 +244,17 @@ type TaskToast = {
 type TaskListRow =
   | { kind: "task"; task: CollectionTask; sortAt: number }
   | { kind: "legacy_batch"; batch: LinkImportBatch; sortAt: number };
+
+const TASK_PAGE_SIZE_OPTIONS = [10, 20, 50] as const;
+
+function buildBulkManageResultMessage(result: CollectionTaskBulkManageResult): string {
+  const parts: string[] = [];
+  if (result.archived_count > 0) parts.push(`已归档 ${result.archived_count} 个`);
+  if (result.deleted_count > 0) parts.push(`已删除 ${result.deleted_count} 个`);
+  if (result.restored_count > 0) parts.push(`已恢复 ${result.restored_count} 个`);
+  if (result.skipped_count > 0) parts.push(`跳过 ${result.skipped_count} 个`);
+  return parts.length > 0 ? parts.join("，") : `匹配 ${result.matched_count} 个，暂无可处理任务`;
+}
 
 function legacyBatchStatus(status: string): CollectionTaskStatus {
   switch (status) {
@@ -229,6 +280,9 @@ export function CollectionTasksPanel() {
   const [tasks, setTasks] = useState<CollectionTask[]>([]);
   const [legacyBatches, setLegacyBatches] = useState<LinkImportBatch[]>([]);
   const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<(typeof TASK_PAGE_SIZE_OPTIONS)[number]>(20);
+  const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogMode, setDialogMode] = useState<"create" | "edit">("create");
@@ -251,8 +305,12 @@ export function CollectionTasksPanel() {
     confirmLabel: string;
     taskIds: number[];
     legacyBatchIds: number[];
+    bulkAction?: CollectionTaskBulkManageAction;
   } | null>(null);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [maxRunningTasks, setMaxRunningTasks] = useState(2);
+  const [staleAfterSeconds, setStaleAfterSeconds] = useState(180);
+  const [bulkRunSubmitting, setBulkRunSubmitting] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const prevStatusRef = useRef<Map<number, CollectionTaskStatus>>(new Map());
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -263,9 +321,22 @@ export function CollectionTasksPanel() {
     toastTimerRef.current = setTimeout(() => setToast(null), 8000);
   }, []);
 
-  const applyTaskList = useCallback((items: CollectionTask[], totalCount: number) => {
+  useEffect(() => {
+    void fetchPlatformCapabilities()
+      .then((caps) => {
+        setMaxRunningTasks(Math.max(1, caps.collection_max_running_tasks ?? 2));
+        setStaleAfterSeconds(Math.max(30, caps.collection_running_stale_seconds ?? 180));
+      })
+      .catch(() => {
+        setMaxRunningTasks(2);
+        setStaleAfterSeconds(180);
+      });
+  }, []);
+
+  const applyTaskList = useCallback((items: CollectionTask[], totalCount: number, pages = 1) => {
     setTasks(items);
     setTotal(totalCount);
+    setTotalPages(Math.max(1, pages));
     setCandidatesTask((prev) => {
       if (!prev) return prev;
       return items.find((t) => t.id === prev.id) ?? prev;
@@ -278,21 +349,23 @@ export function CollectionTasksPanel() {
     }
     setError(null);
     try {
-      const apiEffectiveness =
-        effectivenessFilter === "all" ? undefined : effectivenessFilter;
+      const showLegacyBatches = effectivenessFilter === "test_history";
       const [data, batchData] = await Promise.all([
-        fetchCollectionTasks(1, 100, { effectiveness: apiEffectiveness }),
-        fetchLinkImportBatches(1, 100).catch(() => ({ items: [] as LinkImportBatch[], total: 0 })),
+        fetchCollectionTasks(page, pageSize, { task_view: effectivenessFilter }),
+        showLegacyBatches
+          ? fetchLinkImportBatches(1, 20).catch(() => ({ items: [] as LinkImportBatch[], total: 0 }))
+          : Promise.resolve({ items: [] as LinkImportBatch[], total: 0 }),
       ]);
-      const filteredTasks = data.items.filter((task) =>
-        matchesEffectivenessFilter(effectivenessFilter, task),
-      );
       const filteredLegacy = batchData.items.filter((batch) =>
         matchesLegacyBatchFilter(effectivenessFilter, batch),
       );
-      applyTaskList(filteredTasks, filteredTasks.length + filteredLegacy.length);
+      const pages = data.total_pages ?? data.pages ?? Math.ceil((data.total ?? 0) / pageSize);
+      applyTaskList(data.items, data.total, pages);
       setLegacyBatches(filteredLegacy);
-      setSelectedTaskIds((prev) => prev.filter((id) => filteredTasks.some((task) => task.id === id)));
+      setSelectedTaskIds((prev) => prev.filter((id) => data.items.some((task) => task.id === id)));
+      if (data.items.length === 0 && page > 1 && data.total > 0) {
+        setPage((current) => Math.max(1, current - 1));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载任务列表失败");
     } finally {
@@ -300,7 +373,7 @@ export function CollectionTasksPanel() {
         setLoading(false);
       }
     }
-  }, [applyTaskList, effectivenessFilter]);
+  }, [applyTaskList, effectivenessFilter, page, pageSize]);
 
   const listRows = useMemo<TaskListRow[]>(() => {
     const rows: TaskListRow[] = [
@@ -326,7 +399,7 @@ export function CollectionTasksPanel() {
     queueMicrotask(() => {
       void loadTasks();
     });
-  }, [loadTasks, productId, effectivenessFilter]);
+  }, [loadTasks, productId]);
 
   useEffect(() => {
     if (searchParams.get("create") === "link_import") {
@@ -346,9 +419,10 @@ export function CollectionTasksPanel() {
   }, []);
 
   const hasRunningTasks = tasks.some((t) => isCollectionTaskRunning(t));
-  const activeRunningTask = tasks.find(
+  const activeRunningTasks = tasks.filter(
     (t) => isCollectionTaskRunning(t) && !isCollectionTaskRunningStale(t),
   );
+  const activeRunningTask = activeRunningTasks[0];
 
   useEffect(() => {
     if (!hasRunningTasks) return;
@@ -418,6 +492,25 @@ export function CollectionTasksPanel() {
     setActionTaskId(task.id);
     setMessage(null);
     setError(null);
+
+    // Pre-check: if another task appears to be running, warn early
+    const otherActiveCount = tasks.filter(
+      (t) =>
+        t.id !== task.id &&
+        isCollectionTaskRunning(t) &&
+        !isCollectionTaskRunningStale(t),
+    ).length;
+    if (
+      otherActiveCount >= maxRunningTasks &&
+      !(isCollectionTaskRunning(task) && isCollectionTaskRunningStale(task))
+    ) {
+      const msg = `当前已有 ${otherActiveCount} 个任务在运行（上限 ${maxRunningTasks}），请等待空位后再运行`;
+      showToast({ tone: "warning", message: msg });
+      setError(msg);
+      setActionTaskId(null);
+      return;
+    }
+
     try {
       const kickoff = await runCollectionTask(task.id);
       const runningSummary =
@@ -441,7 +534,7 @@ export function CollectionTasksPanel() {
       );
       if (kickoff.status === "running") {
         setMessage(runningSummary);
-        showToast({ tone: "info", message: runningSummary });
+        showToast({ tone: "info", message: `任务已开始：${runningSummary}` });
         prevStatusRef.current.set(task.id, "running");
         await loadTasks({ silent: true });
       } else {
@@ -461,10 +554,49 @@ export function CollectionTasksPanel() {
         await loadTasks({ silent: true });
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "运行采集失败");
+      const errMsg =
+        err instanceof Error ? err.message : "运行采集失败";
+      // Also show as toast so user definitely sees it
+      showToast({ tone: "error", message: errMsg });
+      setError(errMsg);
       await loadTasks({ silent: true });
     } finally {
       setActionTaskId(null);
+    }
+  }
+
+  async function handleBulkRunPageIncomplete() {
+    const runnableIds = tasks
+      .filter((t) => {
+        if (t.is_archived) return false;
+        if (isCollectionTaskRunning(t) && !isCollectionTaskRunningStale(t)) return false;
+        if (isCollectionTaskSettled(t.status) && (t.inserted_count ?? t.result_count ?? 0) > 0) {
+          return false;
+        }
+        return true;
+      })
+      .map((t) => t.id);
+    if (runnableIds.length === 0) {
+      showToast({ tone: "warning", message: "当前页没有可运行的未完成任务" });
+      return;
+    }
+    setBulkRunSubmitting(true);
+    setMessage(null);
+    setError(null);
+    try {
+      const result = await bulkRunCollectionTasks(runnableIds);
+      setMessage(result.message);
+      showToast({
+        tone: result.started_ids.length > 0 ? "info" : "warning",
+        message: result.message,
+      });
+      await loadTasks({ silent: true });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : "批量运行失败";
+      showToast({ tone: "error", message: errMsg });
+      setError(errMsg);
+    } finally {
+      setBulkRunSubmitting(false);
     }
   }
 
@@ -494,6 +626,19 @@ export function CollectionTasksPanel() {
 
   const selectableTaskIds = ineffectiveTaskIds;
 
+  function changeTaskView(value: TaskEffectivenessFilter) {
+    setEffectivenessFilter(value);
+    setPage(1);
+    setSelectedTaskIds([]);
+  }
+
+  function changePageSize(value: number) {
+    if (!TASK_PAGE_SIZE_OPTIONS.includes(value as (typeof TASK_PAGE_SIZE_OPTIONS)[number])) return;
+    setPageSize(value as (typeof TASK_PAGE_SIZE_OPTIONS)[number]);
+    setPage(1);
+    setSelectedTaskIds([]);
+  }
+
   function openDeleteDialog(options: {
     taskIds: number[];
     legacyBatchIds?: number[];
@@ -519,11 +664,37 @@ export function CollectionTasksPanel() {
     });
   }
 
+  function openBulkManageDialog(options: {
+    action: CollectionTaskBulkManageAction;
+    title: string;
+    body: string;
+    confirmLabel: string;
+    taskIds?: number[];
+  }) {
+    setDeleteDialog({
+      open: true,
+      title: options.title,
+      body: options.body,
+      confirmLabel: options.confirmLabel,
+      taskIds: options.taskIds ?? [],
+      legacyBatchIds: [],
+      bulkAction: options.action,
+    });
+  }
+
   async function executeDeleteDialog() {
     if (!deleteDialog) return;
     setDeleteSubmitting(true);
     setError(null);
     try {
+      if (deleteDialog.bulkAction) {
+        const result = await bulkManageCollectionTasks(deleteDialog.bulkAction, deleteDialog.taskIds);
+        setMessage(buildBulkManageResultMessage(result));
+        setDeleteDialog(null);
+        setSelectedTaskIds([]);
+        await loadTasks();
+        return;
+      }
       if (deleteDialog.taskIds.length > 0) {
         const result = await bulkDeleteCollectionTasks(deleteDialog.taskIds);
         setMessage(buildTaskDeleteResultMessage(result));
@@ -595,6 +766,42 @@ export function CollectionTasksPanel() {
     openDeleteDialog({ taskIds: ineffectiveTaskIds });
   }
 
+  function handleArchiveTestHistory() {
+    openBulkManageDialog({
+      action: "archive_test_history",
+      title: "批量归档测试/历史任务？",
+      body: "系统只会归档当前产品范围内命中测试/历史规则的任务，不会删除红人库数据。归档后默认列表不再显示，可在“已归档任务”中恢复。",
+      confirmLabel: "批量归档",
+    });
+  }
+
+  function handleDeleteNoResult() {
+    openBulkManageDialog({
+      action: "delete_no_result",
+      title: "批量删除无结果任务？",
+      body: "系统只会处理当前产品范围内无结果、且没有保留价值的任务；有入库或追溯数据的任务会被跳过或归档保护。此操作不会删除真实业务红人数据。",
+      confirmLabel: "确认删除无结果任务",
+    });
+  }
+
+  function handleRestoreArchived() {
+    openBulkManageDialog({
+      action: "restore_archived",
+      title: "批量恢复归档任务？",
+      body: "系统只会恢复当前产品范围内的已归档任务，恢复后会重新出现在默认列表中。",
+      confirmLabel: "批量恢复",
+    });
+  }
+
+  function handleArchiveDuplicates() {
+    openBulkManageDialog({
+      action: "archive_duplicates",
+      title: "只保留最新一条，其余归档？",
+      body: "系统会按同名、同关键词、同模式、同平台、同产品识别可能重复任务，并仅归档较旧记录；不会自动删除任何重复任务。",
+      confirmLabel: "归档重复任务",
+    });
+  }
+
   async function handleRunLegacyBatch(batch: LinkImportBatch) {
     if (batch.status === "running") return;
     setActionLegacyBatchId(batch.id);
@@ -643,44 +850,79 @@ export function CollectionTasksPanel() {
           {(
             [
               ["all", "全部任务"],
-              ["effective", "有效果任务"],
-              ["low_value_result", "无价值结果"],
+              ["high_value", "高价值任务"],
+              ["effective", "有效任务"],
+              ["low_value_result", "低价值结果"],
               ["no_result", "无结果任务"],
+              ["test_history", "测试/历史任务"],
+              ["archived", "已归档任务"],
             ] as const
           ).map(([value, label]) => (
             <Button
               key={value}
               size="sm"
               variant={effectivenessFilter === value ? "default" : "ghost"}
-              onClick={() => {
-                setEffectivenessFilter(value);
-                setSelectedTaskIds([]);
-              }}
+              onClick={() => changeTaskView(value)}
             >
               {label}
             </Button>
           ))}
         </div>
-        {effectivenessFilter !== "effective" && ineffectiveTaskIds.length > 0 ? (
+        {effectivenessFilter !== "high_value" ? (
+          <Button variant="outline" size="sm" disabled={deleteSubmitting} onClick={handleArchiveTestHistory}>
+            批量归档测试/历史任务
+          </Button>
+        ) : null}
+        {effectivenessFilter !== "archived" ? (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={bulkRunSubmitting || loading}
+            onClick={() => void handleBulkRunPageIncomplete()}
+          >
+            {bulkRunSubmitting ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+            运行本页未完成任务
+          </Button>
+        ) : null}
+        {effectivenessFilter !== "high_value" ? (
+          <Button variant="outline" size="sm" disabled={deleteSubmitting} onClick={handleArchiveDuplicates}>
+            只保留最新一条
+          </Button>
+        ) : null}
+        {effectivenessFilter === "archived" ? (
+          <Button variant="outline" size="sm" disabled={deleteSubmitting} onClick={handleRestoreArchived}>
+            批量恢复归档任务
+          </Button>
+        ) : null}
+        {effectivenessFilter !== "high_value" && (effectivenessFilter === "no_result" || effectivenessFilter === "low_value_result") ? (
+          <Button variant="outline" size="sm" disabled={deleteSubmitting} onClick={handleDeleteNoResult}>
+            批量删除无结果任务
+          </Button>
+        ) : null}
+        {effectivenessFilter !== "high_value" && ["low_value_result", "no_result", "test_history"].includes(effectivenessFilter) && ineffectiveTaskIds.length > 0 ? (
           <Button
             variant="outline"
             size="sm"
             disabled={deleteSubmitting}
             onClick={handleDeleteAllIneffectiveOnPage}
           >
-            删除本页无效果任务 ({ineffectiveTaskIds.length})
+            删除本页可清理任务 ({ineffectiveTaskIds.length})
           </Button>
         ) : null}
       </div>
 
-      {activeRunningTask ? (
+      {activeRunningTasks.length > 0 ? (
         <div className="mb-4 rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
           <span className="inline-flex items-center gap-2 font-medium">
             <Loader2 className="h-4 w-4 animate-spin" />
-            「{activeRunningTask.name}」正在采集中
+            {activeRunningTasks.length === 1
+              ? `「${activeRunningTask?.name ?? "采集中"}」正在采集中`
+              : `${activeRunningTasks.length} 个任务正在采集中（上限 ${maxRunningTasks}）`}
           </span>
           <p className="mt-1 text-muted-foreground">
-            同一时间仅允许一个采集任务运行，其他任务的「运行」按钮已禁用。请等待状态变为有结果/无结果后再启动下一个。
+            {maxRunningTasks <= 1
+              ? "当前配置为单任务串行运行，其他任务的「运行」按钮已禁用。请等待状态变为有结果/无结果后再启动下一个。"
+              : `当前最多同时运行 ${maxRunningTasks} 个任务；已达上限时其余任务需等待空位。`}
           </p>
         </div>
       ) : null}
@@ -717,20 +959,25 @@ export function CollectionTasksPanel() {
         <CardHeader>
           <CardTitle>任务列表</CardTitle>
           <CardDescription>
-            共 {total} 个任务（含历史链接导入批次）
-            {effectivenessFilter === "low_value_result"
+            共 {total} 个任务，当前第 {page} / {totalPages} 页
+            {effectivenessFilter === "high_value"
+              ? " · 当前仅显示发现、主页或入库规模明显较高的任务"
+              : effectivenessFilter === "low_value_result"
               ? " · 当前仅显示有入库但资料几乎为空的任务"
               : effectivenessFilter === "no_result"
                 ? " · 当前仅显示完全无入库结果的任务"
                 : effectivenessFilter === "effective"
-                  ? " · 当前仅显示已产生可用资料的有效果任务"
+                  ? " · 当前仅显示有价值但未达到高价值阈值的任务"
+                  : effectivenessFilter === "test_history"
+                    ? " · 当前显示测试任务、验收任务和历史批次"
+                    : effectivenessFilter === "archived"
+                      ? " · 当前显示已归档任务"
                   : ""}
           </CardDescription>
         </CardHeader>
         <CardContent className="pt-0">
           {(effectivenessFilter === "low_value_result" ||
-            effectivenessFilter === "no_result" ||
-            effectivenessFilter === "ineffective") &&
+            effectivenessFilter === "no_result") &&
           selectedTaskIds.length > 0 ? (
             <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
               <span className="font-medium">已选择 {selectedTaskIds.length} 个任务</span>
@@ -758,15 +1005,15 @@ export function CollectionTasksPanel() {
           ) : (
             <div className="overflow-x-auto rounded-md border">
               <table className="w-full table-fixed text-sm">
-                <colgroup>
-                  <col className="w-10" />
-                  <col className="w-[24%]" />
-                  <col className="w-[10%]" />
-                  <col className="w-[12%]" />
-                  <col className="w-[88px]" />
-                  <col className="w-[22%]" />
-                  <col className="w-[96px]" />
-                  <col className="w-[180px]" />
+            <colgroup>
+              <col className="w-10" />
+              <col className="w-[22%]" />
+              <col className="w-[13%]" />
+              <col className="min-w-[140px] max-w-[180px]" />
+              <col className="w-[88px]" />
+              <col className="w-[22%]" />
+              <col className="w-[96px]" />
+              <col className="w-[176px]" />
                 </colgroup>
                 <thead className="bg-muted/40">
                   <tr className="border-b text-left text-muted-foreground">
@@ -804,7 +1051,7 @@ export function CollectionTasksPanel() {
                         <tr key={`legacy-${batch.id}`} className="group border-b align-middle last:border-0 hover:bg-muted/20">
                           <td className="px-2 py-3" />
                           <td className="min-w-0 px-4 py-3">
-                            <div className="truncate font-medium" title={batch.name}>
+                            <div className="line-clamp-2 font-medium" title={batch.name}>
                               {batch.name}
                             </div>
                             <div className="mt-1 truncate text-xs text-muted-foreground">历史链接导入批次</div>
@@ -880,15 +1127,14 @@ export function CollectionTasksPanel() {
                     const isRunning = isCollectionTaskRunning(task);
                     const isStaleRunning = isRunning && isCollectionTaskRunningStale(task);
                     const runningElapsedMs = isRunning ? getCollectionTaskRunningElapsedMs(task, nowMs) : 0;
-                    const otherTaskRunning = tasks.some(
+                    const otherActiveCount = tasks.filter(
                       (t) =>
                         t.id !== task.id &&
                         isCollectionTaskRunning(t) &&
                         !isCollectionTaskRunningStale(t),
-                    );
+                    ).length;
                     const runBlocked =
-                      (isRunning && !isStaleRunning) || otherTaskRunning;
-                    const taskResultSummary = isStaleRunning ? null : task.status_summary;
+                      (isRunning && !isStaleRunning) || otherActiveCount >= maxRunningTasks;
                     const mode = task.collection_mode ?? "keyword";
                     const keywords = task.keywords ?? [];
                     const followerRange = formatFollowerRange(task);
@@ -904,6 +1150,7 @@ export function CollectionTasksPanel() {
                         : keywords.join(", ") || (task.input_urls ?? []).join(", ");
                     const showModeBadge =
                       taskModeBadgeLabel(mode) !== taskSourceLabelForMode(mode);
+                    const managementTags = taskManagementTags(task);
 
                     return (
                       <tr key={task.id} className="group border-b align-middle last:border-0 hover:bg-muted/20">
@@ -917,7 +1164,7 @@ export function CollectionTasksPanel() {
                           />
                         </td>
                         <td className="min-w-0 px-4 py-3">
-                          <div className="truncate font-medium" title={task.name}>
+                          <div className="line-clamp-2 font-medium leading-snug" title={task.name}>
                             {task.name}
                           </div>
                           <div className="mt-1 truncate text-xs text-muted-foreground">
@@ -927,23 +1174,18 @@ export function CollectionTasksPanel() {
                             {followerRange ? ` · ${followerRange}` : ""}
                             {keywordFilters ? ` · ${keywordFilters}` : ""}
                           </div>
-                          {task.error_message ? (
+                          {shouldShowCollectionTaskErrorMessage(task) ? (
                             <p
                               className="mt-1 line-clamp-2 text-xs text-destructive"
-                              title={translateErrorMessage(task.error_message)}
+                              title={translateErrorMessage(task.error_message!)}
                             >
-                              {translateErrorMessage(task.error_message)}
-                            </p>
-                          ) : null}
-                          {taskResultSummary ? (
-                            <p className="mt-1 line-clamp-3 text-xs text-muted-foreground" title={taskResultSummary}>
-                              {taskResultSummary}
+                              {translateErrorMessage(task.error_message!)}
                             </p>
                           ) : null}
                         </td>
-                        <td className="px-4 py-3 whitespace-nowrap">
-                          <div className="flex flex-col gap-1.5">
-                            <Badge variant="outline" className="w-fit text-xs">
+                        <td className="px-4 py-3 align-top">
+                          <div className="flex flex-col gap-1.5 max-w-full overflow-hidden">
+                            <Badge variant="outline" className="w-fit text-xs break-words">
                               {taskSourceLabelForMode(mode)}
                             </Badge>
                             {showModeBadge ? (
@@ -1000,17 +1242,27 @@ export function CollectionTasksPanel() {
                             <Badge variant={status.variant} className={COLLECTION_TASK_TABLE_LAYOUT.statusBadge}>
                               {status.label}
                             </Badge>
-                            {isTaskRowIneffective(task) ? (
+                            {taskEffectivenessCategory(task) === "high_value" ? (
+                              <Badge variant="success" className="w-fit text-[10px]">高价值</Badge>
+                            ) : isTaskRowIneffective(task) ? (
                               <Badge variant="outline" className="w-fit text-[10px]">
                                 {taskEffectivenessCategoryLabel(taskEffectivenessCategory(task))}
                               </Badge>
                             ) : null}
+                            {managementTags
+                              .filter((tag) => tag.key !== "high_value")
+                              .map((tag) => (
+                                <Badge key={tag.key} variant={tag.variant} className="w-fit text-[10px]">
+                                  {tag.label}
+                                </Badge>
+                              ))}
                           </div>
                         </td>
                         <td className="min-w-0 px-4 py-3 align-top">
                           {formatCollectionResultCell(task, {
                             isStaleRunning,
                             elapsedMs: runningElapsedMs,
+                            slowThresholdMs: staleAfterSeconds * 1000,
                           })}
                         </td>
                         <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">
@@ -1038,8 +1290,8 @@ export function CollectionTasksPanel() {
                               disabled={isBusy || runBlocked}
                               onClick={() => handleRun(task)}
                               title={
-                                otherTaskRunning
-                                  ? "另有任务正在采集，请等待完成"
+                                otherActiveCount >= maxRunningTasks
+                                  ? `采集并发已满（${maxRunningTasks}），请等待空位`
                                   : isStaleRunning
                                     ? "上次运行可能中断，继续采集"
                                     : isRunning
@@ -1075,8 +1327,7 @@ export function CollectionTasksPanel() {
                             </Button>
                             {isTaskRowIneffective(task) &&
                             (effectivenessFilter === "low_value_result" ||
-                              effectivenessFilter === "no_result" ||
-                              effectivenessFilter === "ineffective") ? (
+                              effectivenessFilter === "no_result") ? (
                               <Button
                                 size="sm"
                                 variant="ghost"
@@ -1095,6 +1346,45 @@ export function CollectionTasksPanel() {
                   })}
                 </tbody>
               </table>
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t bg-muted/20 px-4 py-3 text-sm">
+                <div className="text-muted-foreground">
+                  每页
+                  <select
+                    className="mx-2 rounded-md border bg-background px-2 py-1"
+                    value={pageSize}
+                    onChange={(event) => changePageSize(Number(event.target.value))}
+                    aria-label="每页任务数量"
+                  >
+                    {TASK_PAGE_SIZE_OPTIONS.map((size) => (
+                      <option key={size} value={size}>
+                        {size}
+                      </option>
+                    ))}
+                  </select>
+                  条，共 {total} 个任务
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={page <= 1 || loading}
+                    onClick={() => setPage((current) => Math.max(1, current - 1))}
+                  >
+                    上一页
+                  </Button>
+                  <span className="min-w-[96px] text-center text-muted-foreground">
+                    {page} / {totalPages}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={page >= totalPages || loading}
+                    onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+                  >
+                    下一页
+                  </Button>
+                </div>
+              </div>
             </div>
           )}
         </CardContent>

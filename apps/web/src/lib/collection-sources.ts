@@ -1,5 +1,5 @@
 import type { PlatformCapabilitiesResponse, PlatformCapability } from "./api.ts";
-import { KEYWORD_DISCOVERY_PLATFORMS, PLATFORM_LABELS, URL_ONLY_PLATFORMS } from "./labels.ts";
+import { PLATFORM_LABELS, URL_ONLY_PLATFORMS } from "./labels.ts";
 
 export function formatCollectionSourceSummary(
   meta: Pick<
@@ -157,8 +157,8 @@ export function matchesLtkLinkImportUrl(raw: string): boolean {
 export function matchesShopmyLinkImportUrl(raw: string): boolean {
   if (!hostIn(raw, ["shopmy.us", "www.shopmy.us"])) return false;
   const parts = urlPathParts(raw);
-  if (parts.length !== 1) return false;
-  const username = parts[0];
+  if (parts.length !== 1 && !(parts.length === 2 && parts[0].toLowerCase() === "shop")) return false;
+  const username = parts.length === 2 ? parts[1] : parts[0];
   return !SHOPMY_RESERVED.has(username.toLowerCase()) && HANDLE_RE.test(username);
 }
 
@@ -258,7 +258,7 @@ export type LinkImportPlatformGroup = {
 
 export function buildLinkImportPlatformGroups(caps: PlatformCapability[]): LinkImportPlatformGroup[] {
   const byPlatform = new Map(caps.map((cap) => [cap.platform, cap]));
-  const socialItems = KEYWORD_DISCOVERY_PLATFORMS.map((platform) => {
+  const socialItems = ["instagram", "youtube", "tiktok", "facebook"].map((platform) => {
     const cap = byPlatform.get(platform);
     return cap?.link_import_hint ?? `${PLATFORM_LABELS[platform]}：主页/频道链接`;
   });
@@ -274,7 +274,7 @@ export function buildLinkImportPlatformGroups(caps: PlatformCapability[]): LinkI
       items: socialItems,
     },
     {
-      title: "导购/灵感平台（链接补全 / 外链发现）",
+      title: "导购/灵感平台（链接导入 / 外部 seed 发现 / 反向外链扩展）",
       items: guideItems,
     },
     {
@@ -293,4 +293,4 @@ export function formatLinkImportPlatformHints(caps: PlatformCapability[]): LinkI
 }
 
 export const URL_ONLY_PLATFORM_NOTE =
-  "以下平台主要通过链接导入或社媒外链发现补全资料；站内关键词搜索暂未接入。";
+  "以下平台支持链接导入、外部 seed 自动发现和反向外链扩展；站内关键词直采暂未接入。";

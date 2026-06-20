@@ -4,17 +4,22 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  Bot,
   ChevronLeft,
   ChevronRight,
   Copy,
   Download,
   ExternalLink,
   Loader2,
+  Mail,
   RefreshCw,
   Search,
+  Sparkles,
 } from "lucide-react";
 
+import { BatchOutreachDialog } from "@/components/influencers/batch-outreach-dialog";
 import { PlatformOrganizer } from "@/components/influencers/platform-organizer";
+import { ScriptRecommendDialog } from "@/components/influencers/script-recommend-dialog";
 import { AdminShell } from "@/components/layout/admin-shell";
 import { useActiveProductId } from "@/components/providers/product-provider";
 import { EmptyState, ErrorAlert, LoadingState } from "@/components/shared/page-states";
@@ -61,7 +66,9 @@ type QuickFilter =
   | "manual_research"
   | "skip"
   | "has_email"
-  | "missing_contact";
+  | "missing_contact"
+  | "email_sent"
+  | "email_unsent";
 
 const FILTER_LABELS: Record<QuickFilter, string> = {
   all: "全部",
@@ -73,6 +80,8 @@ const FILTER_LABELS: Record<QuickFilter, string> = {
   skip: "暂时跳过",
   has_email: "有邮箱",
   missing_contact: "缺联系方式",
+  email_sent: "已发送邮件",
+  email_unsent: "未发送邮件",
 };
 
 const PAGE_SIZE = 20;
@@ -108,6 +117,8 @@ function toApiFilters(
   if (filter === "skip") return { ...base, valueTier: "skip" };
   if (filter === "has_email") return { ...base, hasEmail: true };
   if (filter === "missing_contact") return { ...base, missingContact: true };
+  if (filter === "email_sent") return { ...base, emailStatus: "sent" };
+  if (filter === "email_unsent") return { ...base, emailStatus: "unsent" };
   return base;
 }
 
@@ -276,6 +287,9 @@ export function InfluencersPanel() {
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [operatorName, setOperatorName] = useState("");
+  const [scriptRecommendTarget, setScriptRecommendTarget] = useState<Influencer | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [batchOutreachOpen, setBatchOutreachOpen] = useState(false);
 
   const statsFilters = useMemo(
     () => toApiFilters(activeFilter, searchQuery, taskFilterActive ? taskId : undefined, "all"),
@@ -417,6 +431,30 @@ export function InfluencersPanel() {
   };
 
   const exportFilters = apiFilters;
+  const selectedInfluencers = items.filter((item) => selectedIds.has(item.id));
+  const allPageSelected = items.length > 0 && items.every((item) => selectedIds.has(item.id));
+
+  function toggleSelect(id: number) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAllPage() {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allPageSelected) {
+        for (const item of items) next.delete(item.id);
+      } else {
+        for (const item of items) next.add(item.id);
+      }
+      return next;
+    });
+  }
+
   const hasActiveFilters =
     activeFilter !== "all" || activePlatform !== "all" || Boolean(searchQuery) || taskFilterActive;
   const listTitle = platformListTitle(activePlatform);
@@ -482,6 +520,14 @@ export function InfluencersPanel() {
             <RefreshCw className="h-4 w-4" />
           )}
           刷新列表
+        </Button>
+        <Button
+          variant="secondary"
+          disabled={selectedIds.size === 0}
+          onClick={() => setBatchOutreachOpen(true)}
+        >
+          <Sparkles className="h-4 w-4" />
+          AI 邮件预览{selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}
         </Button>
         <Button
           variant="secondary"
@@ -555,6 +601,14 @@ export function InfluencersPanel() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b text-left text-muted-foreground">
+                      <th className="pb-3 pr-2 font-medium w-8">
+                        <input
+                          type="checkbox"
+                          checked={allPageSelected}
+                          onChange={toggleSelectAllPage}
+                          aria-label="全选当前页"
+                        />
+                      </th>
                       <th className="pb-3 pr-4 font-medium">账号</th>
                       <th className="pb-3 pr-4 font-medium">体量 / 互动</th>
                       <th className="pb-3 pr-4 font-medium">来源</th>
@@ -583,6 +637,14 @@ export function InfluencersPanel() {
                             taskFilterActive ? "bg-amber-500/5" : ""
                           }`}
                         >
+                          <td className="py-3 pr-2 align-top">
+                            <input
+                              type="checkbox"
+                              checked={selectedIds.has(item.id)}
+                              onChange={() => toggleSelect(item.id)}
+                              aria-label={`选择 ${item.username}`}
+                            />
+                          </td>
                           <td className="py-3 pr-4">
                             <div className="flex flex-wrap items-center gap-1.5">
                               <div className="font-medium">{item.display_name || item.username}</div>
@@ -669,6 +731,18 @@ export function InfluencersPanel() {
                             <Badge variant={leadStatusVariant(status)}>
                               {leadStatusLabel(status)}
                             </Badge>
+                            {item.email_sent ? (
+                              <div className="mt-1">
+                                <Badge variant="success" className="text-[10px] px-1.5 py-0">
+                                  已发送邮件
+                                </Badge>
+                                {item.last_email_sent_at ? (
+                                  <div className="mt-0.5 text-[11px] text-muted-foreground">
+                                    {formatDateTime(item.last_email_sent_at)}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ) : null}
                             {contacted ? (
                               <div className="mt-1 text-xs text-muted-foreground">已联系</div>
                             ) : null}
@@ -756,6 +830,15 @@ export function InfluencersPanel() {
                                   </span>
                                 )}
                               </Button>
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                disabled={busy}
+                                onClick={() => setScriptRecommendTarget(item)}
+                              >
+                                <Bot className="mr-1 h-3.5 w-3.5" />
+                                AI 推荐话术
+                              </Button>
                               <Button variant="link" className="h-auto px-1 py-0" asChild>
                                 <Link href={`/influencers/${item.id}`}>详情</Link>
                               </Button>
@@ -798,6 +881,25 @@ export function InfluencersPanel() {
           )}
         </CardContent>
       </Card>
+
+      {scriptRecommendTarget ? (
+        <ScriptRecommendDialog
+          influencer={scriptRecommendTarget}
+          open
+          onClose={() => setScriptRecommendTarget(null)}
+        />
+      ) : null}
+
+      {batchOutreachOpen && selectedInfluencers.length > 0 ? (
+        <BatchOutreachDialog
+          influencers={selectedInfluencers}
+          open
+          onClose={() => setBatchOutreachOpen(false)}
+          onComplete={() => {
+            void load(apiFilters, page);
+          }}
+        />
+      ) : null}
     </AdminShell>
   );
 }

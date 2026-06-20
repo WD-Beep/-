@@ -1,4 +1,5 @@
 import math
+import re
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, or_, select
@@ -8,11 +9,13 @@ from app.core.config import settings
 from app.models.collection_task import CollectionTask
 from app.models.enums import CollectionMode, CollectionTaskStatus
 from app.schemas.collection_task import (
+    CollectionTaskBulkManageResult,
     CollectionTaskCreate,
     CollectionTaskFilter,
     CollectionTaskRead,
     CollectionTaskUpdate,
     build_link_import_task_fields,
+    validate_seed_only_discovery_mode,
     validate_url_only_platforms_for_mode,
 )
 from app.services.url_parser import validate_link_import_url_lines
@@ -20,7 +23,9 @@ from app.services.task_effectiveness import (
     batch_task_effectiveness_categories,
     classify_task_effectiveness,
     effective_sql_condition,
+    high_value_sql_condition,
     ineffective_sql_condition,
+    is_high_value_task,
     low_value_result_sql_condition,
     no_result_sql_condition,
 )
@@ -29,10 +34,69 @@ from app.services.task_retention import (
     dispose_collection_task,
     task_has_obvious_retention,
 )
+from app.services.task_run_progress import STAGE_FAILED
 from app.schemas.common import PaginatedResponse
 
 
 class CollectionTaskService:
+    TEST_HISTORY_NAME_RE = re.compile(
+        r"(test|测试|验收|seed-discovery-tiktok|ins采集|ltk-import|demo)",
+        re.I,
+    )
+
+    @staticmethod
+    def task_duplicate_key(task: CollectionTask) -> tuple:
+        keywords = tuple(sorted(str(item).strip().lower() for item in (task.keywords or []) if str(item).strip()))
+        platforms = tuple(sorted(str(item).strip().lower() for item in (task.platforms or []) if str(item).strip()))
+        return (
+            (task.name or "").strip().lower(),
+            task.collection_mode,
+            task.platform,
+            platforms,
+            keywords,
+            task.product_id,
+        )
+
+    @staticmethod
+    def is_test_or_history_task(task: CollectionTask) -> bool:
+        if CollectionTaskService.TEST_HISTORY_NAME_RE.search(task.name or ""):
+            return True
+        checkpoint = task.run_checkpoint if isinstance(task.run_checkpoint, dict) else {}
+        if checkpoint.get("link_import_source") is True or checkpoint.get("legacy_link_import_batch") is True:
+            return True
+        created_at = CollectionTaskService._as_aware_utc(task.created_at)
+        old_no_result = (
+            task.status in {CollectionTaskStatus.FAILED.value, CollectionTaskStatus.COMPLETED_NO_RESULTS.value}
+            and (task.result_count or 0) == 0
+            and (task.inserted_count or 0) == 0
+            and created_at is not None
+            and datetime.now(UTC) - created_at > timedelta(days=14)
+        )
+        return old_no_result
+
+    @staticmethod
+    def management_tags_for_task(task: CollectionTask, *, duplicate: bool = False) -> list[str]:
+        tags: list[str] = []
+        if CollectionTaskService.TEST_HISTORY_NAME_RE.search(task.name or ""):
+            tags.append("test_task")
+        checkpoint = task.run_checkpoint if isinstance(task.run_checkpoint, dict) else {}
+        if checkpoint.get("link_import_source") is True or checkpoint.get("legacy_link_import_batch") is True:
+            tags.append("history_batch")
+        category = classify_task_effectiveness(task)
+        if category == "high_value":
+            tags.append("high_value")
+        if category == "no_result":
+            tags.append("no_result")
+        if category == "failed":
+            tags.append("failed")
+        if duplicate:
+            tags.append("possible_duplicate")
+        if task.is_archived:
+            tags.append("archived")
+        elif CollectionTaskService.is_test_or_history_task(task) or category not in {"high_value", "effective"}:
+            tags.append("archivable")
+        return list(dict.fromkeys(tags))
+
     @staticmethod
     def _as_aware_utc(value: datetime | None) -> datetime | None:
         if value is None:
@@ -42,20 +106,47 @@ class CollectionTaskService:
         return value.astimezone(UTC)
 
     @staticmethod
+    async def count_active_running_tasks(
+        db: AsyncSession,
+        *,
+        exclude_id: int | None = None,
+    ) -> int:
+        from app.services.collection_runner import CollectionRunnerService
+
+        await CollectionRunnerService.reconcile_in_process_runs(db)
+        result = await db.execute(
+            select(CollectionTask).where(CollectionTask.status == CollectionTaskStatus.RUNNING.value)
+        )
+        count = 0
+        for task in result.scalars():
+            if exclude_id is not None and task.id == exclude_id:
+                continue
+            if not CollectionTaskService.is_running_stale(task):
+                count += 1
+        return count
+
+    @staticmethod
     async def get_blocking_running_task(
         db: AsyncSession,
         *,
         exclude_id: int | None = None,
     ) -> CollectionTask | None:
-        """Return another task that is actively running (not stale), if any."""
+        """Return a running task when concurrent run capacity is exhausted."""
+        from app.services.collection_runner import CollectionRunnerService
+
+        await CollectionRunnerService.reconcile_in_process_runs(db)
+        capacity = max(1, settings.collection_max_running_tasks)
         result = await db.execute(
             select(CollectionTask).where(CollectionTask.status == CollectionTaskStatus.RUNNING.value)
         )
+        active: list[CollectionTask] = []
         for task in result.scalars():
             if exclude_id is not None and task.id == exclude_id:
                 continue
             if not CollectionTaskService.is_running_stale(task):
-                return task
+                active.append(task)
+        if len(active) >= capacity:
+            return active[0]
         return None
 
     @staticmethod
@@ -82,6 +173,8 @@ class CollectionTaskService:
         *,
         has_retention_traces: bool | None = None,
         effectiveness_category: str | None = None,
+        management_tags: list[str] | None = None,
+        is_possible_duplicate: bool = False,
     ) -> CollectionTaskRead:
         stale = CollectionTaskService.is_running_stale(task)
         retention = (
@@ -91,14 +184,33 @@ class CollectionTaskService:
         )
         category = effectiveness_category or classify_task_effectiveness(task)
         running = task.status == CollectionTaskStatus.RUNNING.value
+        checkpoint = task.run_checkpoint if isinstance(task.run_checkpoint, dict) else {}
+        interrupted = bool(checkpoint.get("interrupted"))
+        terminal_success = task.status in {
+            CollectionTaskStatus.COMPLETED.value,
+            CollectionTaskStatus.COMPLETED_WITH_RESULTS.value,
+            CollectionTaskStatus.COMPLETED_NO_RESULTS.value,
+        }
         return CollectionTaskRead.model_validate(task).model_copy(
             update={
                 "stale": stale,
-                "recoverable": stale,
+                "recoverable": (not terminal_success)
+                and (
+                    task.status == CollectionTaskStatus.PARTIAL_FAILED.value
+                    or running
+                )
+                and (stale or interrupted),
                 "stale_after_seconds": max(settings.collection_running_stale_seconds, 0),
                 "effectiveness_category": category,
-                "is_ineffective": (not running) and category != "effective",
+                "is_ineffective": (not running) and category not in {"high_value", "effective"},
                 "has_retention_traces": retention,
+                "management_tags": management_tags
+                if management_tags is not None
+                else CollectionTaskService.management_tags_for_task(
+                    task,
+                    duplicate=is_possible_duplicate,
+                ),
+                "is_possible_duplicate": is_possible_duplicate,
             }
         )
 
@@ -138,6 +250,13 @@ class CollectionTaskService:
             raise ValueError("类目采集模式必须填写类目")
         if mode_value == CollectionMode.LINK_IMPORT.value and not input_urls:
             raise ValueError("链接导入模式至少需要一个有效链接")
+        if (
+            mode_value == CollectionMode.LINK_SEED_DISCOVERY.value
+            and not keywords
+            and not input_urls
+            and not (category or "").strip()
+        ):
+            raise ValueError("导购 seed 自动发现需填写关键词或类目")
         if mode_value in (CollectionMode.URLS.value, CollectionMode.CLUSTERING.value) and not input_urls:
             raise ValueError("链接采集模式至少需要一个主页链接")
         if mode_value == CollectionMode.MIXED.value and not keywords and not input_urls:
@@ -149,7 +268,10 @@ class CollectionTaskService:
 
     @staticmethod
     def _apply_filters(query, filters: CollectionTaskFilter):
-        query = query.where(CollectionTask.is_archived.is_(False))
+        if filters.task_view == "archived":
+            query = query.where(CollectionTask.is_archived.is_(True))
+        else:
+            query = query.where(CollectionTask.is_archived.is_(False))
         if filters.product_id:
             query = query.where(CollectionTask.product_id == filters.product_id)
         if filters.platform:
@@ -159,15 +281,58 @@ class CollectionTaskService:
         if filters.search:
             term = f"%{filters.search}%"
             query = query.where(or_(CollectionTask.name.ilike(term), CollectionTask.category.ilike(term)))
-        if filters.effectiveness == "ineffective":
+        effective_filter = filters.effectiveness
+        if filters.task_view in {"high_value", "effective", "ineffective", "low_value_result", "no_result"}:
+            effective_filter = filters.task_view
+        if effective_filter == "ineffective":
             query = query.where(ineffective_sql_condition())
-        elif filters.effectiveness == "effective":
+        elif effective_filter == "high_value":
+            query = query.where(high_value_sql_condition())
+        elif effective_filter == "effective":
             query = query.where(effective_sql_condition())
-        elif filters.effectiveness == "low_value_result":
+        elif effective_filter == "low_value_result":
             query = query.where(low_value_result_sql_condition())
-        elif filters.effectiveness == "no_result":
+        elif effective_filter == "no_result":
             query = query.where(no_result_sql_condition())
+        if filters.task_view == "test_history":
+            query = query.where(
+                or_(
+                    CollectionTask.name.ilike("%test%"),
+                    CollectionTask.name.ilike("%测试%"),
+                    CollectionTask.name.ilike("%验收%"),
+                    CollectionTask.name.ilike("%seed-discovery-tiktok%"),
+                    CollectionTask.name.ilike("%ins采集%"),
+                    CollectionTask.name.ilike("%ltk-import%"),
+                    CollectionTask.name.ilike("%demo%"),
+                    CollectionTask.run_checkpoint.contains({"link_import_source": True}),
+                    CollectionTask.run_checkpoint.contains({"legacy_link_import_batch": True}),
+                )
+            )
         return query
+
+    @staticmethod
+    async def _duplicate_ids_for_rows(
+        db: AsyncSession,
+        rows: list[CollectionTask],
+        *,
+        product_id: int | None,
+    ) -> set[int]:
+        if not rows:
+            return set()
+        query = select(CollectionTask).where(CollectionTask.is_archived.is_(False))
+        if product_id is not None:
+            query = query.where(CollectionTask.product_id == product_id)
+        result = await db.execute(query)
+        all_rows = result.scalars().all()
+        counts: dict[tuple, int] = {}
+        for task in all_rows:
+            key = CollectionTaskService.task_duplicate_key(task)
+            counts[key] = counts.get(key, 0) + 1
+        return {
+            task.id
+            for task in rows
+            if counts.get(CollectionTaskService.task_duplicate_key(task), 0) > 1
+        }
 
     @staticmethod
     async def list_tasks(
@@ -185,6 +350,11 @@ class CollectionTaskService:
         query = base_query.order_by(CollectionTask.updated_at.desc()).offset((page - 1) * page_size).limit(page_size)
         result = await db.execute(query)
         rows = result.scalars().all()
+        duplicate_ids = await CollectionTaskService._duplicate_ids_for_rows(
+            db,
+            rows,
+            product_id=filters.product_id,
+        )
         retention_flags = await batch_task_has_retention_traces(
             db,
             [row.id for row in rows],
@@ -196,6 +366,7 @@ class CollectionTaskService:
                 row,
                 has_retention_traces=retention_flags.get(row.id, False),
                 effectiveness_category=categories.get(row.id, "no_result"),
+                is_possible_duplicate=row.id in duplicate_ids,
             )
             for row in rows
         ]
@@ -264,6 +435,11 @@ class CollectionTaskService:
         merged_platforms = update_data.get("platforms", task.platforms or [])
         if any(key in update_data for key in ("collection_mode", "platform", "platforms")):
             mode = merged_mode if isinstance(merged_mode, CollectionMode) else CollectionMode(merged_mode_value)
+            validate_seed_only_discovery_mode(
+                mode,
+                str(merged_platform or ""),
+                list(merged_platforms or []),
+            )
             validate_url_only_platforms_for_mode(
                 mode,
                 str(merged_platform or ""),
@@ -367,6 +543,85 @@ class CollectionTaskService:
         )
 
     @staticmethod
+    async def bulk_manage_tasks(
+        db: AsyncSession,
+        *,
+        action: str,
+        product_id: int,
+        task_ids: list[int] | None = None,
+    ) -> CollectionTaskBulkManageResult:
+        id_filter = set(task_ids or [])
+        query = select(CollectionTask).where(CollectionTask.product_id == product_id)
+        if id_filter:
+            query = query.where(CollectionTask.id.in_(id_filter))
+        if action == "restore_archived":
+            query = query.where(CollectionTask.is_archived.is_(True))
+        else:
+            query = query.where(CollectionTask.is_archived.is_(False))
+        rows = (await db.execute(query)).scalars().all()
+        categories = await batch_task_effectiveness_categories(db, rows)
+
+        if action == "archive_test_history":
+            rows = [task for task in rows if CollectionTaskService.is_test_or_history_task(task)]
+        elif action == "delete_no_result":
+            rows = [task for task in rows if categories.get(task.id) == "no_result"]
+        elif action == "archive_duplicates":
+            by_key: dict[tuple, list[CollectionTask]] = {}
+            for task in rows:
+                by_key.setdefault(CollectionTaskService.task_duplicate_key(task), []).append(task)
+            rows = []
+            for group in by_key.values():
+                if len(group) <= 1:
+                    continue
+                high_value_group = [task for task in group if categories.get(task.id) == "high_value"]
+                keeper_pool = high_value_group or group
+                latest = max(
+                    keeper_pool,
+                    key=lambda task: (
+                        task.last_run_at or task.updated_at or task.created_at or datetime.min.replace(tzinfo=UTC),
+                        task.id,
+                    ),
+                )
+                rows.extend(task for task in group if task.id != latest.id)
+
+        result = CollectionTaskBulkManageResult(matched_count=len(rows))
+        for task in rows:
+            if task.status == CollectionTaskStatus.RUNNING.value:
+                result.skipped_ids.append(task.id)
+                result.skipped_reasons[str(task.id)] = "task_running"
+                continue
+            if action == "restore_archived":
+                task.is_archived = False
+                task.archived_at = None
+                result.restored_ids.append(task.id)
+                continue
+            if categories.get(task.id) == "high_value" or is_high_value_task(task):
+                result.skipped_ids.append(task.id)
+                result.skipped_reasons[str(task.id)] = "high_value_protected"
+                continue
+            if action in {"archive_test_history", "archive_duplicates"}:
+                task.is_archived = True
+                task.archived_at = datetime.now(UTC)
+                result.archived_ids.append(task.id)
+                continue
+            if action == "delete_no_result":
+                action_taken, reason = await dispose_collection_task(db, task, require_ineffective=True)
+                if action_taken == "deleted":
+                    result.deleted_ids.append(task.id)
+                elif action_taken == "archived":
+                    result.archived_ids.append(task.id)
+                else:
+                    result.skipped_ids.append(task.id)
+                    result.skipped_reasons[str(task.id)] = reason or "skipped"
+
+        result.archived_count = len(result.archived_ids)
+        result.deleted_count = len(result.deleted_ids)
+        result.restored_count = len(result.restored_ids)
+        result.skipped_count = len(result.skipped_ids)
+        await db.commit()
+        return result
+
+    @staticmethod
     async def get_recent_tasks(
         db: AsyncSession,
         limit: int = 5,
@@ -440,21 +695,48 @@ class CollectionTaskService:
         return count or 0
 
     @staticmethod
-    async def reconcile_stale_running_tasks(db: AsyncSession) -> int:
+    async def reconcile_stale_running_tasks(
+        db: AsyncSession,
+        *,
+        exclude_id: int | None = None,
+        exclude_ids: set[int] | None = None,
+    ) -> int:
         """Mark long-idle running tasks as interrupted so the UI and mutex stay accurate."""
+        from app.services.collection_runner import CollectionRunnerService
+
+        skip_ids = set(exclude_ids or [])
+        if exclude_id is not None:
+            skip_ids.add(exclude_id)
         result = await db.execute(
             select(CollectionTask).where(CollectionTask.status == CollectionTaskStatus.RUNNING.value)
         )
         reconciled = 0
+        threshold = max(settings.collection_running_stale_seconds, 0)
         for task in result.scalars():
+            if task.id in skip_ids:
+                continue
+            if CollectionRunnerService.is_task_active_in_process(task.id):
+                continue
             if not CollectionTaskService.is_running_stale(task):
                 continue
+            stage = task.current_stage or "unknown"
+            updated = CollectionTaskService._as_aware_utc(task.updated_at)
+            updated_label = updated.strftime("%Y-%m-%d %H:%M UTC") if updated else "未知"
+            interrupted = (
+                f"任务已超时中断（阶段：{stage}，最后更新 {updated_label}，超过 {threshold}s 无进度），"
+                f"可重新运行从 checkpoint 继续"
+            )
             task.status = CollectionTaskStatus.PARTIAL_FAILED.value
-            task.current_stage = "failed"
-            interrupted = "任务已超时中断（可能因服务重启），可重新运行继续采集"
+            task.current_stage = STAGE_FAILED
             task.status_summary = interrupted
+            task.last_error = task.last_error or interrupted
             if not task.error_message:
                 task.error_message = interrupted
+            checkpoint = dict(task.run_checkpoint or {})
+            checkpoint["interrupted"] = True
+            checkpoint["interrupted_stage"] = stage
+            checkpoint["interrupted_at"] = datetime.now(UTC).isoformat()
+            task.run_checkpoint = checkpoint
             reconciled += 1
         if reconciled:
             await db.commit()

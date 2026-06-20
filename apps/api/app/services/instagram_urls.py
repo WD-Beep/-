@@ -141,6 +141,9 @@ def normalize_instagram_post_url(value: str | None, raw: dict | None = None) -> 
 
 def profile_url_from_apify_raw(raw: dict) -> str | None:
     """从 Apify 字段提取主页 URL，避免把帖子 url/inputUrl 误当主页。"""
+    if not isinstance(raw, dict):
+        return None
+
     for key in (
         "ownerUsername",
         "owner_user_name",
@@ -166,18 +169,120 @@ def profile_url_from_apify_raw(raw: dict) -> str | None:
             if url:
                 return url
 
-    for key in ("ownerUrl", "profileUrl", "authorUrl"):
+    for key in (
+        "ownerUrl",
+        "ownerProfileUrl",
+        "owner_profile_url",
+        "profileUrl",
+        "profile_url",
+        "authorUrl",
+        "authorProfileUrl",
+        "userUrl",
+        "userProfileUrl",
+    ):
         value = raw.get(key)
         if isinstance(value, str):
             url = normalize_instagram_profile_url(value)
             if url:
                 return url
 
-    generic = raw.get("url")
-    if isinstance(generic, str) and is_instagram_profile_url(generic):
-        return normalize_instagram_profile_url(generic)
+    for key in ("url", "inputUrl"):
+        generic = raw.get(key)
+        if isinstance(generic, str) and is_instagram_profile_url(generic):
+            return normalize_instagram_profile_url(generic)
+
+    deep = _deep_profile_url_from_apify_raw(raw)
+    if deep:
+        return deep
 
     return None
+
+
+def _deep_profile_url_from_apify_raw(raw: dict) -> str | None:
+    """Best-effort fallback for provider payloads with author data nested under raw nodes."""
+    author_keys = {"owner", "author", "user", "profile"}
+    url_keys = {
+        "ownerUrl",
+        "ownerProfileUrl",
+        "owner_profile_url",
+        "profileUrl",
+        "profile_url",
+        "authorUrl",
+        "authorProfileUrl",
+        "userUrl",
+        "userProfileUrl",
+    }
+    username_keys = {
+        "ownerUsername",
+        "owner_user_name",
+        "ownerUserName",
+        "authorUsername",
+        "author_user_name",
+        "userUsername",
+        "user_name",
+        "username",
+        "handle",
+        "screenName",
+    }
+    skip_keys = {
+        "comments",
+        "latestComments",
+        "edge_media_to_comment",
+        "edge_threaded_comments",
+        "commenter",
+    }
+
+    def scan_author_dict(value: dict, depth: int) -> str | None:
+        if depth > 6:
+            return None
+        for key in url_keys:
+            candidate = value.get(key)
+            if isinstance(candidate, str):
+                url = normalize_instagram_profile_url(candidate)
+                if url:
+                    return url
+        for key in username_keys:
+            candidate = value.get(key)
+            if isinstance(candidate, str):
+                url = normalize_instagram_profile_url(candidate)
+                if url:
+                    return url
+        generic = value.get("url")
+        if isinstance(generic, str) and is_instagram_profile_url(generic):
+            return normalize_instagram_profile_url(generic)
+        for key in author_keys:
+            nested = value.get(key)
+            if isinstance(nested, dict):
+                url = scan_author_dict(nested, depth + 1)
+                if url:
+                    return url
+            elif isinstance(nested, str):
+                url = normalize_instagram_profile_url(nested)
+                if url:
+                    return url
+        return None
+
+    def walk(value, depth: int = 0) -> str | None:
+        if depth > 6:
+            return None
+        if isinstance(value, dict):
+            url = scan_author_dict(value, depth)
+            if url:
+                return url
+            for key, nested in value.items():
+                if key in skip_keys:
+                    continue
+                url = walk(nested, depth + 1)
+                if url:
+                    return url
+        elif isinstance(value, list):
+            for nested in value[:12]:
+                url = walk(nested, depth + 1)
+                if url:
+                    return url
+        return None
+
+    return walk(raw)
 
 
 def post_url_from_apify_raw(raw: dict) -> str | None:

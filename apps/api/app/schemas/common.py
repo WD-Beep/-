@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 T = TypeVar("T")
 
@@ -12,6 +12,13 @@ class PaginatedResponse(BaseModel, Generic[T]):
     page: int
     page_size: int
     pages: int
+    total_pages: int | None = None
+
+    @model_validator(mode="after")
+    def fill_total_pages(self) -> "PaginatedResponse[T]":
+        if self.total_pages is None:
+            self.total_pages = self.pages
+        return self
 
 
 class PaginationParams(BaseModel):

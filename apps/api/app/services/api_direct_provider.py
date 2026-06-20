@@ -107,6 +107,9 @@ def _amazon_platform_capability() -> PlatformCapability:
         message="Amazon 商品链接用于竞品商品发现线索；主要通过链接导入，不是红人主页平台。",
         endpoints=[],
         keyword_discovery=False,
+        native_keyword_discovery=False,
+        external_seed_discovery=False,
+        reverse_link_expansion=False,
         link_import=True,
         product_seed=True,
         link_import_hint=LINK_IMPORT_HINTS["amazon"],
@@ -122,6 +125,30 @@ def list_platform_capabilities() -> list[PlatformCapability]:
 def ensure_api_direct_ready() -> None:
     if not settings.is_api_direct_configured:
         raise RuntimeError("未配置 API_DIRECT_API_KEY，API Direct 采集不可用")
+
+
+def _provider_state_from_result(result: PlatformDiscoveryResult) -> dict | None:
+    reason = ""
+    message = result.skip_reason or "; ".join(result.errors[:2])
+    lowered = message.lower()
+    if result.skipped:
+        if "未配置" in message or "not configured" in lowered or "缺少" in message:
+            reason = "provider_not_configured"
+        elif "超时" in message or "timeout" in lowered:
+            reason = "timeout"
+        else:
+            reason = "provider_unavailable"
+    if "actor-memory-limit-exceeded" in lowered or "memory limit" in lowered or "内存" in message:
+        reason = "apify_memory_limit_exceeded"
+        message = "Apify 内存额度已满/并发 actor 过多，已短路跳过后续同平台 query"
+    if not reason:
+        return None
+    return {
+        "status": "provider_unavailable",
+        "reason": reason,
+        "message": message,
+        "api_calls": result.api_requests,
+    }
 
 
 async def discover_platform(
@@ -178,6 +205,7 @@ async def discover_non_instagram_platforms(
 
     status_lock = asyncio.Lock()
     platform_status: dict[str, str] = {p: "queued" for p in targets}
+    provider_availability_state: dict[str, dict] = {}
 
     async def _set_platform_status(platform: str, status: str, note: str | None = None) -> None:
         if not competitor_mode:
@@ -196,6 +224,17 @@ async def discover_non_instagram_platforms(
             )
 
     async def _safe_discover(platform: str) -> PlatformDiscoveryResult:
+        unavailable = provider_availability_state.get(platform)
+        if unavailable:
+            msg = str(unavailable.get("message") or "provider_unavailable")
+            await _set_platform_status(platform, "failed", note=msg)
+            return PlatformDiscoveryResult(
+                platform=platform,
+                skipped=True,
+                skip_reason=msg,
+                errors=[msg],
+                provider_availability_state={platform: dict(unavailable)},
+            )
         await _set_platform_status(platform, "searching")
         try:
             if platform_timeout:
@@ -205,6 +244,10 @@ async def discover_non_instagram_platforms(
                 )
             else:
                 result = await discover_platform(discovery_task, platform, checkpoint=checkpoint)
+            state = _provider_state_from_result(result)
+            if state:
+                provider_availability_state[platform] = state
+                result.provider_availability_state[platform] = state
             if result.errors and not (result.profiles or result.items):
                 await _set_platform_status(platform, "failed")
             elif result.errors:
@@ -220,7 +263,16 @@ async def discover_non_instagram_platforms(
                 platform=platform,
                 fatal=False,
                 errors=[msg],
+                skipped=True,
                 skip_reason=msg,
+                provider_availability_state={
+                    platform: {
+                        "status": "provider_unavailable",
+                        "reason": "timeout",
+                        "message": msg,
+                        "api_calls": 0,
+                    }
+                },
             )
         except Exception as exc:
             await _set_platform_status(platform, "failed")
@@ -228,6 +280,14 @@ async def discover_non_instagram_platforms(
                 platform=platform,
                 fatal=True,
                 errors=[str(exc)],
+                provider_availability_state={
+                    platform: {
+                        "status": "provider_unavailable",
+                        "reason": "provider_error",
+                        "message": str(exc),
+                        "api_calls": 0,
+                    }
+                },
             )
 
     if competitor_mode:

@@ -12,10 +12,13 @@ from app.collectors.base import CollectedInfluencer
 from app.models.enums import ProfileFailureReason
 
 logger = logging.getLogger(__name__)
+from collections.abc import Awaitable, Callable
+
 from app.core.config import settings
 from app.core.exceptions import APIFY_NOT_CONFIGURED_MSG, MOCK_COLLECTOR_DISABLED_MSG
 from app.services.apify_client import ApifyError, run_actor_sync
 from app.services.collection_filters import is_valid_instagram_username
+from app.services.concurrency import map_bounded_incremental
 from app.services.instagram_urls import (
     extract_profile_username,
     normalize_instagram_post_url,
@@ -175,6 +178,39 @@ def _username_from_any(raw: dict) -> str | None:
 
 def _profile_url_from_any(raw: dict) -> str | None:
     return profile_url_from_apify_raw(raw)
+
+
+def _raw_field_summary(raw: dict, *, max_fields: int = 18) -> str:
+    fields: list[str] = []
+
+    def walk(value, prefix: str = "", depth: int = 0) -> None:
+        if len(fields) >= max_fields or depth > 3:
+            return
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if len(fields) >= max_fields:
+                    return
+                path = f"{prefix}.{key}" if prefix else str(key)
+                if isinstance(nested, dict):
+                    fields.append(path)
+                    walk(nested, path, depth + 1)
+                elif isinstance(nested, list):
+                    fields.append(f"{path}[]")
+                    for item in nested[:2]:
+                        walk(item, path, depth + 1)
+                else:
+                    fields.append(path)
+
+    if isinstance(raw, dict):
+        walk(raw)
+    return ",".join(dict.fromkeys(fields)) or "empty"
+
+
+def _post_author_missing_error(prefix: str, post_ref: str, raw: dict) -> str:
+    return (
+        f"{prefix} {post_ref} post_author_missing: 无法提取作者主页 "
+        f"raw_fields={_raw_field_summary(raw)}"
+    )
 
 
 def _extract_emails(*texts: str | None) -> list[str]:
@@ -506,8 +542,11 @@ async def scrape_instagram_profiles(
     urls_or_usernames: list[str],
     *,
     candidate_meta: dict[str, PostAuthorCandidate] | None = None,
+    on_item_complete: Callable[[str, CollectedInfluencer | FailedProfile | None, str | None], Awaitable[None]]
+    | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> ProfileScrapeResult:
-    """Step3 Hydration：批量补采 Instagram 主页详情。"""
+    """Step3 Hydration：批量/并发补采 Instagram 主页详情。"""
     if not urls_or_usernames:
         return ProfileScrapeResult()
 
@@ -535,67 +574,108 @@ async def scrape_instagram_profiles(
             url_by_username[key] = _normalize_profile_url(username)
             requested_labels[key] = text
 
-    if not targets:
+    unique_targets = list(dict.fromkeys(targets))
+    if not unique_targets:
         return ProfileScrapeResult(errors=["未解析到有效的 Instagram 用户名或主页链接"])
 
-    run_input = {
-        "usernames": list(dict.fromkeys(targets)),
-        "proxyConfiguration": {
-            "useApifyProxy": True,
-            "apifyProxyGroups": ["RESIDENTIAL"],
-        },
-    }
-
-    raw_items = await run_actor_sync(settings.apify_instagram_actor_id, run_input)
     results: list[CollectedInfluencer] = []
     errors: list[str] = []
     failed_profiles: list[FailedProfile] = []
     seen: set[str] = set()
     hydrated_usernames: set[str] = set()
     failed_keys: set[str] = set()
+    chunk_size = max(1, min(10, settings.effective_profile_enrich_concurrency * 2))
 
-    for raw in raw_items:
-        username_raw = raw.get("username") or _username_from_url(str(raw.get("url") or ""))
-        label = f"@{username_raw}" if username_raw else "unknown"
-        if raw.get("success") is False:
-            detail = raw.get("error") or raw.get("errorMessage") or raw.get("message") or "success=false"
-            errors.append(f"Apify 主页采集失败 {label}: {detail}")
+    async def _notify(label: str, profile: CollectedInfluencer | None, failed: FailedProfile | None, err: str | None) -> None:
+        if on_item_complete is None:
+            return
+        item_result = profile if profile is not None else failed
+        await on_item_complete(label, item_result, err)
+
+    async def _scrape_chunk(chunk: list[str]) -> None:
+        run_input = {
+            "usernames": chunk,
+            "proxyConfiguration": {
+                "useApifyProxy": True,
+                "apifyProxyGroups": ["RESIDENTIAL"],
+            },
+        }
+        raw_items = await run_actor_sync(settings.apify_instagram_actor_id, run_input)
+        for raw in raw_items:
+            username_raw = raw.get("username") or _username_from_url(str(raw.get("url") or ""))
+            label = f"@{username_raw}" if username_raw else "unknown"
             key = (username_raw or "").lower()
-            if key and key not in failed_keys:
-                failed_keys.add(key)
-                meta = candidate_meta.get(key)
-                failed_profiles.append(
-                    FailedProfile(
+            if raw.get("success") is False:
+                detail = raw.get("error") or raw.get("errorMessage") or raw.get("message") or "success=false"
+                errors.append(f"Apify 主页采集失败 {label}: {detail}")
+                if key and key not in failed_keys:
+                    failed_keys.add(key)
+                    meta = candidate_meta.get(key)
+                    failed = FailedProfile(
                         username=username_raw or key,
                         profile_url=url_by_username.get(key, _normalize_profile_url(username_raw or key)),
                         reason=classify_profile_failure(str(detail), raw=raw),
                         detail=str(detail),
                         **_source_fields_from_meta(meta),
                     )
-                )
-            continue
-        username = (username_raw or "").lower()
-        if not username or username in seen:
-            continue
-        seen.add(username)
-        hydrated_usernames.add(username)
-        fallback = url_by_username.get(username)
-        try:
-            results.append(map_apify_instagram_profile(raw, fallback_url=fallback))
-        except ValueError as exc:
-            errors.append(f"主页数据映射失败 {label}: {exc}")
-            if username not in failed_keys:
-                failed_keys.add(username)
-                meta = candidate_meta.get(username)
-                failed_profiles.append(
-                    FailedProfile(
+                    failed_profiles.append(failed)
+                    await _notify(requested_labels.get(key, label), None, failed, str(detail))
+                continue
+            username = key
+            if not username or username in seen:
+                continue
+            seen.add(username)
+            hydrated_usernames.add(username)
+            fallback = url_by_username.get(username)
+            try:
+                profile = map_apify_instagram_profile(raw, fallback_url=fallback)
+                results.append(profile)
+                await _notify(requested_labels.get(username, label), profile, None, None)
+            except ValueError as exc:
+                errors.append(f"主页数据映射失败 {label}: {exc}")
+                if username not in failed_keys:
+                    failed_keys.add(username)
+                    meta = candidate_meta.get(username)
+                    failed = FailedProfile(
                         username=username_raw or username,
                         profile_url=fallback or _normalize_profile_url(username),
                         reason=ProfileFailureReason.MISSING_PROFILE_DETAIL,
                         detail=str(exc),
                         **_source_fields_from_meta(meta),
                     )
+                    failed_profiles.append(failed)
+                    await _notify(requested_labels.get(username, label), None, failed, str(exc))
+
+    chunks = [unique_targets[i : i + chunk_size] for i in range(0, len(unique_targets), chunk_size)]
+
+    async def _run_chunk(chunk: list[str]) -> None:
+        try:
+            await _scrape_chunk(chunk)
+        except Exception as exc:
+            detail = str(exc)
+            for username in chunk:
+                key = username.lower()
+                if key in hydrated_usernames or key in failed_keys:
+                    continue
+                errors.append(f"Apify 主页批次失败 @{username}: {detail}")
+                failed_keys.add(key)
+                meta = candidate_meta.get(key)
+                failed = FailedProfile(
+                    username=username,
+                    profile_url=url_by_username.get(key, _normalize_profile_url(username)),
+                    reason=classify_profile_failure(detail),
+                    detail=detail,
+                    **_source_fields_from_meta(meta),
                 )
+                failed_profiles.append(failed)
+                await _notify(requested_labels.get(key, username), None, failed, detail)
+
+    await map_bounded_incremental(
+        chunks,
+        _run_chunk,
+        concurrency=settings.effective_profile_enrich_concurrency,
+        should_stop=should_stop,
+    )
 
     for key, label in requested_labels.items():
         if key in hydrated_usernames or key in failed_keys:
@@ -603,15 +683,15 @@ async def scrape_instagram_profiles(
         detail = f"未获取到主页数据: {label}"
         errors.append(detail)
         meta = candidate_meta.get(key)
-        failed_profiles.append(
-            FailedProfile(
-                username=key,
-                profile_url=url_by_username.get(key, label),
-                reason=ProfileFailureReason.MISSING_PROFILE_DETAIL,
-                detail=detail,
-                **_source_fields_from_meta(meta),
-            )
+        failed = FailedProfile(
+            username=key,
+            profile_url=url_by_username.get(key, label),
+            reason=ProfileFailureReason.MISSING_PROFILE_DETAIL,
+            detail=detail,
+            **_source_fields_from_meta(meta),
         )
+        failed_profiles.append(failed)
+        await _notify(label, None, failed, detail)
 
     return ProfileScrapeResult(profiles=results, errors=errors, failed_profiles=failed_profiles)
 
@@ -658,7 +738,7 @@ async def discover_post_authors_from_hashtags(
         url = _profile_url_from_any(raw)
         if not url:
             post_ref = raw.get("shortCode") or raw.get("id") or f"post#{index}"
-            errors.append(f"Hashtag 帖子 {post_ref} 无法提取 ownerUsername/ownerUrl")
+            errors.append(_post_author_missing_error("Hashtag 帖子", str(post_ref), raw))
             continue
         username = _username_from_url(url)
         key = url.lower()
@@ -740,7 +820,7 @@ async def discover_post_authors_from_post_urls(
         url = _profile_url_from_any(raw)
         if not url:
             post_ref = raw.get("shortCode") or raw.get("id") or post_url or f"post#{index}"
-            errors.append(f"帖子 {post_ref} 无法提取 ownerUsername/ownerUrl")
+            errors.append(_post_author_missing_error("帖子", str(post_ref), raw))
             continue
         username = _username_from_url(url)
         key = url.lower()

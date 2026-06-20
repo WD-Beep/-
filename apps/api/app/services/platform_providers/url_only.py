@@ -56,7 +56,21 @@ PINTEREST_RESERVED = {
     "settings",
     "today",
 }
-SHOPMY_RESERVED = {"collections", "discover", "explore", "login", "products", "shop", "stores"}
+SHOPMY_RESERVED = {
+    "apple-app-site-association",
+    "collections",
+    "discover",
+    "explore",
+    "favicon.ico",
+    "login",
+    "manifest.json",
+    "products",
+    "robots.txt",
+    "shop",
+    "sitemap.xml",
+    "static",
+    "stores",
+}
 HANDLE_RE = re.compile(r"^[A-Za-z0-9_.-]{2,80}$")
 PINTEREST_PIN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -164,6 +178,25 @@ def _parse_shopmy(raw_url: str) -> PlatformCandidateProfile | None:
     if host not in CONFIGS["shopmy"].hosts:
         return None
     parts = _path_parts(parsed)
+    if len(parts) >= 2 and parts[0].lower() == "shop":
+        username = parts[1].strip()
+        if not HANDLE_RE.match(username):
+            return None
+        return PlatformCandidateProfile(
+            platform="shopmy",
+            username=username,
+            profile_url=f"https://shopmy.us/{username}",
+            display_name=username.replace("_", " "),
+            source_url=text,
+            source_type="input_url",
+            source_discovery_type="url_import",
+            source_meta={
+                "provider": "url_only",
+                "input_url": raw_url.strip(),
+                "link_type": "profile",
+                "profile_hydration": "url_only_pending",
+            },
+        )
     if len(parts) >= 2 and parts[0].lower() not in SHOPMY_RESERVED:
         username = parts[0].strip()
         if HANDLE_RE.match(username):

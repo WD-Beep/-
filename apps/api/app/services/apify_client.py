@@ -37,6 +37,33 @@ class ApifyError(Exception):
     pass
 
 
+APIFY_NETWORK_UNREACHABLE_REASON = "network_unreachable"
+
+
+def is_apify_network_unreachable(exc: Exception) -> bool:
+    """Return True when this machine cannot open a connection to Apify."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        detail = f"{type(current).__name__}: {current}".lower()
+        if "all connection attempts failed" in detail:
+            return True
+        if "api.apify.com" in detail and any(
+            marker in detail
+            for marker in (
+                "connection refused",
+                "connection timed out",
+                "network is unreachable",
+                "connecterror",
+                "networkerror",
+            )
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def format_apify_timeout_error(*, timeout: float, exc: Exception | None = None) -> str:
     detail = str(exc).strip() if exc is not None else ""
     suffix = f": {detail}" if detail else ""
@@ -58,6 +85,8 @@ async def run_actor_sync(
 
     max_retries: int | None = None,
 
+    memory_mbytes: int | None = None,
+
 ) -> list[dict]:
 
     """同步运行 Actor 并返回 dataset items。"""
@@ -74,7 +103,9 @@ async def run_actor_sync(
 
     url = f"{APIFY_BASE}/acts/{actor_slug}/run-sync-get-dataset-items"
 
-    params = {"token": settings.apify_token}
+    params: dict[str, str | int] = {"token": settings.apify_token}
+    if memory_mbytes and memory_mbytes > 0:
+        params["memory"] = memory_mbytes
 
     started = time.perf_counter()
 
@@ -93,6 +124,8 @@ async def run_actor_sync(
         elapsed = time.perf_counter() - started
         detail = str(exc).strip() or type(exc).__name__
         logger.warning("Apify actor %s network error after %.2fs: %s", actor_id, elapsed, detail)
+        if is_apify_network_unreachable(exc):
+            raise ApifyError(f"Apify 网络不可达: {detail}") from exc
         raise ApifyError(f"Apify 网络错误: {detail}") from exc
 
     elapsed = time.perf_counter() - started

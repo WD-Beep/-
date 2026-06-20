@@ -197,6 +197,16 @@ AMAZON_ASIN_PROFILES: dict[str, dict[str, str | list[str]]] = {
         "brand": "Aegero",
 
         "product_category": "laundry_bag",
+        "product_videos": [
+            {
+                "creator_name": "Kuzzin Vinny Reviews",
+                "video_title": "Aegero 2 Pack XL Travel Laundry Bag Review",
+                "video_source": "customer_review_video",
+                "review_url": "https://www.amazon.com/dp/B0CPF3W9B2",
+                "video_url": "https://www.amazon.com/dp/B0CPF3W9B2#customer-review-video",
+                "text": "Aegero travel laundry bag B0CPF3W9B2",
+            }
+        ],
 
         "strong_keywords": [
 
@@ -222,6 +232,45 @@ AMAZON_ASIN_PROFILES: dict[str, dict[str, str | list[str]]] = {
 
         ],
 
+    },
+    "B0D9W576KQ": {
+        "brand": "HOMEHIVE",
+        "product_title": "HOMEHIVE 20 Clear PVC Jewelry Storage Bags Anti Tarnish Zipper Bags",
+        "product_category": "jewelry_storage_bag",
+        "require_brand_match": "true",
+        "strong_keywords": [
+            "clear PVC jewelry bags",
+            "PVC jewelry storage bags",
+            "anti tarnish jewelry bags",
+            "zipper jewelry bags",
+            "HOMEHIVE jewelry storage bags",
+            "HOMEHIVE clear PVC jewelry bags",
+            "HOMEHIVE anti tarnish jewelry bags",
+            "HOMEHIVE travel jewelry organizer",
+        ],
+        "exact_phrases": [
+            "HOMEHIVE jewelry storage bags",
+            "HOMEHIVE clear PVC jewelry bags",
+            "HOMEHIVE anti tarnish jewelry bags",
+            "HOMEHIVE 20 clear bags",
+            "HOMEHIVE 20 PVC",
+        ],
+        "variant_attributes": [
+            "20 clear bags",
+            "20 PVC",
+            "clear PVC",
+            "clear zipper jewelry bags",
+            "zipper jewelry bags",
+        ],
+        "broad_category_keywords": [
+            "jewelry organizer",
+            "jewelry storage",
+            "storage bags",
+            "travel jewelry pouch",
+            "travel jewelry organizer",
+            "necklace storage",
+            "ring earring storage",
+        ],
     },
 
 }
@@ -498,7 +547,8 @@ def build_amazon_product_relevance_profile(
 
     def add_strong(value: str) -> None:
 
-        key = value.strip().lower()
+        text = value.strip()
+        key = text.lower()
 
         if not key or key in seen_strong:
 
@@ -506,7 +556,7 @@ def build_amazon_product_relevance_profile(
 
         seen_strong.add(key)
 
-        strong.append(key)
+        strong.append(text)
 
 
 
@@ -523,8 +573,9 @@ def build_amazon_product_relevance_profile(
     brand = str(profile.get("brand") or "").strip()
 
     if brand:
-
-        add_strong(f"{brand} laundry bag")
+        category = str(profile.get("product_category") or "").strip()
+        if category == "laundry_bag":
+            add_strong(f"{brand} laundry bag")
 
 
 
@@ -538,15 +589,24 @@ def build_amazon_product_relevance_profile(
 
     seen_search: set[str] = set()
 
+    for phrase in profile.get("exact_phrases") or []:
+        text = str(phrase).strip()
+        key = text.lower()
+        if text and " " in text and key not in seen_search:
+            seen_search.add(key)
+            search_keywords.append(text)
+
     for phrase in strong:
 
         if " " not in phrase:
 
             continue
 
-        if phrase not in seen_search:
+        key = phrase.lower()
 
-            seen_search.add(phrase)
+        if key not in seen_search:
+
+            seen_search.add(key)
 
             search_keywords.append(phrase)
 
@@ -561,6 +621,11 @@ def build_amazon_product_relevance_profile(
         "brand": brand or None,
 
         "product_category": str(profile.get("product_category") or "") or None,
+        "product_title": str(profile.get("product_title") or "") or None,
+        "exact_phrases": list(profile.get("exact_phrases") or []),
+        "variant_attributes": list(profile.get("variant_attributes") or []),
+        "broad_category_keywords": list(profile.get("broad_category_keywords") or []),
+        "require_brand_match": str(profile.get("require_brand_match") or "").lower(),
 
         "strong_keywords": strong,
 
@@ -571,6 +636,7 @@ def build_amazon_product_relevance_profile(
         "search_keywords": search_keywords[:12],
 
         "strong_tokens": strong_tokens,
+        "product_videos": list(profile.get("product_videos") or []),
 
     }
 
@@ -635,8 +701,13 @@ def parse_amazon_product_url(raw: str) -> dict[str, str | list[str]] | None:
         "negative_keywords": list(relevance.get("negative_keywords") or []),
 
         "search_keywords": list(relevance.get("search_keywords") or []),
+        "exact_phrases": list(relevance.get("exact_phrases") or []),
+        "variant_attributes": list(relevance.get("variant_attributes") or []),
+        "broad_category_keywords": list(relevance.get("broad_category_keywords") or []),
 
     }
+    if relevance.get("product_videos"):
+        payload["product_videos"] = list(relevance.get("product_videos") or [])
 
     if slug:
 
@@ -649,10 +720,40 @@ def parse_amazon_product_url(raw: str) -> dict[str, str | list[str]] | None:
     if relevance.get("product_category"):
 
         payload["product_category"] = relevance["product_category"]
+    if relevance.get("product_title"):
+        payload["product_title"] = relevance["product_title"]
+    if relevance.get("require_brand_match"):
+        payload["require_brand_match"] = relevance["require_brand_match"]
 
     return payload
 
 
+
+
+
+def parse_amazon_product_input(raw: str) -> dict[str, str | list[str]] | None:
+
+    """Parse an Amazon product URL or bare ASIN into the same product seed payload."""
+
+    text = (raw or "").strip()
+
+    if not text:
+
+        return None
+
+    seed = parse_amazon_product_url(text)
+
+    if seed:
+
+        return seed
+
+    asin = extract_asin_from_text(text)
+
+    if not asin:
+
+        return None
+
+    return parse_amazon_product_url(f"https://www.amazon.com/dp/{asin}")
 
 
 
@@ -664,7 +765,7 @@ def build_amazon_seeds_from_urls(urls: list[str]) -> list[dict[str, str]]:
 
     for raw in urls or []:
 
-        seed = parse_amazon_product_url(raw)
+        seed = parse_amazon_product_input(raw)
 
         if not seed:
 

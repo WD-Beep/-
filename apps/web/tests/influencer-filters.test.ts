@@ -17,6 +17,11 @@ test("highValue still maps to high_value query param", () => {
   assert.equal(params.high_value, true);
 });
 
+test("emailStatus maps to email_status query param", () => {
+  const params = influencerFilterQueryParams({ emailStatus: "sent" });
+  assert.equal(params.email_status, "sent");
+});
+
 test("export URL includes value_tier and high_value filters", () => {
   const url = buildInfluencerExportUrl({
     valueTier: "manual_research",
@@ -36,4 +41,9 @@ test("export URL includes value_tier and high_value filters", () => {
 test("export URL includes skip tier filter", () => {
   const url = buildInfluencerExportUrl({ valueTier: "skip" });
   assert.equal(url.includes("value_tier=skip"), true);
+});
+
+test("export URL includes email status filter", () => {
+  const url = buildInfluencerExportUrl({ emailStatus: "unsent" });
+  assert.equal(url.includes("email_status=unsent"), true);
 });

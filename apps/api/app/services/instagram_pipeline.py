@@ -15,11 +15,11 @@ from app.services.collection_filters import (
 from app.services.contact_discovery import ContactDiscoveryService
 from app.services.concurrency import map_bounded
 from app.core.config import settings
-from app.services.task_run_progress import RunCheckpoint, STAGE_HYDRATION, update_task_progress
+from app.services.task_run_progress import RunCheckpoint, STAGE_DISCOVERY, STAGE_HYDRATION, should_commit_progress, update_task_progress
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.instagram_provider import scrape_instagram_profiles
 from app.services.instagram_quality import apply_quality_scores_to_item, compute_quality_scores
-from app.services.collection_targets import discovery_fetch_limit
+from app.services.collection_targets import discovery_fetch_limit, target_qualified_count
 from app.services.instagram_unified_discovery import unified_discover_candidates
 
 logger = logging.getLogger(__name__)
@@ -171,35 +171,120 @@ class InstagramCollectionPipeline:
                 competitor_meta=discovery.competitor_meta,
             )
 
+        if db is not None:
+            await update_task_progress(
+                db,
+                task,
+                stage=STAGE_DISCOVERY,
+                discovered_count=stats.discovered_count,
+                deduped_count=stats.deduped_count,
+                checkpoint=checkpoint,
+                commit=True,
+            )
+
         candidate_meta = {c.username.lower(): c for c in early_candidates}
         profile_urls = [
             c.profile_url
             for c in early_candidates
             if not checkpoint.hydrated_done("instagram", c.profile_url)
         ]
+        hydration_total = len(early_candidates)
+        qualified_target = target_qualified_count(task)
+        hydrate_success = len(
+            [key for key in checkpoint.hydrated_profiles if key.startswith("instagram:")]
+        )
+        hydrate_failed = 0
+        hydrate_processed = min(hydrate_success + hydrate_failed, hydration_total)
+        checkpoint.extra["profiles_hydrating_total"] = len(profile_urls) or hydration_total
+        checkpoint.extra["profiles_hydrating_completed"] = 0
+        stop_hydration = False
 
         if db is not None:
             await update_task_progress(
                 db,
                 task,
                 stage=STAGE_HYDRATION,
-                total=len(early_candidates),
-                processed=len(checkpoint.hydrated_profiles),
+                total=hydration_total,
+                processed=hydrate_processed,
+                success=hydrate_success,
+                skipped=0,
+                failed=hydrate_failed,
+                discovered_count=stats.discovered_count,
+                deduped_count=stats.deduped_count,
+                profile_fetched_count=hydrate_success,
+                profile_failed_count=hydrate_failed,
                 checkpoint=checkpoint,
                 commit=True,
             )
 
-        scrape_result = await scrape_instagram_profiles(profile_urls, candidate_meta=candidate_meta)
+        hydration_commit_every = max(1, settings.collection_batch_commit_size)
+
+        async def _on_profile_complete(label: str, item, err: str | None) -> None:
+            nonlocal hydrate_success, hydrate_failed, hydrate_processed, stop_hydration
+            if item is not None and hasattr(item, "profile_url"):
+                checkpoint.mark_hydrated("instagram", item.profile_url)
+                hydrate_success += 1
+            elif item is not None and hasattr(item, "reason"):
+                hydrate_failed += 1
+                if err and db is not None:
+                    task.last_error = err[:2000]
+            elif err:
+                hydrate_failed += 1
+                if db is not None:
+                    task.last_error = err[:2000]
+            hydrate_processed = min(hydrate_success + hydrate_failed, hydration_total)
+            checkpoint.extra["profiles_hydrating_completed"] = hydrate_processed
+            if db is not None:
+                commit_now = should_commit_progress(
+                    hydrate_processed,
+                    hydration_total,
+                    every=hydration_commit_every,
+                ) or hydrate_success >= qualified_target
+                await update_task_progress(
+                    db,
+                    task,
+                    stage=STAGE_HYDRATION,
+                    total=hydration_total,
+                    processed=hydrate_processed,
+                    success=hydrate_success,
+                    skipped=0,
+                    failed=hydrate_failed,
+                    discovered_count=stats.discovered_count,
+                    deduped_count=stats.deduped_count,
+                    profile_fetched_count=hydrate_success,
+                    profile_failed_count=hydrate_failed,
+                    checkpoint=checkpoint,
+                    commit=commit_now,
+                )
+            if hydrate_success >= qualified_target:
+                stop_hydration = True
+
+        scrape_result = await scrape_instagram_profiles(
+            profile_urls,
+            candidate_meta=candidate_meta,
+            on_item_complete=_on_profile_complete,
+            should_stop=lambda: stop_hydration,
+        )
         for profile in scrape_result.profiles:
             checkpoint.mark_hydrated("instagram", profile.profile_url)
         if db is not None:
+            hydrate_success = len(scrape_result.profiles)
+            hydrate_failed = len(scrape_result.failed_profiles)
+            hydrate_processed = min(hydrate_success + hydrate_failed, hydration_total)
+            checkpoint.extra["profiles_hydrating_completed"] = hydrate_processed
             await update_task_progress(
                 db,
                 task,
                 stage=STAGE_HYDRATION,
-                total=len(early_candidates),
-                processed=min(len(checkpoint.hydrated_profiles), len(early_candidates)),
-                failed=len(scrape_result.failed_profiles),
+                total=hydration_total,
+                processed=hydrate_processed,
+                success=hydrate_success,
+                skipped=0,
+                failed=hydrate_failed,
+                discovered_count=stats.discovered_count,
+                deduped_count=stats.deduped_count,
+                profile_fetched_count=hydrate_success,
+                profile_failed_count=hydrate_failed,
                 checkpoint=checkpoint,
                 commit=True,
             )

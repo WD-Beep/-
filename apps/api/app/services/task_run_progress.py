@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.models.collection_task import CollectionTask
-
+from app.models.enums import CollectionTaskStatus
+from app.services.collect_errors import (
+    filter_actionable_collection_errors,
+    is_stale_interrupt_message,
+    summarize_errors,
+)
 from app.services.platform_utils import platform_identity_key
 
 STAGE_DISCOVERY = "discovery"
@@ -39,6 +46,39 @@ def search_checkpoint_key(platform: str, token: str) -> str:
     return f"{platform.strip().lower()}:{token.strip().lower()}"
 
 
+def classify_provider_unavailable_state(
+    platform: str,
+    message: str,
+    *,
+    api_calls: int | None = None,
+) -> dict[str, Any] | None:
+    text = (message or "").strip()
+    lowered = text.lower()
+    if not text:
+        return None
+    reason = ""
+    readable = text
+    if "actor-memory-limit-exceeded" in lowered or "memory limit" in lowered or "内存" in text:
+        reason = "apify_memory_limit_exceeded"
+        readable = "Apify 内存额度已满/并发 actor 过多，已跳过或短路相关采集"
+    elif "未配置" in text or "not configured" in lowered or "缺少" in text:
+        reason = "provider_not_configured"
+    elif "超时" in text or "timeout" in lowered:
+        reason = "timeout"
+    elif "network_unreachable" in lowered or "网络不可达" in text:
+        reason = "network_unreachable"
+    if not reason:
+        return None
+    state: dict[str, Any] = {
+        "status": "provider_unavailable",
+        "reason": reason,
+        "message": readable,
+    }
+    if api_calls is not None:
+        state["api_calls"] = api_calls
+    return state
+
+
 @dataclass
 class RunCheckpoint:
     completed_hashtags: list[str] = field(default_factory=list)
@@ -47,12 +87,21 @@ class RunCheckpoint:
     hydrated_profiles: list[str] = field(default_factory=list)
     persisted_profiles: list[str] = field(default_factory=list)
     last_stage: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_task(cls, task: CollectionTask) -> RunCheckpoint:
         raw = getattr(task, "run_checkpoint", None) or {}
         if not isinstance(raw, dict):
             raw = {}
+        progress_keys = {
+            "completed_hashtags",
+            "completed_post_urls",
+            "completed_search_keys",
+            "hydrated_profiles",
+            "persisted_profiles",
+            "last_stage",
+        }
         return cls(
             completed_hashtags=list(raw.get("completed_hashtags") or []),
             completed_post_urls=list(raw.get("completed_post_urls") or []),
@@ -60,17 +109,20 @@ class RunCheckpoint:
             hydrated_profiles=list(raw.get("hydrated_profiles") or []),
             persisted_profiles=list(raw.get("persisted_profiles") or []),
             last_stage=raw.get("last_stage"),
+            extra={key: deepcopy(value) for key, value in raw.items() if key not in progress_keys},
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = deepcopy(self.extra)
+        data.update({
             "completed_hashtags": self.completed_hashtags,
             "completed_post_urls": self.completed_post_urls,
             "completed_search_keys": self.completed_search_keys,
             "hydrated_profiles": self.hydrated_profiles,
             "persisted_profiles": self.persisted_profiles,
             "last_stage": self.last_stage,
-        }
+        })
+        return data
 
     def hashtag_done(self, tag: str) -> bool:
         return tag.strip().lstrip("#").lower() in {t.lower() for t in self.completed_hashtags}
@@ -97,6 +149,21 @@ class RunCheckpoint:
         key = search_checkpoint_key(platform, token)
         if key not in self.completed_search_keys:
             self.completed_search_keys.append(key)
+
+    def mark_provider_unavailable(
+        self,
+        platform: str,
+        message: str,
+        *,
+        api_calls: int | None = None,
+    ) -> bool:
+        state = classify_provider_unavailable_state(platform, message, api_calls=api_calls)
+        if not state:
+            return False
+        provider_state = self.extra.setdefault("provider_availability_state", {})
+        if isinstance(provider_state, dict):
+            provider_state[platform.strip().lower()] = state
+        return True
 
     def hydrated_done(self, platform: str, profile_url: str) -> bool:
         key = profile_checkpoint_key(platform, profile_url)
@@ -167,6 +234,10 @@ async def update_task_progress(
     last_error: str | None | object = _UNSET,
     checkpoint: RunCheckpoint | None = None,
     target_qualified: int | None = None,
+    discovered_count: int | None = None,
+    deduped_count: int | None = None,
+    profile_fetched_count: int | None = None,
+    profile_failed_count: int | None = None,
     commit: bool = True,
 ) -> None:
     if stage is not None:
@@ -183,6 +254,14 @@ async def update_task_progress(
         task.skipped_count = skipped
     if failed is not None:
         task.failed_count = failed
+    if discovered_count is not None:
+        task.discovered_count = discovered_count
+    if deduped_count is not None:
+        task.deduped_count = deduped_count
+    if profile_fetched_count is not None:
+        task.profile_fetched_count = profile_fetched_count
+    if profile_failed_count is not None:
+        task.profile_failed_count = profile_failed_count
     if last_error is not _UNSET:
         task.last_error = last_error[:2000] if last_error else None
     if checkpoint is not None:
@@ -217,3 +296,77 @@ def reset_run_progress(task: CollectionTask) -> None:
     task.current_stage = STAGE_DISCOVERY
     task.last_error = None
     task.run_checkpoint = {}
+
+
+TERMINAL_SUCCESS_STATUSES = frozenset(
+    {
+        CollectionTaskStatus.COMPLETED.value,
+        CollectionTaskStatus.COMPLETED_WITH_RESULTS.value,
+        CollectionTaskStatus.COMPLETED_NO_RESULTS.value,
+    }
+)
+
+INTERRUPT_CHECKPOINT_KEYS = ("interrupted", "interrupted_stage", "interrupted_at")
+
+
+def should_commit_progress(processed: int, total: int, *, every: int) -> bool:
+    """Reduce DB commit frequency during long-running collection stages."""
+    if processed <= 0:
+        return False
+    if total > 0 and processed >= total:
+        return True
+    step = max(1, every)
+    return processed % step == 0
+
+
+def is_terminal_success_status(status: str | CollectionTaskStatus) -> bool:
+    value = status.value if isinstance(status, CollectionTaskStatus) else str(status)
+    return value in TERMINAL_SUCCESS_STATUSES
+
+
+def clear_interrupted_checkpoint(checkpoint: dict[str, Any] | None) -> dict[str, Any]:
+    data = dict(checkpoint or {})
+    for key in INTERRUPT_CHECKPOINT_KEYS:
+        data.pop(key, None)
+    return data
+
+
+def _force_persist_cleared_field(task: CollectionTask, field_name: str, value: Any) -> None:
+    """Ensure NULL/error clears survive concurrent stale-reconcile writes."""
+    setattr(task, field_name, value)
+    flag_modified(task, field_name)
+
+
+def clear_task_error_fields(task: CollectionTask) -> None:
+    """Force-clear error fields so stale DB values are overwritten on commit."""
+    _force_persist_cleared_field(task, "error_message", None)
+    _force_persist_cleared_field(task, "last_error", None)
+
+
+def apply_terminal_task_state(
+    task: CollectionTask,
+    *,
+    status: str | CollectionTaskStatus,
+    errors: list[str] | None = None,
+    prefix: str = "",
+) -> None:
+    """Persist terminal status without stale interrupt noise on successful runs."""
+    value = status.value if isinstance(status, CollectionTaskStatus) else str(status)
+    task.status = value
+
+    if is_terminal_success_status(value):
+        clear_task_error_fields(task)
+        if is_stale_interrupt_message(task.status_summary):
+            _force_persist_cleared_field(task, "status_summary", None)
+        task.run_checkpoint = clear_interrupted_checkpoint(
+            task.run_checkpoint if isinstance(task.run_checkpoint, dict) else {}
+        )
+        flag_modified(task, "run_checkpoint")
+        return
+
+    _force_persist_cleared_field(task, "last_error", None)
+    actionable = filter_actionable_collection_errors(errors or [])
+    task.error_message = summarize_errors(actionable, prefix=prefix)
+    flag_modified(task, "error_message")
+    if is_stale_interrupt_message(task.status_summary):
+        _force_persist_cleared_field(task, "status_summary", None)

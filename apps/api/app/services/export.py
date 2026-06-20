@@ -26,6 +26,7 @@ CANDIDATE_BUSINESS_EXPORT_COLUMNS: list[tuple[str, str, str]] = [
     ("profile_url", "主页链接", "url"),
     ("source_platform", "来源平台", "text"),
     ("source_input_url", "来源输入链接", "url"),
+    ("product_match_reason", "商品匹配说明", "wrap"),
     ("seed_platform", "Seed 平台", "text"),
     ("seed_enrichment_status", "Seed 补全状态", "text"),
     ("followers_count", "粉丝数", "int"),
@@ -414,6 +415,18 @@ def _candidate_export_value(
 
     if field == "source_input_url":
         return _candidate_source_input_url(candidate)
+
+    if field == "product_match_reason":
+        meta = getattr(candidate, "source_meta", None) or {}
+        if not isinstance(meta, dict):
+            return ""
+        selected = str(meta.get("selected_reason") or "").strip()
+        if selected:
+            return selected
+        reasons = meta.get("match_reasons")
+        if isinstance(reasons, list):
+            return "；".join(str(item) for item in reasons if item)
+        return ""
 
     if field == "source_task_name":
         return task_name or ""

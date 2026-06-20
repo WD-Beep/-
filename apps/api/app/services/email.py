@@ -284,6 +284,53 @@ class EmailService:
         await EmailService._send_message(message, recipients)
 
     @staticmethod
+    async def create_outreach_email_log(
+        db: AsyncSession,
+        *,
+        task_id: int | None,
+        recipients: list[str],
+        subject: str,
+        body: str | None,
+        status: EmailLogStatus,
+        attachment_path: str | None = None,
+        error_message: str | None = None,
+        product_id: int | None = None,
+        user_id: int | None = None,
+        product_influencer_id: int | None = None,
+        sender_email: str | None = None,
+        influencer_username: str | None = None,
+        generated_by_ai: bool = False,
+        ai_provider: str | None = None,
+        ai_reason: str | None = None,
+        matched_knowledge: list | None = None,
+        risk_notes: list | None = None,
+    ) -> EmailLog:
+        log = EmailLog(
+            task_id=task_id,
+            product_id=product_id,
+            user_id=user_id,
+            product_influencer_id=product_influencer_id,
+            sender_email=sender_email or settings.smtp_from or None,
+            influencer_username=influencer_username,
+            recipients=recipients,
+            subject=subject,
+            body=body,
+            status=status.value,
+            attachment_path=attachment_path,
+            error_message=error_message,
+            generated_by_ai=generated_by_ai,
+            ai_provider=ai_provider,
+            ai_reason=ai_reason,
+            matched_knowledge=matched_knowledge,
+            risk_notes=risk_notes,
+            sent_at=datetime.now(UTC) if status == EmailLogStatus.SENT else None,
+        )
+        db.add(log)
+        await db.commit()
+        await db.refresh(log)
+        return log
+
+    @staticmethod
     async def _create_email_log(
         db: AsyncSession,
         *,
@@ -295,22 +342,36 @@ class EmailService:
         error_message: str | None = None,
         product_id: int | None = None,
         user_id: int | None = None,
+        product_influencer_id: int | None = None,
+        sender_email: str | None = None,
+        influencer_username: str | None = None,
+        body: str | None = None,
+        generated_by_ai: bool = False,
+        ai_provider: str | None = None,
+        ai_reason: str | None = None,
+        matched_knowledge: list | None = None,
+        risk_notes: list | None = None,
     ) -> EmailLog:
-        log = EmailLog(
+        return await EmailService.create_outreach_email_log(
+            db,
             task_id=task_id,
-            product_id=product_id,
-            user_id=user_id,
             recipients=recipients,
             subject=subject,
-            status=status.value,
+            body=body,
+            status=status,
             attachment_path=attachment_path,
             error_message=error_message,
-            sent_at=datetime.now(UTC) if status == EmailLogStatus.SENT else None,
+            product_id=product_id,
+            user_id=user_id,
+            product_influencer_id=product_influencer_id,
+            sender_email=sender_email,
+            influencer_username=influencer_username,
+            generated_by_ai=generated_by_ai,
+            ai_provider=ai_provider,
+            ai_reason=ai_reason,
+            matched_knowledge=matched_knowledge,
+            risk_notes=risk_notes,
         )
-        db.add(log)
-        await db.commit()
-        await db.refresh(log)
-        return log
 
     @staticmethod
     async def send_test_email(recipient: str | None = None) -> EmailTestResponse:
@@ -329,9 +390,14 @@ class EmailService:
         try:
             await EmailService._send_message(message, [to_address])
         except Exception as exc:
+            error_message = format_smtp_send_error(exc)
+            if settings.smtp_from_user_mismatch:
+                from app.core.config import SMTP_FROM_USER_MISMATCH_MSG
+
+                error_message = f"{error_message} {SMTP_FROM_USER_MISMATCH_MSG}"
             return EmailTestResponse(
                 success=False,
-                message=f"测试邮件发送失败：{format_smtp_send_error(exc)}",
+                message=f"测试邮件发送失败：{error_message}",
                 recipient=to_address,
             )
 
@@ -490,9 +556,39 @@ class EmailService:
         for influencer in influencers:
             recipient = resolve_influencer_email(influencer)
             if not recipient:
+                skipped += 1
                 continue
 
-            subject, body = select_outreach_template(influencer, task.outreach_templates)
+            from app.models.global_influencer_profile import GlobalInfluencerProfile
+            from app.models.product_influencer import ProductInfluencer
+            from app.services.speech_recommendation_service import SpeechRecommendationService
+
+            product_row = await db.get(ProductInfluencer, influencer.id)
+            if not product_row or product_row.product_id != task.product_id:
+                skipped += 1
+                continue
+            global_row = await db.get(GlobalInfluencerProfile, product_row.global_influencer_id)
+            if not global_row:
+                skipped += 1
+                continue
+
+            generation = await SpeechRecommendationService.generate_outreach_email(
+                db,
+                product_id=task.product_id,
+                global_row=global_row,
+                product_row=product_row,
+                user_intent="首次合作邀约",
+            )
+            subject = generation.subject
+            body = generation.body
+            ai_meta = {
+                "body": body,
+                "generated_by_ai": generation.configured and generation.provider == "openai",
+                "ai_provider": generation.provider,
+                "ai_reason": generation.reason,
+                "matched_knowledge": [item.model_dump(mode="json") for item in generation.matched_knowledge],
+                "risk_notes": generation.risk_notes,
+            }
 
             if provider == "mailchimp":
                 try:
@@ -512,7 +608,10 @@ class EmailService:
                             subject=subject,
                             status=EmailLogStatus.PENDING,
                             error_message=f"Mailchimp dry-run queued (tier={resolve_follower_tier(influencer.followers_count)})",
+                            product_influencer_id=influencer.id,
+                            influencer_username=influencer.username,
                             **tenant,
+                            **ai_meta,
                         )
                         queued += 1
                         continue
@@ -524,7 +623,10 @@ class EmailService:
                         subject=subject,
                         status=EmailLogStatus.SENT,
                         error_message="Mailchimp audience sync",
+                        product_influencer_id=influencer.id,
+                        influencer_username=influencer.username,
                         **tenant,
+                        **ai_meta,
                     )
                     await EmailService._mark_task_outreach_email_sent(
                         db,
@@ -541,7 +643,10 @@ class EmailService:
                         subject=subject,
                         status=EmailLogStatus.FAILED,
                         error_message=str(exc)[:2000],
+                        product_influencer_id=influencer.id,
+                        influencer_username=influencer.username,
                         **tenant,
+                        **ai_meta,
                     )
                     failed += 1
                 continue
@@ -554,7 +659,10 @@ class EmailService:
                     subject=subject,
                     status=EmailLogStatus.PENDING,
                     error_message=f"Outreach queued via {provider}; dry_run={dry_run}",
+                    product_influencer_id=influencer.id,
+                    influencer_username=influencer.username,
                     **tenant,
+                    **ai_meta,
                 )
                 queued += 1
                 continue
@@ -573,7 +681,10 @@ class EmailService:
                     recipients=[recipient],
                     subject=subject,
                     status=EmailLogStatus.SENT,
+                    product_influencer_id=influencer.id,
+                    influencer_username=influencer.username,
                     **tenant,
+                    **ai_meta,
                 )
                 await EmailService._mark_task_outreach_email_sent(
                     db,
@@ -590,7 +701,10 @@ class EmailService:
                     subject=subject,
                     status=EmailLogStatus.FAILED,
                     error_message=str(exc)[:2000],
+                    product_influencer_id=influencer.id,
+                    influencer_username=influencer.username,
                     **tenant,
+                    **ai_meta,
                 )
                 failed += 1
 

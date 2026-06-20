@@ -135,22 +135,31 @@ export function SettingsPanel() {
               message={translateBackendMessage(status.smtp.configured ? status.smtp.message : SMTP_NOT_CONFIGURED)}
             >
               {status.smtp.configured ? (
-                <div className="grid gap-2 rounded-lg border bg-muted/30 p-4">
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">服务器</span>
-                    <span>{status.smtp.host ?? "-"}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">端口</span>
-                    <span>{status.smtp.port ?? "-"}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">发件地址</span>
-                    <span>{status.smtp.from_address ?? "-"}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">TLS</span>
-                    <span>{status.smtp.use_tls ? "启用" : "关闭"}</span>
+                <div className="space-y-3">
+                  {status.smtp.from_user_mismatch && status.smtp.warning ? (
+                    <ErrorAlert message={status.smtp.warning} />
+                  ) : null}
+                  <div className="grid gap-2 rounded-lg border bg-muted/30 p-4">
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">服务器</span>
+                      <span>{status.smtp.host ?? "-"}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">端口</span>
+                      <span>{status.smtp.port ?? "-"}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">登录账号</span>
+                      <span>{status.smtp.user_address ?? "-"}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">发件地址</span>
+                      <span>{status.smtp.from_address ?? "-"}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">TLS</span>
+                      <span>{status.smtp.use_tls ? "启用" : "关闭"}</span>
+                    </div>
                   </div>
                 </div>
               ) : null}
@@ -158,18 +167,18 @@ export function SettingsPanel() {
 
             <ConfigCard
               title="AI 配置"
-              description="红人 AI 分析（Kimi 优先，失败降级 Mock）"
+              description="红人 AI 分析（OpenAI 优先，失败降级启发式评分）"
               configured={status.ai.configured}
               message={
                 status.ai.configured
-                  ? "Kimi API 已配置，采集后将写入 AI 画像；失败时自动 Mock 降级。"
-                  : "未配置 KIMI_API_KEY，采集后使用 Mock AI 分析（非空画像/合作建议/触达话术）。"
+                  ? "OpenAI API 已配置，采集后将写入 AI 画像；失败时自动降级为本地启发式评分。"
+                  : "未配置 OPENAI_API_KEY，采集后使用本地启发式评分（不生成模拟文案）。"
               }
             >
               <div className="grid gap-2 rounded-lg border bg-muted/30 p-4">
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">服务商</span>
-                  <span>{status.ai.provider === "kimi" ? "Kimi / Moonshot" : status.ai.provider}</span>
+                  <span>{status.ai.provider === "openai" ? "OpenAI" : aiModeLabel(status.ai.provider)}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">运行模式</span>

@@ -230,7 +230,12 @@ async def unified_discover_candidates(
         from app.services.competitor_product_discovery import discover_competitor_product_candidates
 
         had_keyword_phase = True
-        cp_result = await discover_competitor_product_candidates(task, limit=limit)
+        cp_result = await discover_competitor_product_candidates(
+            task,
+            limit=limit,
+            checkpoint=checkpoint,
+            db=db,
+        )
         errors.extend(cp_result.errors)
         meta = cp_result.meta
         competitor_meta = cp_result.competitor_meta

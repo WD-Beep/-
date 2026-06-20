@@ -65,13 +65,16 @@ async def run_scheduled_collection(task_id: int) -> None:
             return
 
         if CollectionRunnerService.has_active_collection_run():
-            active_id = CollectionRunnerService.get_active_collection_task_id()
-            logger.warning(
-                "Scheduled task_id=%s skipped: in-process collection task_id=%s is active",
-                task_id,
-                active_id,
-            )
-            return
+            active_ids = CollectionRunnerService.get_active_collection_task_ids()
+            if task_id not in active_ids:
+                active_id = CollectionRunnerService.get_active_collection_task_id()
+                logger.warning(
+                    "Scheduled task_id=%s skipped: in-process collection at capacity (%s active, task_id=%s)",
+                    task_id,
+                    len(active_ids),
+                    active_id,
+                )
+                return
 
         try:
             await CollectionRunnerService.run_task(db, task)

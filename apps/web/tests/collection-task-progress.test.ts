@@ -1,9 +1,12 @@
 import "./register-path-aliases.ts";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
   COLLECTION_TASK_TABLE_LAYOUT,
+  collectionTaskProviderDiagnosticHint,
+  collectionTaskSeedDiscoveryDiagnosticHint,
   collectionTaskDiscoveryContext,
   collectionTaskFunnelLine,
   collectionTaskProgressSummary,
@@ -11,11 +14,13 @@ import {
   COLLECTION_TASK_SLOW_FALLBACK_MS,
   collectionTaskSlowApiHintLabel,
   formatCollectionResultLines,
+  buildTaskResultBreakdown,
   formatInsertedVsTarget,
   isCollectionTaskSlowApi,
   isCollectionTaskSlowApiFromBackend,
 } from "../src/lib/collection-task-progress.ts";
 import {
+  buildCollectionTaskCompletionMessage,
   buildInfluencerExportUrl,
   isCollectionTaskRunningStale,
   type CollectionTask,
@@ -287,6 +292,32 @@ test("collection result lines include inserted and funnel", () => {
   assert.match(lines.funnel, /发现 5 → 去重 4 → 主页 3 → 过滤 2 → 入库 1\/10/);
 });
 
+test("task result breakdown exposes structured funnel metrics", () => {
+  const lines = buildTaskResultBreakdown(
+    task({
+      status: "partial_failed",
+      collection_mode: "competitor_product",
+      inserted_count: 21,
+      result_count: 21,
+      discovery_limit: 50,
+      discovered_count: 574,
+      deduped_count: 481,
+      profile_fetched_count: 481,
+      filtered_out_count: 109,
+      email_count: 3,
+      missing_contact_count: 18,
+      failed_count: 12,
+      status_summary: "Instagram API 失败",
+    }),
+  );
+
+  assert.deepEqual(lines.primary, ["已入库 21 / 目标 50"]);
+  assert.deepEqual(lines.funnel, ["发现 574", "去重 481", "主页 481", "过滤 109"]);
+  assert.deepEqual(lines.contacts, ["邮箱 3", "缺联系方式 18", "失败 12"]);
+  assert.equal(lines.reason, "主要原因：Instagram API 失败");
+  assert.equal(lines.highValue, true);
+});
+
 test("table layout classes keep status and actions readable", () => {
   assert.match(COLLECTION_TASK_TABLE_LAYOUT.statusCell, /min-w-\[88px\]/);
   assert.match(COLLECTION_TASK_TABLE_LAYOUT.statusBadge, /whitespace-nowrap/);
@@ -335,4 +366,415 @@ test("collection result lines preserve clearer youtube external-link explanation
   assert.match(lines.hint!, /TikTok/);
   assert.match(lines.hint!, /Linktree/);
   assert.match(lines.hint!, /缺少有效联系方式或商业落地页/);
+});
+
+test("competitor product diagnostics explain provider states and same-product filtering", () => {
+  const apifyLimited = task({
+    collection_mode: "competitor_product",
+    status: "completed_no_results",
+    status_summary: "多平台采集部分平台异常",
+    run_checkpoint: {
+      platform_api_counts: { tiktok: 1, facebook: 0 },
+      provider_availability_state: {
+        tiktok: {
+          status: "provider_unavailable",
+          reason: "apify_memory_limit_exceeded",
+          message: "Apify 内存额度已满/并发 actor 过多",
+          api_calls: 1,
+        },
+        facebook: {
+          status: "provider_unavailable",
+          reason: "provider_not_configured",
+          message: "Facebook Apify 暂未配置（缺少 APIFY_TOKEN）",
+          api_calls: 0,
+        },
+      },
+    },
+  });
+
+  const hint = collectionTaskProviderDiagnosticHint(apifyLimited);
+  assert.ok(hint);
+  assert.match(hint!, /TikTok：Apify 额度不足\/并发 actor 过多，已跳过该通道（API 1 calls）/);
+  assert.match(hint!, /Facebook：provider 未配置，已提前跳过（API 0 calls）/);
+  assert.equal(formatCollectionResultLines(apifyLimited).hint, hint);
+
+  const filtered = task({
+    collection_mode: "competitor_product",
+    status: "completed_no_results",
+    status_summary: "youtube: no same-product results (API 4 calls)",
+  });
+  assert.equal(collectionTaskProviderDiagnosticHint(filtered), "找到相关类目红人但无同款证据，未入库");
+
+  const missingAuthor = task({
+    collection_mode: "competitor_product",
+    status: "partial_failed",
+    error_message: "[instagram] Hashtag 帖子 MISS111 post_author_missing: 无法提取作者主页 raw_fields=shortCode,owner.id",
+  });
+  assert.equal(collectionTaskProviderDiagnosticHint(missingAuthor), "找到帖子但未解析到作者，已记录 raw 字段诊断");
+});
+
+test("competitor product diagnostics explain Instagram cross-platform probe outcome", () => {
+  const probed = task({
+    collection_mode: "competitor_product",
+    status: "completed_no_results",
+    status_summary: "TikTok/YouTube found but Instagram empty",
+    run_checkpoint: {
+      competitor_product_instagram_fallback: {
+        cross_platform_probe_candidates: [
+          { platform: "tiktok", username: "allstarsteven" },
+          { platform: "youtube", display_name: "Sew Simple Home" },
+        ],
+        probe_query_count: 8,
+        probe_profile_url_count: 2,
+        matched_instagram_count: 0,
+        inherited_evidence_count: 0,
+      },
+    },
+  });
+
+  const hint = collectionTaskProviderDiagnosticHint(probed);
+  assert.ok(hint);
+  assert.match(hint!, /已找到 TikTok\/YouTube Amazon 带货证据/);
+  assert.match(hint!, /Instagram 直接关键词未命中或未通过同款证据/);
+  assert.match(hint!, /已尝试按 TikTok\/YouTube username\/display_name 反查 Instagram/);
+  assert.match(hint!, /建议放宽互动率\/粉丝阈值，或启用跨平台证据继承/);
+});
+
+test("running competitor product context shows timed out platform provider", () => {
+  const running = task({
+    status: "running",
+    collection_mode: "competitor_product",
+    current_stage: "discovery",
+    run_checkpoint: {
+      platform_discovery_status: { youtube: "done", tiktok: "timeout_skipped" },
+      provider_availability_state: {
+        tiktok: {
+          status: "provider_unavailable",
+          reason: "timeout",
+          message: "tiktok 平台发现超时（90s），已跳过该平台继续其他平台",
+          api_calls: 0,
+        },
+      },
+    },
+  });
+
+  const context = collectionTaskDiscoveryContext(running);
+  assert.ok(context);
+  assert.match(context!, /TikTok超时跳过/);
+  assert.match(context!, /TikTok：平台 provider 超时，已跳过（API 0 calls）/);
+});
+
+test("link seed zero-result diagnostics explain missing seed search provider", () => {
+  const seedTask = task({
+    collection_mode: "link_seed_discovery",
+    status: "completed_no_results",
+    status_summary: "导购 seed 自动发现完成：发现 0 个 seed",
+    run_checkpoint: {
+      shopping_seed_discovery: {
+        seed_search_disabled: true,
+        zero_seed_reason: "seed_search_provider_not_configured",
+        provider_call_count: 0,
+        search_platforms: [],
+        queries: [
+          "B0D9W576KQ",
+          "HOMEHIVE LTK",
+          "HOMEHIVE ShopMy",
+          "HOMEHIVE Amazon finds",
+          "HOMEHIVE clear PVC jewelry bags",
+        ],
+      },
+    },
+  });
+
+  const hint = collectionTaskSeedDiscoveryDiagnosticHint(seedTask);
+  assert.ok(hint);
+  assert.match(hint!, /未配置 LTK\/ShopMy\/Pinterest seed 搜索来源/);
+  assert.match(hint!, /Amazon 商品查询词已生成但未执行外部搜索/);
+  assert.match(hint!, /HOMEHIVE LTK/);
+  assert.match(hint!, /HOMEHIVE ShopMy/);
+  assert.match(hint!, /HOMEHIVE Amazon finds/);
+  assert.doesNotMatch(hint!, /邮箱|粉丝|互动率/);
+
+  const lines = formatCollectionResultLines(seedTask);
+  assert.equal(lines.hint, hint);
+
+  const toast = buildCollectionTaskCompletionMessage(seedTask);
+  assert.equal(toast.tone, "warning");
+  assert.equal(toast.message, hint);
+  assert.doesNotMatch(toast.message, /未发现符合条件的红人/);
+});
+
+test("link seed zero-result diagnostics explain ShopMy keyword provider gap", () => {
+  const seedTask = task({
+    collection_mode: "link_seed_discovery",
+    status: "completed_no_results",
+    status_summary: "ShopMy keyword seed discovery completed: found 0 seeds.",
+    run_checkpoint: {
+      shopping_seed_discovery: {
+        seed_search_disabled: false,
+        zero_seed_reason: "shopmy_keyword_search_requires_authenticated_provider",
+        provider_call_count: 10,
+        search_platforms: ["public_web"],
+        queries: ["amazon finds", "amazon storefront shopmy", "amazon influencer shopmy"],
+      },
+    },
+  });
+
+  const hint = collectionTaskSeedDiscoveryDiagnosticHint(seedTask);
+  assert.ok(hint);
+  assert.match(hint!, /ShopMy 关键词搜索未配置授权来源/);
+  assert.match(hint!, /公共网页和 ShopMy 页面搜索/);
+  assert.match(hint!, /amazon finds/);
+
+  const lines = formatCollectionResultLines(seedTask);
+  assert.equal(lines.hint, hint);
+});
+
+test("link seed diagnostics summarize Pinterest Apify network outage", () => {
+  const seedTask = task({
+    collection_mode: "link_seed_discovery",
+    status: "completed_no_results",
+    status_summary:
+      "Seed search query amazon finds pinterest creator: pinterest_apify:Apify 网络错误: All connection attempts failed",
+    error_message:
+      "Seed search query amazon finds pinterest creator: pinterest_apify:Apify 网络错误: All connection attempts failed; Seed search query amazon storefront pinterest creator: pinterest_apify:Apify 网络错误: All connection attempts failed",
+    run_checkpoint: {
+      failed_queries: [
+        "amazon finds pinterest creator",
+        "amazon storefront pinterest creator",
+        "amazon influencer pinterest creator",
+      ],
+      query_errors: {
+        "amazon finds pinterest creator": [
+          "pinterest_apify:network_unreachable:Apify 网络错误: All connection attempts failed",
+        ],
+        "amazon storefront pinterest creator": ["pinterest_apify:provider_unavailable:network_unreachable"],
+        "amazon influencer pinterest creator": ["pinterest_apify:provider_unavailable:network_unreachable"],
+      },
+      provider_availability_state: {
+        pinterest_apify: {
+          status: "provider_unavailable",
+          reason: "network_unreachable",
+          message: "当前环境无法连接 Apify（api.apify.com:443）",
+        },
+      },
+      shopping_seed_discovery: {
+        seed_search_disabled: false,
+        zero_seed_reason: "seed_search_no_profiles_returned",
+        provider_call_count: 6,
+        search_platforms: ["public_web", "pinterest_apify"],
+        queries: ["amazon finds pinterest creator", "amazon storefront", "amazon influencer"],
+      },
+    },
+  });
+
+  const hint = collectionTaskSeedDiscoveryDiagnosticHint(seedTask);
+  assert.ok(hint);
+  assert.match(hint!, /Pinterest 搜索服务当前不可达，已跳过该通道/);
+  assert.match(hint!, /当前环境无法连接 Apify（api\.apify\.com:443）/);
+  assert.match(hint!, /已继续尝试其他可用搜索源/);
+  assert.match(hint!, /3 条 Pinterest query 因网络不可达被跳过/);
+  assert.doesNotMatch(hint!, /All connection attempts failed/);
+
+  const lines = formatCollectionResultLines(seedTask);
+  assert.equal(lines.hint, hint);
+});
+
+test("link seed diagnostics explain Apify timeout followed by empty public web fallback", () => {
+  const seedTask = task({
+    collection_mode: "link_seed_discovery",
+    status: "completed_no_results",
+    run_checkpoint: {
+      completed_queries: ["HOMEHIVE LTK", "HOMEHIVE ShopMy", "site:shopmy.us HOMEHIVE clear PVC jewelry bags"],
+      failed_queries: ["HOMEHIVE Pinterest"],
+      query_errors: {
+        "HOMEHIVE Pinterest": ["pinterest_apify:query_timeout"],
+      },
+      provider_availability_state: {
+        pinterest_apify: {
+          status: "provider_unavailable",
+          reason: "query_timeout",
+          message: "Pinterest Apify 搜索请求超时，已跳过后续 Pinterest Apify 查询",
+        },
+      },
+      shopping_seed_discovery: {
+        seed_search_disabled: false,
+        zero_seed_reason: "provider_failed_but_fallback_no_results",
+        provider_call_count: 8,
+        public_web_query_count: 4,
+        search_platforms: ["public_web", "pinterest_apify"],
+        queries: ["HOMEHIVE LTK", "HOMEHIVE ShopMy", "site:shopmy.us HOMEHIVE clear PVC jewelry bags"],
+      },
+    },
+  });
+
+  const hint = collectionTaskSeedDiscoveryDiagnosticHint(seedTask);
+  assert.ok(hint);
+  assert.match(hint!, /Pinterest Apify 超时，已跳过该通道/);
+  assert.match(hint!, /已继续尝试公共网页搜索 \/ LTK \/ ShopMy fallback/);
+  assert.match(hint!, /公共搜索未返回可用 seed/);
+  assert.match(hint!, /缩小商品词、保留品牌 \+ 强商品词/);
+});
+
+test("link seed diagnostics summarize Pinterest Apify memory limit", () => {
+  const seedTask = task({
+    collection_mode: "link_seed_discovery",
+    status: "completed_no_results",
+    run_checkpoint: {
+      failed_queries: ["amazon finds pinterest creator", "amazon storefront pinterest creator"],
+      query_errors: {
+        "amazon finds pinterest creator": [
+          "pinterest_apify:apify_memory_limit_exceeded:actor-memory-limit-exceeded",
+        ],
+        "amazon storefront pinterest creator": [
+          "pinterest_apify:provider_unavailable:apify_memory_limit_exceeded",
+        ],
+      },
+      provider_availability_state: {
+        pinterest_apify: {
+          status: "provider_unavailable",
+          reason: "apify_memory_limit_exceeded",
+          message: "Apify 内存额度已满/并发 actor 过多，已跳过后续 Pinterest Apify 查询",
+        },
+      },
+      shopping_seed_discovery: {
+        seed_search_disabled: false,
+        zero_seed_reason: "seed_search_no_profiles_returned",
+        provider_call_count: 2,
+        search_platforms: ["pinterest_apify"],
+        queries: ["amazon finds pinterest creator", "amazon storefront pinterest creator"],
+      },
+    },
+  });
+
+  const hint = collectionTaskSeedDiscoveryDiagnosticHint(seedTask);
+  assert.ok(hint);
+  assert.match(hint!, /Apify 内存额度已满\/并发 actor 过多/);
+  assert.match(hint!, /未发现可用 seed/);
+  assert.equal(formatCollectionResultLines(seedTask).hint, hint);
+});
+
+test("link seed diagnostics explain product evidence filtered seeds", () => {
+  const seedTask = task({
+    collection_mode: "link_seed_discovery",
+    status: "completed_no_results",
+    run_checkpoint: {
+      seed_discovered_count: 0,
+      seed_enriched_count: 0,
+      filtered_by_product_match_count: 4,
+      shopping_seed_discovery: {
+        seed_search_disabled: false,
+        zero_seed_reason: "seed_found_but_no_product_evidence",
+        product_evidence_filtered_count: 4,
+        product_evidence_verified_count: 0,
+        query_count: 3,
+      },
+    },
+  });
+
+  const hint = collectionTaskSeedDiscoveryDiagnosticHint(seedTask);
+  assert.ok(hint);
+  assert.match(hint!, /找到 seed 但无同款证据/);
+  assert.match(hint!, /过滤 4 个/);
+
+  const breakdown = buildTaskResultBreakdown(seedTask);
+  assert.ok(breakdown.funnel.some((item) => /商品证据过滤 4/.test(item)));
+  assert.equal(formatCollectionResultLines(seedTask).hint, hint);
+});
+
+test("link seed diagnostics explain social enrichment failed seeds", () => {
+  const seedTask = task({
+    collection_mode: "link_seed_discovery",
+    status: "completed_no_results",
+    run_checkpoint: {
+      seed_discovered_count: 5,
+      seed_enriched_count: 0,
+      shopping_seed_discovery: {
+        seed_search_disabled: false,
+        zero_seed_reason: "seed_found_but_social_enrichment_failed",
+        query_count: 3,
+      },
+    },
+  });
+
+  const hint = collectionTaskSeedDiscoveryDiagnosticHint(seedTask);
+  assert.ok(hint);
+  assert.match(hint!, /找到 seed 但未补全社媒主页/);
+});
+
+test("running seed discovery context shows query seed enrichment and checkpoint counts", () => {
+  const running = task({
+    status: "running",
+    collection_mode: "link_seed_discovery",
+    current_stage: "discovery",
+    run_checkpoint: {
+      completed_queries: ["amazon finds", "amazon storefront"],
+      failed_queries: ["amazon influencer pinterest creator"],
+      query_errors: {
+        "amazon influencer pinterest creator": ["pinterest_apify:provider_unavailable:network_unreachable"],
+      },
+      provider_availability_state: {
+        pinterest_apify: { status: "provider_unavailable", reason: "network_unreachable" },
+      },
+      seed_discovered_count: 8,
+      seed_enriched_count: 3,
+      skipped_due_checkpoint_count: 2,
+      shopping_seed_discovery: {
+        query_count: 5,
+        queries: ["amazon finds", "amazon storefront", "amazon influencer", "shopmy", "pinterest"],
+      },
+    },
+  });
+
+  const context = collectionTaskDiscoveryContext(running);
+  assert.ok(context);
+  assert.match(context!, /seed 查询 2\/5/);
+  assert.match(context!, /失败 1/);
+  assert.match(context!, /seed 8/);
+  assert.match(context!, /已补全 3/);
+  assert.match(context!, /Pinterest Apify 不可用/);
+  assert.match(context!, /checkpoint 跳过 2/);
+});
+
+test("link seed result breakdown uses seed-specific metrics", () => {
+  const seedTask = task({
+    status: "completed_no_results",
+    collection_mode: "link_seed_discovery",
+    discovered_count: 12,
+    profile_fetched_count: 4,
+    inserted_count: 0,
+    run_checkpoint: {
+      completed_queries: ["home decor LTK", "home decor ShopMy"],
+      failed_queries: ["home decor pinterest creator"],
+      seed_discovered_count: 12,
+      seed_enriched_count: 4,
+      platform_failed_count: 1,
+      skipped_platform_count: 2,
+      shopping_seed_discovery: {
+        query_count: 5,
+        search_platforms: ["public_web", "pinterest_apify"],
+      },
+    },
+  });
+
+  const breakdown = buildTaskResultBreakdown(seedTask);
+  assert.deepEqual(breakdown.funnel, [
+    "seed 查询 2/5",
+    "失败查询 1",
+    "seed URL 12",
+    "主页补全 4",
+    "通道失败 1",
+    "通道跳过 2",
+  ]);
+});
+
+test("candidate dialog uses generic shopping seed enrichment copy", () => {
+  const source = readFileSync(
+    new URL("../src/components/collection-tasks/task-candidates-dialog.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /导购 seed 补全/);
+  assert.match(source, /Instagram\/TikTok\/YouTube\/Facebook/);
+  assert.doesNotMatch(source, /LTK 补全/);
+  assert.doesNotMatch(source, /补全 LTK seed/);
 });

@@ -1,5 +1,4 @@
 import { Sidebar } from "@/components/layout/sidebar";
-import { ProductProvider } from "@/components/providers/product-provider";
 
 type AdminShellProps = {
   children: React.ReactNode;
@@ -9,7 +8,6 @@ type AdminShellProps = {
 
 export function AdminShell({ children, title, description }: AdminShellProps) {
   return (
-    <ProductProvider>
     <div className="flex min-h-screen bg-background">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
@@ -24,6 +22,5 @@ export function AdminShell({ children, title, description }: AdminShellProps) {
         <main className="min-w-0 flex-1 overflow-x-auto p-8">{children}</main>
       </div>
     </div>
-    </ProductProvider>
   );
 }

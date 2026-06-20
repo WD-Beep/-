@@ -8,7 +8,10 @@ class SmtpStatus(BaseModel):
     configured: bool
     host: str | None = None
     port: int | None = None
+    user_address: str | None = None
     from_address: str | None = None
+    from_user_mismatch: bool = False
+    warning: str | None = None
     use_tls: bool = True
     message: str
 

@@ -16,6 +16,10 @@ from app.schemas.email import EmailSendResult
 from app.schemas.collection_task import (
     CollectionTaskBulkDelete,
     CollectionTaskBulkDeleteResult,
+    CollectionTaskBulkManage,
+    CollectionTaskBulkManageResult,
+    CollectionTaskBulkRun,
+    CollectionTaskBulkRunResult,
     CollectionTaskDeleteResult,
     CollectionTaskCandidateFilter,
     CollectionTaskCandidateRead,
@@ -99,6 +103,10 @@ async def get_platform_capabilities() -> PlatformCapabilitiesResponse:
         youtube_data_provider=settings.active_youtube_provider,
         tiktok_data_provider=settings.active_tiktok_provider,
         facebook_data_provider=settings.active_facebook_provider,
+        collection_max_running_tasks=max(1, settings.collection_max_running_tasks),
+        collection_profile_enrich_concurrency=settings.effective_profile_enrich_concurrency,
+        collection_profile_request_timeout_seconds=max(5, settings.collection_profile_request_timeout_seconds),
+        collection_running_stale_seconds=max(30, settings.collection_running_stale_seconds),
     )
 
 
@@ -107,7 +115,17 @@ async def list_collection_tasks(
     platform: str | None = None,
     status: CollectionTaskStatus | None = None,
     search: str | None = None,
-    effectiveness: Literal["effective", "ineffective", "low_value_result", "no_result"] | None = None,
+    effectiveness: Literal["high_value", "effective", "ineffective", "low_value_result", "no_result", "failed"] | None = None,
+    task_view: Literal[
+        "all",
+        "high_value",
+        "effective",
+        "ineffective",
+        "low_value_result",
+        "no_result",
+        "test_history",
+        "archived",
+    ] | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
@@ -120,6 +138,7 @@ async def list_collection_tasks(
         status=status,
         search=search,
         effectiveness=effectiveness,
+        task_view=task_view,
     )
     return await CollectionTaskService.list_tasks(db, filters, page, page_size)
 
@@ -182,6 +201,23 @@ async def bulk_delete_collection_tasks(
     )
 
 
+@router.post("/bulk-manage", response_model=CollectionTaskBulkManageResult)
+async def bulk_manage_collection_tasks(
+    data: CollectionTaskBulkManage,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> CollectionTaskBulkManageResult:
+    product_id = require_write_product_id(ctx)
+    result = await CollectionTaskService.bulk_manage_tasks(
+        db,
+        action=data.action,
+        product_id=product_id,
+        task_ids=data.task_ids,
+    )
+    await refresh_scheduler()
+    return result
+
+
 @router.get("/{task_id}", response_model=CollectionTaskRead)
 async def get_collection_task(
     task_id: int,
@@ -224,7 +260,7 @@ async def delete_collection_task(
 @router.get("/{task_id}/candidates", response_model=PaginatedResponse[CollectionTaskCandidateRead])
 async def list_collection_task_candidates(
     task_id: int,
-    status: str | None = Query(default=None),
+    candidate_status: str | None = Query(default=None, alias="status"),
     failure_reason: str | None = Query(default=None),
     source_type: str | None = Query(default=None),
     source_discovery_type: str | None = Query(default=None),
@@ -252,7 +288,7 @@ async def list_collection_task_candidates(
         task_id,
         page=page,
         page_size=page_size,
-        status=status,
+        status=candidate_status,
         failure_reason=failure_reason,
         source_type=source_type,
         source_discovery_type=source_discovery_type,
@@ -280,7 +316,7 @@ async def list_collection_task_candidates(
 @router.get("/{task_id}/candidates/export")
 async def export_collection_task_candidates(
     task_id: int,
-    status: str | None = Query(default=None),
+    candidate_status: str | None = Query(default=None, alias="status"),
     failure_reason: str | None = Query(default=None),
     source_type: str | None = Query(default=None),
     source_discovery_type: str | None = Query(default=None),
@@ -301,20 +337,17 @@ async def export_collection_task_candidates(
     task = ensure_task_access(await CollectionTaskService.get_task_including_archived(db, task_id), ctx)
     await TaskCandidateService.ensure_candidates_for_task(db, task)
     await db.flush()
-    export_high_value = high_value
-    if export_high_value is None and getattr(task, "export_qualified_only", False):
-        export_high_value = True
 
     rows = await TaskCandidateService.list_for_export(
         db,
         task_id,
         product_id=task.product_id,
-        status=status,
+        status=candidate_status,
         failure_reason=failure_reason,
         source_type=source_type,
         source_discovery_type=source_discovery_type,
         platform=platform,
-        high_value=export_high_value,
+        high_value=high_value,
         has_email=has_email,
         has_contact=has_contact,
         min_followers_count=min_followers_count,
@@ -325,7 +358,7 @@ async def export_collection_task_candidates(
         contact_status=contact_status,
         search=search,
     )
-    if not rows and (task.inserted_count or 0) > 0 and status == CandidateStatus.INSERTED.value:
+    if not rows and (task.inserted_count or 0) > 0 and candidate_status == CandidateStatus.INSERTED.value:
         rows = await TaskCandidateService.list_for_export(
             db,
             task_id,
@@ -397,6 +430,93 @@ async def enrich_link_seed_profiles(
     return _run_result_snapshot(task, message=task.status_summary)
 
 
+@router.post("/bulk-run", response_model=CollectionTaskBulkRunResult)
+async def bulk_run_collection_tasks(
+    data: CollectionTaskBulkRun,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> CollectionTaskBulkRunResult:
+    """在并发上限内批量启动未完成任务（其余需等待空位后再运行）。"""
+    product_id = require_write_product_id(ctx)
+    capacity = CollectionRunnerService.collection_run_capacity()
+    await CollectionRunnerService.reconcile_in_process_runs(db)
+    in_process = CollectionRunnerService.active_collection_run_count()
+    db_active = await CollectionTaskService.count_active_running_tasks(db)
+    active_count = max(in_process, db_active)
+    slots = max(0, capacity - active_count)
+
+    started_ids: list[int] = []
+    skipped_ids: list[int] = []
+    skipped_reasons: dict[str, str] = {}
+
+    for task_id in data.task_ids:
+        task = await CollectionTaskService.get_task(db, task_id)
+        if not task or task.product_id != product_id:
+            skipped_ids.append(task_id)
+            skipped_reasons[str(task_id)] = "not_found"
+            continue
+        ensure_task_access(task, ctx)
+        stale_running = CollectionTaskService.is_running_stale(task)
+        if task.status == CollectionTaskStatus.RUNNING.value and not stale_running:
+            skipped_ids.append(task_id)
+            skipped_reasons[str(task_id)] = "already_running"
+            continue
+        if slots <= 0 and not CollectionRunnerService.is_task_active_in_process(task_id):
+            skipped_ids.append(task_id)
+            skipped_reasons[str(task_id)] = "capacity_full"
+            continue
+        blocking = await CollectionTaskService.get_blocking_running_task(db, exclude_id=task_id)
+        if blocking is not None and not CollectionRunnerService.is_task_active_in_process(task_id):
+            skipped_ids.append(task_id)
+            skipped_reasons[str(task_id)] = "capacity_full"
+            continue
+        if (
+            CollectionRunnerService.has_active_collection_run()
+            and not CollectionRunnerService.is_task_active_in_process(task_id)
+        ):
+            skipped_ids.append(task_id)
+            skipped_reasons[str(task_id)] = "capacity_full"
+            continue
+
+        resume = task.status == CollectionTaskStatus.RUNNING.value and stale_running
+        task.status = CollectionTaskStatus.RUNNING.value
+        task.error_message = None
+        task.last_error = None
+        if resume:
+            task.current_stage = task.current_stage or STAGE_DISCOVERY
+        else:
+            reset_run_progress(task)
+        task.status_summary = (
+            "检测到上次运行中断，将从 checkpoint 继续采集（跳过已完成项）"
+            if resume
+            else _collection_start_message(task)
+        )
+        await db.commit()
+        background_tasks.add_task(_run_collection_task_in_background, task.id, resume=resume)
+        started_ids.append(task_id)
+        slots -= 1
+
+    if started_ids and len(started_ids) == len(data.task_ids):
+        message = f"已启动 {len(started_ids)} 个采集任务"
+    elif started_ids:
+        message = (
+            f"已启动 {len(started_ids)} 个任务；"
+            f"其余 {len(skipped_ids)} 个因并发上限（{capacity}）或已在运行而跳过，可稍后再试"
+        )
+    else:
+        message = f"未启动任何任务（并发上限 {capacity}，当前活跃 {active_count}）"
+
+    return CollectionTaskBulkRunResult(
+        started_ids=started_ids,
+        skipped_ids=skipped_ids,
+        skipped_reasons=skipped_reasons,
+        capacity=capacity,
+        active_count=active_count + len(started_ids),
+        message=message,
+    )
+
+
 @router.post("/{task_id}/run", response_model=CollectionRunResult)
 async def run_collection_task(
     task_id: int,
@@ -417,14 +537,20 @@ async def run_collection_task(
             detail=f"任务「{blocking_task.name}」正在采集中，请等待完成后再运行其他任务",
         )
 
+    await CollectionRunnerService.reconcile_in_process_runs(db)
     if CollectionRunnerService.has_active_collection_run():
-        active_id = CollectionRunnerService.get_active_collection_task_id()
-        if active_id is not None and active_id != task_id:
-            active_task = await CollectionTaskService.get_task(db, active_id)
+        active_ids = CollectionRunnerService.get_active_collection_task_ids()
+        if task_id not in active_ids:
+            active_id = CollectionRunnerService.get_active_collection_task_id()
+            active_task = await CollectionTaskService.get_task(db, active_id) if active_id else None
             active_name = active_task.name if active_task else f"#{active_id}"
+            capacity = CollectionRunnerService.collection_run_capacity()
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"任务「{active_name}」正在采集中，请等待完成后再运行其他任务",
+                detail=(
+                    f"当前已有 {len(active_ids)}/{capacity} 个任务在采集中"
+                    f"（例如「{active_name}」），请等待完成后再运行"
+                ),
             )
 
     resume = task.status == CollectionTaskStatus.RUNNING.value and stale_running

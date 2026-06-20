@@ -9,10 +9,13 @@ import httpx
 import pytest
 from fastapi import BackgroundTasks, HTTPException
 
-from app.api.routes.collection_tasks import run_collection_task
+from app.api.routes.collection_tasks import bulk_run_collection_tasks, run_collection_task
 from app.core.config import settings
+from app.deps.tenant import TenantContext
 from app.models.enums import CollectionTaskStatus
+from app.schemas.collection_task import CollectionTaskBulkRun
 from app.services.collection_runner import CollectionRunnerService
+from app.services import collection_runner as collection_runner_module
 from app.services.collection_task import CollectionTaskService
 from app.services.http_retry import RETRYABLE_STATUS, should_retry
 from app.services.task_run_progress import (
@@ -21,6 +24,7 @@ from app.services.task_run_progress import (
     STAGE_DISCOVERY,
     profile_checkpoint_key,
     reset_run_progress,
+    should_commit_progress,
     update_task_progress,
 )
 
@@ -30,6 +34,8 @@ def _task(**overrides):
     data = {
         "id": 1,
         "name": "test task",
+        "user_id": 1,
+        "product_id": 1,
         "collection_mode": "keyword",
         "platform": "instagram",
         "platforms": ["instagram"],
@@ -86,6 +92,10 @@ def _task(**overrides):
     return SimpleNamespace(**data)
 
 
+def _tenant_ctx() -> TenantContext:
+    return TenantContext(user_id=1, product_id=1, workspace_id=1, is_admin=True)
+
+
 def test_profile_checkpoint_key_normalizes():
     key = profile_checkpoint_key("Instagram", "https://instagram.com/User/")
     assert key == "instagram:https://instagram.com/user"
@@ -107,6 +117,37 @@ def test_checkpoint_persisted_skip():
     assert cp.persisted_done("youtube", "https://youtube.com/channel/xyz") is False
 
 
+def test_run_checkpoint_preserves_product_and_provider_context():
+    task = _task(
+        run_checkpoint={
+            "amazon_product_seeds": [
+                {
+                    "asin": "B0D9W576KQ",
+                    "brand": "HOMEHIVE",
+                    "normalized_url": "https://www.amazon.com/dp/B0D9W576KQ",
+                }
+            ],
+            "provider_availability_state": {
+                "tiktok": {
+                    "status": "provider_unavailable",
+                    "reason": "apify_memory_limit_exceeded",
+                }
+            },
+            "platform_api_counts": {"tiktok": 0, "youtube": 8},
+            "completed_search_keys": ["youtube:B0D9W576KQ"],
+        }
+    )
+
+    checkpoint = RunCheckpoint.from_task(task)
+    checkpoint.mark_search("facebook", "HOMEHIVE clear PVC jewelry bags")
+    data = checkpoint.to_dict()
+
+    assert data["amazon_product_seeds"][0]["asin"] == "B0D9W576KQ"
+    assert data["provider_availability_state"]["tiktok"]["reason"] == "apify_memory_limit_exceeded"
+    assert data["platform_api_counts"] == {"tiktok": 0, "youtube": 8}
+    assert "facebook:homehive clear pvc jewelry bags" in data["completed_search_keys"]
+
+
 def test_should_retry_rules():
     assert should_retry(429, None) is True
     assert should_retry(500, None) is True
@@ -114,6 +155,14 @@ def test_should_retry_rules():
     assert should_retry(403, None) is False
     assert should_retry(None, httpx.TimeoutException("timeout")) is True
     assert 401 not in RETRYABLE_STATUS
+
+
+def test_apify_network_error_is_classified_as_unreachable():
+    from app.services.apify_client import is_apify_network_unreachable
+
+    assert is_apify_network_unreachable(httpx.NetworkError("All connection attempts failed")) is True
+    assert is_apify_network_unreachable(Exception("Apify 网络错误: All connection attempts failed")) is True
+    assert is_apify_network_unreachable(Exception("actor-memory-limit-exceeded")) is False
 
 
 @pytest.mark.parametrize("status_code", [401, 403, 400])
@@ -239,6 +288,78 @@ def _patch_no_blocking_running_task(monkeypatch) -> None:
     monkeypatch.setattr(CollectionTaskService, "get_blocking_running_task", _no_blocking)
 
 
+def test_bulk_run_reconciles_stale_in_process_slots_before_capacity_check(monkeypatch):
+    monkeypatch.setattr(settings, "collection_max_running_tasks", 2)
+    task = _task(id=3, status=CollectionTaskStatus.DRAFT.value)
+    db = AsyncMock()
+    background_tasks = BackgroundTasks()
+
+    stale_result = MagicMock()
+    stale_result.all.return_value = []
+    count_result = MagicMock()
+    count_result.scalars.return_value = iter([])
+    db.execute = AsyncMock(side_effect=[stale_result, count_result])
+
+    async def _get_task(_db, task_id):
+        return task if task_id == 3 else None
+
+    monkeypatch.setattr(CollectionTaskService, "get_task", _get_task)
+    _patch_no_blocking_running_task(monkeypatch)
+
+    async def _run():
+        collection_runner_module._active_collection_task_ids.clear()
+        collection_runner_module._active_collection_task_ids.update({100, 101})
+        try:
+            result = await bulk_run_collection_tasks(
+                CollectionTaskBulkRun(task_ids=[3]),
+                background_tasks,
+                db,
+                ctx=_tenant_ctx(),
+            )
+            return result
+        finally:
+            collection_runner_module._active_collection_task_ids.clear()
+
+    result = anyio.run(_run)
+
+    assert result.started_ids == [3]
+    assert result.skipped_ids == []
+    assert result.active_count == 1
+    assert task.status == CollectionTaskStatus.RUNNING.value
+    assert background_tasks.tasks[0].kwargs == {"resume": False}
+
+
+def test_run_starts_after_stale_in_process_slots_reconciled(monkeypatch):
+    task = _task(id=2, status=CollectionTaskStatus.DRAFT.value)
+    db = AsyncMock()
+    background_tasks = BackgroundTasks()
+
+    stale_result = MagicMock()
+    stale_result.all.return_value = []
+    count_result = MagicMock()
+    count_result.scalars.return_value = iter([])
+    db.execute = AsyncMock(side_effect=[stale_result, stale_result, count_result])
+
+    async def _get_task(_db, task_id):
+        return task if task_id == 2 else None
+
+    monkeypatch.setattr(CollectionTaskService, "get_task", _get_task)
+    _patch_no_blocking_running_task(monkeypatch)
+
+    async def _run():
+        collection_runner_module._active_collection_task_ids.clear()
+        collection_runner_module._active_collection_task_ids.update({100, 101})
+        try:
+            result = await run_collection_task(2, background_tasks, db, ctx=_tenant_ctx())
+            assert result.status == CollectionTaskStatus.RUNNING
+        finally:
+            collection_runner_module._active_collection_task_ids.clear()
+
+    anyio.run(_run)
+    assert task.status == CollectionTaskStatus.RUNNING.value
+    assert background_tasks.tasks[0].kwargs == {"resume": False}
+
+
 def test_run_rejects_when_in_process_collection_active(monkeypatch):
     task = _task(id=2, status=CollectionTaskStatus.DRAFT.value)
     db = AsyncMock()
@@ -258,7 +379,7 @@ def test_run_rejects_when_in_process_collection_active(monkeypatch):
 
     async def _run():
         with pytest.raises(HTTPException) as exc:
-            await run_collection_task(2, BackgroundTasks(), db)
+            await run_collection_task(2, BackgroundTasks(), db, ctx=_tenant_ctx())
         assert exc.value.status_code == 409
         assert "YouTube 验证" in exc.value.detail
 
@@ -281,7 +402,7 @@ def test_run_rejects_when_other_task_running(monkeypatch):
 
     async def _run():
         with pytest.raises(HTTPException) as exc:
-            await run_collection_task(2, BackgroundTasks(), db)
+            await run_collection_task(2, BackgroundTasks(), db, ctx=_tenant_ctx())
         assert exc.value.status_code == 409
         assert "TikTok 类目采集" in exc.value.detail
 
@@ -299,7 +420,7 @@ def test_run_rejects_fresh_running_task(monkeypatch):
 
     async def _run():
         with pytest.raises(HTTPException) as exc:
-            await run_collection_task(1, BackgroundTasks(), db)
+            await run_collection_task(1, BackgroundTasks(), db, ctx=_tenant_ctx())
         assert exc.value.status_code == 409
 
     anyio.run(_run)
@@ -327,7 +448,7 @@ def test_run_starts_new_task_with_reset_progress(monkeypatch):
     _patch_no_blocking_running_task(monkeypatch)
 
     async def _run():
-        result = await run_collection_task(1, background_tasks, db)
+        result = await run_collection_task(1, background_tasks, db, ctx=_tenant_ctx())
         assert result.status == CollectionTaskStatus.RUNNING
 
     anyio.run(_run)
@@ -359,7 +480,7 @@ def test_run_start_message_uses_task_platform(monkeypatch):
     _patch_no_blocking_running_task(monkeypatch)
 
     async def _run():
-        result = await run_collection_task(1, background_tasks, db)
+        result = await run_collection_task(1, background_tasks, db, ctx=_tenant_ctx())
         assert result.status_summary
         assert "youtube" in result.status_summary
         assert "Instagram" not in result.status_summary
@@ -387,7 +508,7 @@ def test_run_stale_running_uses_resume_checkpoint(monkeypatch):
     _patch_no_blocking_running_task(monkeypatch)
 
     async def _run():
-        result = await run_collection_task(1, background_tasks, db)
+        result = await run_collection_task(1, background_tasks, db, ctx=_tenant_ctx())
         assert result.status == CollectionTaskStatus.RUNNING
 
     anyio.run(_run)
@@ -411,6 +532,71 @@ def test_map_bounded_partial_failure():
         return await map_bounded([1, 2, 3], worker, concurrency=3)
 
     results = anyio.run(_run)
-    assert results[0] == 1
-    assert isinstance(results[1], RuntimeError)
-    assert results[2] == 3
+    assert results == [1, RuntimeError("fail"), 3]
+
+
+def test_map_bounded_incremental_reports_progress():
+    from app.services.concurrency import map_bounded_incremental
+
+    seen: list[int] = []
+
+    async def worker(value: int) -> int:
+        return value * 2
+
+    async def on_complete(item: int, outcome: int | BaseException) -> None:
+        seen.append(item if isinstance(outcome, int) else -item)
+
+    async def _run():
+        return await map_bounded_incremental([1, 2, 3], worker, concurrency=2, on_complete=on_complete)
+
+    results = anyio.run(_run)
+    assert sorted(results) == [2, 4, 6]
+    assert sorted(seen) == [1, 2, 3]
+
+
+def test_get_blocking_allows_second_task_when_capacity_is_two(monkeypatch):
+    monkeypatch.setattr(settings, "collection_max_running_tasks", 2)
+    running_a = _task(id=1, name="A", status=CollectionTaskStatus.RUNNING.value)
+    running_b = _task(id=2, name="B", status=CollectionTaskStatus.RUNNING.value)
+
+    async def _run():
+        db = AsyncMock()
+
+        async def _execute(_query):
+            result = MagicMock()
+            result.scalars.return_value = iter([running_a, running_b])
+            return result
+
+        db.execute = AsyncMock(side_effect=_execute)
+        blocking = await CollectionTaskService.get_blocking_running_task(db, exclude_id=3)
+        return blocking
+
+    blocking = anyio.run(_run)
+    assert blocking is None
+
+
+def test_collection_runner_capacity_claim_and_release():
+    async def _run():
+        collection_runner_module._active_collection_task_ids.clear()
+        monkey_cap = settings.collection_max_running_tasks
+        try:
+            settings.collection_max_running_tasks = 2
+            await CollectionRunnerService._claim_collection_run(1)
+            await CollectionRunnerService._claim_collection_run(2)
+            with pytest.raises(ValueError):
+                await CollectionRunnerService._claim_collection_run(3)
+            await CollectionRunnerService._release_collection_run(1)
+            await CollectionRunnerService._claim_collection_run(3)
+        finally:
+            settings.collection_max_running_tasks = monkey_cap
+            collection_runner_module._active_collection_task_ids.clear()
+
+    anyio.run(_run)
+
+
+def test_should_commit_progress_batches_db_writes():
+    assert should_commit_progress(0, 100, every=20) is False
+    assert should_commit_progress(20, 100, every=20) is True
+    assert should_commit_progress(21, 100, every=20) is False
+    assert should_commit_progress(100, 100, every=20) is True
+    assert should_commit_progress(5, 0, every=20) is True

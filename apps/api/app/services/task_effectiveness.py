@@ -15,7 +15,7 @@ from app.models.product_influencer import ProductInfluencer
 from app.models.product_influencer_source import ProductInfluencerSource
 from app.services.influencer_profile_value import global_profile_valuable_sql, is_influencer_profile_valuable
 
-EffectivenessCategory = Literal["effective", "low_value_result", "no_result"]
+EffectivenessCategory = Literal["high_value", "effective", "low_value_result", "no_result", "failed"]
 
 _RUNNING = CollectionTaskStatus.RUNNING.value
 _COMPLETED_WITH_RESULTS = CollectionTaskStatus.COMPLETED_WITH_RESULTS.value
@@ -33,6 +33,34 @@ def effective_result_count(task: CollectionTask) -> int:
 
 def inserted_count(task: CollectionTask) -> int:
     return effective_result_count(task)
+
+
+def is_high_value_task(task: CollectionTask) -> bool:
+    inserted = effective_result_count(task)
+    result = int(task.result_count or 0)
+    discovered = int(task.discovered_count or 0)
+    fetched = int(task.profile_fetched_count or 0)
+    email = int(task.email_count or 0)
+    if inserted >= 5 or result >= 5:
+        return True
+    if discovered >= 50 and inserted >= 1:
+        return True
+    if fetched >= 20 and inserted >= 1:
+        return True
+    if email >= 1 and inserted >= 1:
+        return True
+    if (
+        (task.status or "") in {
+            CollectionTaskStatus.COMPLETED_WITH_RESULTS.value,
+            CollectionTaskStatus.PARTIAL_FAILED.value,
+        }
+        and inserted > 0
+        and discovered >= inserted
+        and fetched >= inserted
+        and (discovered >= 10 or fetched >= 10)
+    ):
+        return True
+    return False
 
 
 def has_insert_records(task: CollectionTask) -> bool:
@@ -113,15 +141,25 @@ def _task_has_low_value_seed_marker(task: CollectionTask) -> bool:
 def classify_task_effectiveness(task: CollectionTask, *, has_valuable_insert: bool | None = None) -> EffectivenessCategory:
     if task.status == _RUNNING:
         return "no_result"
+    if is_high_value_task(task):
+        return "high_value"
     if not has_insert_records(task):
+        if has_valuable_insert is True:
+            return "effective"
+        if task.status == CollectionTaskStatus.FAILED.value:
+            return "failed"
         if has_valuable_insert is False and _task_has_low_value_seed_marker(task):
             return "low_value_result"
         return "no_result"
+    inserted = effective_result_count(task)
+    discovered = int(task.discovered_count or 0)
     if has_valuable_insert is True:
         return "effective"
-    if has_valuable_insert is False:
+    if inserted == 1 and discovered <= 3:
         return "low_value_result"
-    return "low_value_result"
+    if has_valuable_insert is False:
+        return "effective" if inserted > 0 else "low_value_result"
+    return "effective"
 
 
 def is_collection_task_effective(task: CollectionTask, *, has_valuable_insert: bool | None = None) -> bool:
@@ -135,6 +173,8 @@ def is_collection_task_effective(task: CollectionTask, *, has_valuable_insert: b
 def is_collection_task_ineffective(task: CollectionTask, *, has_valuable_insert: bool | None = None) -> bool:
     """可批量清理：无结果或无价值结果（非有效果）。"""
     if task.status == _RUNNING:
+        return False
+    if is_high_value_task(task):
         return False
     if has_valuable_insert is True:
         return False
@@ -157,13 +197,47 @@ def no_result_sql_condition():
     )
 
 
-def low_value_result_sql_condition():
+def high_value_sql_condition():
+    inserted = func.coalesce(CollectionTask.inserted_count, CollectionTask.result_count, 0)
+    result = func.coalesce(CollectionTask.result_count, 0)
+    discovered = func.coalesce(CollectionTask.discovered_count, 0)
+    fetched = func.coalesce(CollectionTask.profile_fetched_count, 0)
+    email = func.coalesce(CollectionTask.email_count, 0)
     return and_(
         CollectionTask.status != _RUNNING,
         or_(
+            inserted >= 5,
+            result >= 5,
+            and_(discovered >= 50, inserted >= 1),
+            and_(fetched >= 20, inserted >= 1),
+            and_(email >= 1, inserted >= 1),
+            and_(
+                CollectionTask.status.in_(
+                    [
+                        CollectionTaskStatus.COMPLETED_WITH_RESULTS.value,
+                        CollectionTaskStatus.PARTIAL_FAILED.value,
+                    ]
+                ),
+                inserted > 0,
+                discovered >= inserted,
+                fetched >= inserted,
+                or_(discovered >= 10, fetched >= 10),
+            ),
+        ),
+    )
+
+
+def low_value_result_sql_condition():
+    inserted = func.coalesce(CollectionTask.inserted_count, CollectionTask.result_count, 0)
+    discovered = func.coalesce(CollectionTask.discovered_count, 0)
+    return and_(
+        CollectionTask.status != _RUNNING,
+        not_(high_value_sql_condition()),
+        or_(
             and_(
                 _has_insert_records_clause(),
-                not_(_task_has_valuable_insert_sql()),
+                inserted == 1,
+                discovered <= 3,
             ),
             and_(
                 not_(_has_insert_records_clause()),
@@ -176,7 +250,9 @@ def low_value_result_sql_condition():
 def effective_sql_condition():
     return and_(
         CollectionTask.status != _RUNNING,
-        _task_has_valuable_insert_sql(),
+        not_(high_value_sql_condition()),
+        not_(low_value_result_sql_condition()),
+        or_(_has_insert_records_clause(), _task_has_valuable_insert_sql()),
     )
 
 
@@ -184,6 +260,7 @@ def ineffective_sql_condition():
     """无效果 = 非运行中且非有效果（含无结果与无价值结果）。"""
     return and_(
         CollectionTask.status != _RUNNING,
+        not_(high_value_sql_condition()),
         not_(effective_sql_condition()),
     )
 
@@ -245,11 +322,11 @@ async def batch_task_effectiveness_categories(
     result: dict[int, EffectivenessCategory] = {}
     for task in tasks:
         has_valuable = valuable.get(task.id, False)
-        if not has_insert_records(task):
-            if has_valuable:
-                category: EffectivenessCategory = "effective"
-            elif _task_has_low_value_seed_marker(task) or task.id in low_value_seed_task_ids:
-                category = "low_value_result"
+        if not has_insert_records(task) and not has_valuable:
+            if _task_has_low_value_seed_marker(task) or task.id in low_value_seed_task_ids:
+                category: EffectivenessCategory = "low_value_result"
+            elif task.status == CollectionTaskStatus.FAILED.value:
+                category = "failed"
             else:
                 category = "no_result"
         else:

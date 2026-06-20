@@ -1,6 +1,13 @@
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.exceptions import SMTP_NOT_CONFIGURED_MSG
+
+SMTP_FROM_USER_MISMATCH_MSG = (
+    "当前 SMTP_FROM 与 SMTP_USER 不一致，腾讯企业邮箱可能拒绝代发。"
+    "请将 SMTP_USER 配置为 amazon03@ptraveldesign.com 并使用该邮箱的客户端专用密码，"
+    "或将 SMTP_FROM 改为授权登录账号。"
+)
 
 
 class Settings(BaseSettings):
@@ -19,14 +26,18 @@ class Settings(BaseSettings):
     smtp_port: int = 587
     smtp_user: str = ""
     smtp_password: str = ""
-    smtp_from: str = ""
+    smtp_from: str = Field(
+        default="amazon03@ptraveldesign.com",
+        validation_alias=AliasChoices("SMTP_FROM", "SMTP_FROM_EMAIL"),
+    )
     smtp_use_tls: bool = True
 
     openai_api_key: str = ""
+    openai_model: str = "gpt-5.5"
+    openai_api_base: str = "https://code.codingplay.top"
 
-    kimi_api_key: str = ""
-    kimi_api_base: str = "https://api.moonshot.cn/v1"
-    kimi_model: str = "kimi-k2.5"
+    scandihome_pdf_path: str = r"C:\Users\Administrator\Desktop\ScandiHome_视觉手册_v1_2.pdf"
+    scandihome_pptx_path: str = r"C:\Users\Administrator\Desktop\ScandiHome 2026 视觉升级 PPT新.pptx"
 
     collector_mode: str = "apify"
     instagram_data_provider: str = "apify"
@@ -43,10 +54,19 @@ class Settings(BaseSettings):
     api_direct_max_requests_per_platform: int = 20
     collection_search_concurrency: int = 4
     collection_profile_concurrency: int = 8
+    collection_profile_enrich_concurrency: int = 3
+    collection_profile_request_timeout_seconds: int = 20
+    collection_max_running_tasks: int = 2
     collection_contact_concurrency: int = 5
     collection_ai_concurrency: int = 2
     collection_batch_commit_size: int = 20
-    collection_running_stale_seconds: int = 300
+    collection_running_stale_seconds: int = Field(
+        default=180,
+        validation_alias=AliasChoices(
+            "collection_running_stale_seconds",
+            "collection_task_stale_after_seconds",
+        ),
+    )
     api_direct_max_pages_per_request: int = 1
     api_direct_tiktok_default_pages: int = 1
     apify_token: str = ""
@@ -65,6 +85,7 @@ class Settings(BaseSettings):
     apify_tiktok_timeout_seconds: int = 120
     apify_tiktok_max_retries: int = 1
     tiktok_apify_keyword_concurrency: int = 2
+    tiktok_apify_memory_mbytes: int = 2048
     youtube_discovery_keyword_timeout_seconds: int = 90
     youtube_discovery_slow_threshold_seconds: int = 45
     youtube_discovery_max_duration_seconds: int = 300
@@ -85,6 +106,29 @@ class Settings(BaseSettings):
     competitor_product_keyword_timeout_seconds: int = 25
     competitor_product_max_search_keywords: int = 8
     competitor_product_max_hashtags: int = 6
+
+    shopping_seed_search_provider: str = "public_web,pinterest_apify"
+    shopping_seed_social_search_platforms: str = ""
+    shopping_seed_public_search_engines: str = "bing,ltk,shopmy"
+    shopping_seed_search_timeout_seconds: int = 12
+    shopping_seed_search_max_results: int = 20
+    shopping_seed_search_concurrency: int = 3
+    shopping_seed_search_max_queries: int = 10
+    shopping_seed_empty_query_stop_count: int = 4
+    link_seed_enrich_concurrency: int = 3
+    link_seed_enrich_timeout_seconds: int = 60
+    platform_detail_concurrency: int = 3
+    shopping_seed_task_timeout_seconds: int = 300
+    apify_pinterest_search_actor_id: str = "easyapi/pinterest-search-scraper"
+    apify_pinterest_search_timeout_seconds: int = 35
+    apify_pinterest_search_max_retries: int = 0
+    apify_pinterest_search_memory_mbytes: int = 2048
+    apify_shopmy_creator_actor_id: str = "vsekar91/shopmy-creator-scraper"
+    apify_shopmy_creator_timeout_seconds: int = 45
+    apify_shopmy_creator_max_retries: int = 0
+    apify_shopmy_creator_memory_mbytes: int = 1024
+    apify_shopmy_creator_max_collections: int = 10
+    apify_shopmy_creator_max_concurrency: int = 5
 
     hikerapi_api_key: str = ""
     hikerapi_base_url: str = "https://api.hikerapi.com"
@@ -121,12 +165,26 @@ class Settings(BaseSettings):
         return inferred or None
 
     @property
-    def is_kimi_configured(self) -> bool:
-        return bool(self.kimi_api_key.strip())
+    def is_openai_configured(self) -> bool:
+        return bool(self.openai_api_key.strip())
 
     @property
     def ai_mode(self) -> str:
-        return "kimi" if self.is_kimi_configured else "heuristic"
+        if self.is_openai_configured:
+            return "openai"
+        return "heuristic"
+
+    @property
+    def active_ai_provider(self) -> str:
+        if self.is_openai_configured:
+            return "openai"
+        return "heuristic"
+
+    @property
+    def active_ai_model(self) -> str | None:
+        if self.is_openai_configured:
+            return self.openai_model.strip() or None
+        return None
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -137,12 +195,47 @@ class Settings(BaseSettings):
         return bool(self.smtp_host and self.smtp_user and self.smtp_password and self.smtp_from)
 
     @property
+    def smtp_from_user_mismatch(self) -> bool:
+        user = self.smtp_user.strip().lower()
+        from_addr = self.smtp_from.strip().lower()
+        return bool(user and from_addr and user != from_addr)
+
+    def get_smtp_status(self) -> dict:
+        configured = self.is_smtp_configured
+        warning = SMTP_FROM_USER_MISMATCH_MSG if self.smtp_from_user_mismatch else None
+        if configured:
+            message = "SMTP configured, ready to send emails."
+            if warning:
+                message = f"{message} {warning}"
+        else:
+            message = SMTP_NOT_CONFIGURED_MSG
+        return {
+            "configured": configured,
+            "host": self.smtp_host or None,
+            "port": self.smtp_port if self.smtp_host else None,
+            "user_address": self.smtp_user.strip() or None,
+            "from_address": self.smtp_from or None,
+            "from_user_mismatch": self.smtp_from_user_mismatch,
+            "warning": warning,
+            "use_tls": self.smtp_use_tls,
+            "message": message,
+        }
+
+    @property
     def is_youtube_configured(self) -> bool:
         return bool(self.youtube_api_key.strip())
 
     @property
     def is_apify_configured(self) -> bool:
         return bool(self.apify_token.strip())
+
+    @property
+    def effective_profile_enrich_concurrency(self) -> int:
+        """Instagram 主页补采并发上限（优先 enrich 配置，兼容旧 profile_concurrency）。"""
+        raw = self.collection_profile_enrich_concurrency
+        if raw and raw > 0:
+            return max(1, raw)
+        return max(1, self.collection_profile_concurrency or 1)
 
     @property
     def is_api_direct_configured(self) -> bool:
@@ -233,17 +326,6 @@ class Settings(BaseSettings):
         if not server:
             return None
         return f"https://{server}.api.mailchimp.com/3.0"
-
-    def get_smtp_status(self) -> dict:
-        configured = self.is_smtp_configured
-        return {
-            "configured": configured,
-            "host": self.smtp_host or None,
-            "port": self.smtp_port if self.smtp_host else None,
-            "from_address": self.smtp_from or None,
-            "use_tls": self.smtp_use_tls,
-            "message": "SMTP configured, ready to send emails." if configured else SMTP_NOT_CONFIGURED_MSG,
-        }
 
     def get_mailchimp_status(self) -> dict:
         configured = self.is_mailchimp_configured

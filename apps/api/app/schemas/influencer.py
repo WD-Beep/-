@@ -273,11 +273,17 @@ class InfluencerUpdate(BaseModel):
     invalid_reason: str | None = None
     blacklist_reason: str | None = None
     last_collected_at: datetime | None = None
+    email_sent: bool = False
+    last_email_sent_at: datetime | None = None
+    last_email_subject: str | None = None
 
 
 class InfluencerRead(InfluencerBase, TimestampMixin, ORMModel):
     id: int
     source_records: list[InfluencerSourceRead] = Field(default_factory=list)
+    email_sent: bool = False
+    last_email_sent_at: datetime | None = None
+    last_email_subject: str | None = None
     value_tier: Literal["direct_contact", "manual_research", "skip"] = "skip"
     value_tier_label: str = "暂时跳过"
     value_tier_reason: str = ""
@@ -346,6 +352,10 @@ class InfluencerFilter(BaseModel):
     high_priority: bool | None = None
     missing_contact: bool | None = None
     high_credibility_contact: bool | None = None
+    email_status: str | None = Field(
+        default=None,
+        description="sent | unsent — filter by successful email send history",
+    )
     collection_task_id: int | None = Field(default=None, ge=1)
     created_within_hours: int | None = Field(default=None, ge=1, le=720)
     collected_within_days: int | None = Field(default=None, ge=1, le=365)
@@ -358,6 +368,8 @@ class PlatformStatItem(BaseModel):
     direct_contact: int
     missing_contact: int
     high_value: int
+    sent_email_count: int = 0
+    unsent_email_count: int = 0
 
 
 class PlatformStatsResponse(BaseModel):
@@ -391,6 +403,7 @@ class InfluencerExportFilter(InfluencerFilter):
             high_priority=self.high_priority,
             missing_contact=self.missing_contact,
             high_credibility_contact=self.high_credibility_contact,
+            email_status=self.email_status,
             collection_task_id=self.collection_task_id,
             created_within_hours=self.created_within_hours,
             collected_within_days=self.collected_within_days,

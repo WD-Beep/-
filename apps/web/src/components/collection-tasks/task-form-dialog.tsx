@@ -10,7 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import type { CollectionMode, CollectionTask, CollectionTaskPayload, PlatformCapability, TaskSourceMethod } from "@/lib/api";
 import { fetchPlatformCapabilities } from "@/lib/api";
 import { formatLinkImportPlatformHints, parseLinkImportPreview } from "@/lib/collection-sources";
-import { COLLECTION_MODE_OPTIONS, KEYWORD_DISCOVERY_PLATFORMS, LINK_IMPORT_URL_EXAMPLES, LINK_IMPORT_USAGE_LINES, LINK_ONLY_PENDING_KEYWORD_HINT, LINK_ONLY_PLATFORM_CARD_LINES, PLATFORM_LABELS, URL_ONLY_PLATFORMS, VERIFIED_KEYWORD_PLATFORM_HINT } from "@/lib/labels";
+import { COLLECTION_MODE_OPTIONS, KEYWORD_DISCOVERY_PLATFORMS, KEYWORD_SEED_DISCOVERY_PLATFORMS, LINK_IMPORT_URL_EXAMPLES, LINK_IMPORT_USAGE_LINES, LINK_ONLY_PENDING_KEYWORD_HINT, LINK_ONLY_PLATFORM_CARD_LINES, PLATFORM_LABELS, SEED_DISCOVERY_PLATFORMS, URL_ONLY_PLATFORMS, VERIFIED_KEYWORD_PLATFORM_HINT } from "@/lib/labels";
 import {
   advancedFilterSummary,
   applyDiscoverySource,
@@ -21,9 +21,11 @@ import {
   hasAdvancedSettings,
   isKeywordDiscoveryPlatform,
   isKeywordPlatformSelectable,
+  isLinkImportTaskForm,
   saveFormTemplate,
   suggestTaskName,
   toggleKeywordPlatformSelection,
+  toggleSeedPlatformSelection,
   validateForm,
   type DiscoverySource,
   type TaskFormValues,
@@ -34,6 +36,11 @@ const DISCOVERY_SOURCE_OPTIONS: { value: DiscoverySource; label: string; hint: s
   { value: "keyword_hashtag", label: "关键词 / Hashtag", hint: "按关键词或 hashtag 搜索红人" },
   { value: "link_import", label: "链接导入", hint: "粘贴主页、商品或 Pin 链接" },
   { value: "multi_platform_auto", label: "多平台自动发现", hint: "同时在多个平台按 hashtag 发现" },
+  {
+    value: "shopping_seed_auto",
+    label: "导购 seed 自动发现",
+    hint: "输入主题 / 品牌 / 商品词 / ASIN / Amazon 线索，先找 LTK / ShopMy / Pinterest seed 链接，再批量采集补全",
+  },
 ];
 
 const FILTER_RULES_HELP = [
@@ -59,6 +66,13 @@ function platformCardMeta(
   }
   if (loadError) {
     return { statusLabel: "未知", disabled: true, hint: "" };
+  }
+  if ((KEYWORD_SEED_DISCOVERY_PLATFORMS as readonly string[]).includes(platform)) {
+    return {
+      statusLabel: "seed 自动发现",
+      disabled: false,
+      hint: cap?.link_import_hint || LINK_ONLY_PENDING_KEYWORD_HINT,
+    };
   }
   if (!keywordSelectable) {
     return {
@@ -120,7 +134,9 @@ function PlatformSelectionCard({
           <span
             className={cn(
               "text-[10px]",
-              meta.statusLabel === "已配置" || meta.statusLabel === "可采集"
+              meta.statusLabel === "已配置" ||
+                meta.statusLabel === "可采集" ||
+                meta.statusLabel === "seed 自动发现"
                 ? "text-emerald-600"
                 : "text-muted-foreground",
             )}
@@ -162,7 +178,7 @@ function PendingPlatformCard({
       </div>
       {cap?.link_import_hint ? (
         <p className="mt-2 text-[10px] text-muted-foreground">
-          链接导入示例：{cap.link_import_hint}（可尝试，成功率仍在验证中）
+          能力说明：{cap.link_import_hint}
         </p>
       ) : null}
     </div>
@@ -260,7 +276,7 @@ export function TaskFormDialog({
     };
   }, [open, initialTask, defaultSourceMethod]);
 
-  const isLinkImport = form.sourceMethod === "link_import";
+  const isLinkImport = isLinkImportTaskForm(form);
   const discoverySource = discoverySourceFromForm(form);
   const linkImportPreview = useMemo(
     () => (isLinkImport && open ? parseLinkImportPreview(form.inputUrlsText) : null),
@@ -290,8 +306,11 @@ export function TaskFormDialog({
     (collectionMode === "keyword" ||
       collectionMode === "mixed" ||
       collectionMode === "discovery" ||
-      collectionMode === "category_discovery");
+      collectionMode === "category_discovery" ||
+      collectionMode === "link_seed_discovery");
+  const showSeedDiscovery = !isLinkImport && collectionMode === "link_seed_discovery";
   const showCompetitorProduct = !isLinkImport && collectionMode === "competitor_product";
+  const showShoppingSeedProductInput = showCompetitorProduct || showSeedDiscovery;
   const showLegacyUrls =
     !isLinkImport &&
     (collectionMode === "urls" || collectionMode === "mixed" || collectionMode === "clustering");
@@ -409,6 +428,35 @@ export function TaskFormDialog({
 
               {!isLinkImport ? (
                 <div className="space-y-4">
+                  {showSeedDiscovery ? (
+                    <div className="space-y-2">
+                      <Label>导购 seed 来源平台</Label>
+                      <p className="text-xs text-muted-foreground">
+                        选择要自动发现的导购 seed 平台（LTK / ShopMy / Pinterest）。系统会按主题找 seed 链接，再批量采集并补全到 Instagram / TikTok / YouTube / Facebook 社媒主页。
+                      </p>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                        {SEED_DISCOVERY_PLATFORMS.map((value) => {
+                          const checked = form.platforms.includes(value);
+                          return (
+                            <PlatformSelectionCard
+                              key={value}
+                              platform={value}
+                              checked={checked}
+                              meta={{
+                                statusLabel: "外链发现",
+                                disabled: false,
+                                hint: "通过社媒搜索发现真实主页链接",
+                              }}
+                              onToggle={() =>
+                                setForm((prev) => toggleSeedPlatformSelection(prev, value))
+                              }
+                            />
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : (
+                    <>
                   <div className="space-y-2">
                     <Label>采集平台</Label>
                     <p className="text-xs text-muted-foreground">
@@ -448,7 +496,9 @@ export function TaskFormDialog({
                   <div className="space-y-2">
                     <p className="text-xs font-medium text-foreground">链接补全 / 外链发现平台</p>
                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                      {URL_ONLY_PLATFORMS.map((value) => {
+                      {URL_ONLY_PLATFORMS.filter(
+                        (value) => !(KEYWORD_DISCOVERY_PLATFORMS as readonly string[]).includes(value),
+                      ).map((value) => {
                         const cap = platformCapabilities.find((item) => item.platform === value);
                         const keywordAllowed = isKeywordDiscoveryPlatform(value, cap);
                         if (keywordAllowed) {
@@ -476,10 +526,11 @@ export function TaskFormDialog({
                       })}
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      以下平台不能在关键词 / Hashtag 模式下主动采集。请切换到「链接导入」，粘贴对应 URL
-                      即可尝试导入（成功率仍在验证中，不代表已稳定采集成功）。
+                      以下平台不支持完整站内关键词直采；可使用「导购 seed 自动发现」批量发现入口，也可用「链接导入」定向补全资料。
                     </p>
                   </div>
+                    </>
+                  )}
                 </div>
               ) : null}
 
@@ -549,22 +600,28 @@ export function TaskFormDialog({
                     ) : null}
                   </div>
                 </div>
-              ) : showCompetitorProduct ? (
+              ) : showShoppingSeedProductInput ? (
                 <div className="space-y-2">
-                  <Label htmlFor="competitor_input">商品链接 / ASIN / 关键词</Label>
+                  <Label htmlFor="competitor_input">主题 / 品牌 / 商品词 / ASIN / Amazon URL</Label>
                   <Textarea
                     id="competitor_input"
                     value={form.competitorInputText}
                     onChange={(e) => setForm({ ...form, competitorInputText: e.target.value })}
                     rows={4}
-                    placeholder={"https://www.amazon.com/dp/B0XXXXXXX/\nB0XXXXXXX\nwireless earbuds"}
+                    placeholder={"home decor finds\nHOMEHIVE jewelry storage bags\nB0XXXXXXX\nhttps://www.amazon.com/dp/B0XXXXXXX/"}
                   />
                 </div>
               ) : showKeywordsField ? (
                 <div className="space-y-2">
                   <Label htmlFor="keywords">
-                    {collectionMode === "discovery" ? "Hashtag / 关键词" : "关键词"}
-                    <span className="text-destructive"> *</span>
+                    {collectionMode === "discovery"
+                      ? "Hashtag / 关键词"
+                      : collectionMode === "link_seed_discovery"
+                        ? "关键词（可选，与类目至少填一项）"
+                        : "关键词"}
+                    {collectionMode !== "link_seed_discovery" ? (
+                      <span className="text-destructive"> *</span>
+                    ) : null}
                   </Label>
                   <Textarea
                     id="keywords"
@@ -649,12 +706,34 @@ export function TaskFormDialog({
                         value={collectionMode}
                         onChange={(e) => {
                           const nextMode = e.target.value as CollectionMode;
-                          setForm((prev) => ({
-                            ...prev,
-                            collection_mode: nextMode,
-                            comment_discovery_enabled:
-                              nextMode === "competitor_product" ? false : prev.comment_discovery_enabled,
-                          }));
+                          setForm((prev) => {
+                            const nextSourceMethod: TaskSourceMethod =
+                              nextMode === "link_seed_discovery"
+                                ? "shopping_seed_auto"
+                                : nextMode === "link_import"
+                                  ? "link_import"
+                                  : prev.sourceMethod === "shopping_seed_auto" || prev.sourceMethod === "link_import"
+                                    ? "keyword_discovery"
+                                    : prev.sourceMethod;
+                            const base = {
+                              ...prev,
+                              sourceMethod: nextSourceMethod,
+                              collection_mode: nextMode,
+                              comment_discovery_enabled:
+                                nextMode === "competitor_product" || nextMode === "link_seed_discovery"
+                                  ? false
+                                  : prev.comment_discovery_enabled,
+                            };
+                            if (nextMode === "link_seed_discovery") {
+                              const seedPlatforms = [...SEED_DISCOVERY_PLATFORMS];
+                              return {
+                                ...base,
+                                platforms: seedPlatforms,
+                                platform: "multi",
+                              };
+                            }
+                            return base;
+                          });
                         }}
                         className={cn(
                           "flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",

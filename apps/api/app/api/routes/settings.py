@@ -65,9 +65,9 @@ async def get_settings_status() -> SettingsStatusResponse:
         smtp=EmailService.get_smtp_status(),
         mailchimp=MailchimpStatus(**settings.get_mailchimp_status()),
         ai=AiStatusResponse(
-            provider="kimi",
-            model=settings.kimi_model if settings.is_kimi_configured else None,
-            configured=settings.is_kimi_configured,
+            provider=settings.active_ai_provider,
+            model=settings.active_ai_model,
+            configured=settings.is_openai_configured,
             mode=settings.ai_mode,
         ),
         apify=IntegrationStatus(

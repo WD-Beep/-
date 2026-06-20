@@ -49,3 +49,7 @@ tmp_*
 probe_*.txt
 *_result.txt
 lemnos_probe.json
+*.pid
+_diag_*.py
+_smoke_collection_verify.out.json
+apps/api/data/

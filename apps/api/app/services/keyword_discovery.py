@@ -104,11 +104,14 @@ async def discover_candidates_from_keywords(
         tag, discovery, err = outcome
         if err:
             errors.append(f"Hashtag #{tag}: {err}")
+            checkpoint.mark_provider_unavailable("instagram", err)
             continue
         assert discovery is not None
         hashtag_successes += 1
         checkpoint.mark_hashtag(tag)
         errors.extend(discovery.errors)
+        for detail in discovery.errors:
+            checkpoint.mark_provider_unavailable("instagram", detail)
         post_count += discovery.post_count
         for post_url in discovery.post_urls:
             if post_url not in all_post_urls:
@@ -123,6 +126,8 @@ async def discover_candidates_from_keywords(
                 stage=STAGE_DISCOVERY,
                 processed=len(checkpoint.completed_hashtags),
                 total=max(limit, len(hashtags)),
+                discovered_count=len(raw_candidates),
+                deduped_count=len({c.profile_url.lower() for c in raw_candidates}),
                 checkpoint=checkpoint,
                 commit=True,
             )

@@ -1,9 +1,9 @@
 import type { CollectionMode, CollectionTask, CollectionTaskPayload, PlatformCapability, TaskSourceMethod } from "./api.ts";
-import { COLLECTION_MODE_LABELS, KEYWORD_DISCOVERY_PLATFORMS, NO_CONFIGURED_KEYWORD_PLATFORMS_MSG, PLATFORM_LABELS, taskSourceMethodForMode, URL_ONLY_PLATFORM_VALIDATION_MSG, URL_ONLY_PLATFORMS } from "./labels.ts";
+import { COLLECTION_MODE_LABELS, KEYWORD_DISCOVERY_PLATFORMS, KEYWORD_SEED_DISCOVERY_PLATFORMS, NO_CONFIGURED_KEYWORD_PLATFORMS_MSG, PLATFORM_LABELS, SEED_DISCOVERY_PLATFORMS, taskSourceMethodForMode, URL_ONLY_PLATFORM_VALIDATION_MSG, URL_ONLY_PLATFORMS } from "./labels.ts";
 import { parseLinkImportPreview } from "./collection-sources.ts";
 
 export const TEMPLATE_STORAGE_KEY = "influencer-intel:collection-task-template";
-export type DiscoverySource = "keyword_hashtag" | "link_import" | "multi_platform_auto";
+export type DiscoverySource = "keyword_hashtag" | "link_import" | "shopping_seed_auto" | "multi_platform_auto";
 
 const DEFAULT_PLATFORMS = ["youtube"];
 
@@ -174,6 +174,13 @@ function keywordDiscoveryInputUrls(values: TaskFormValues): string[] {
   return [];
 }
 
+export function isLinkImportTaskForm(
+  values: Pick<TaskFormValues, "sourceMethod" | "collection_mode">,
+): boolean {
+  if (values.collection_mode === "link_seed_discovery") return false;
+  return values.collection_mode === "link_import" || values.sourceMethod === "link_import";
+}
+
 function templatesToForm(templates: Record<string, string> = {}): Pick<
   TaskFormValues,
   "micro_subject" | "micro_body" | "mid_subject" | "mid_body" | "macro_subject" | "macro_body"
@@ -212,7 +219,7 @@ function splitLines(text: string): string[] {
 }
 
 function isAmazonOrHttpUrl(text: string): boolean {
-  return /amazon\.[a-z.]+/i.test(text) || /^https?:\/\//i.test(text);
+  return /amazon\.[a-z.]+/i.test(text) || /^[A-Z0-9]{10}$/i.test(text) || /^https?:\/\//i.test(text);
 }
 
 function parseCompetitorFormInput(text: string): { keywords: string[]; input_urls: string[] } {
@@ -232,14 +239,28 @@ function isUrlOnlyPlatform(platform: string): boolean {
   return (URL_ONLY_PLATFORMS as readonly string[]).includes(platform);
 }
 
+function isKeywordSeedPlatform(platform: string): boolean {
+  return (KEYWORD_SEED_DISCOVERY_PLATFORMS as readonly string[]).includes(platform);
+}
+
+function isSeedOnlyDiscoverySelection(platforms: string[]): boolean {
+  return platforms.length > 0 && platforms.every((platform) => isKeywordSeedPlatform(platform));
+}
+
+function seedOnlyDiscoveryMessage(platforms: string[]): string {
+  const labels = platforms.map((platform) => PLATFORM_LABELS[platform] ?? platform);
+  return `${labels.join(" / ")} 关键词采集请使用“导购 seed 自动发现”，不要用普通关键词发现。`;
+}
+
 function stripUrlOnlyPlatforms(platforms: string[]): string[] {
-  return platforms.filter((platform) => !isUrlOnlyPlatform(platform));
+  return platforms.filter((platform) => !isUrlOnlyPlatform(platform) || isKeywordSeedPlatform(platform));
 }
 
 export function isKeywordDiscoveryPlatform(
   platform: string,
   cap: PlatformCapability | undefined,
 ): boolean {
+  if (isKeywordSeedPlatform(platform)) return true;
   if (cap) {
     return cap.keyword_discovery && cap.status !== "not_configured" && cap.status !== "not_available";
   }
@@ -250,6 +271,7 @@ export function isKeywordPlatformSelectable(
   platform: string,
   cap: PlatformCapability | undefined,
 ): boolean {
+  if (isKeywordSeedPlatform(platform)) return true;
   if (!isKeywordDiscoveryPlatform(platform, cap)) return false;
   if (!cap) return true;
   return cap.status === "supported" || (cap.status === "url_only" && cap.keyword_discovery);
@@ -279,6 +301,7 @@ export function resolvePlatformFields(platforms: string[]): Pick<TaskFormValues,
 
 export function getKeywordDiscoveryDefaultPlatforms(caps: PlatformCapability[] = []): string[] {
   const configured = KEYWORD_DISCOVERY_PLATFORMS.filter((platform) =>
+    !isKeywordSeedPlatform(platform) &&
     isKeywordPlatformSelectable(platform, caps.find((item) => item.platform === platform)),
   );
   if (caps.length > 0) return [...configured];
@@ -306,6 +329,14 @@ function invalidKeywordPlatformMessage(
   return `${PLATFORM_LABELS[platform] ?? platform} 当前不支持关键词采集`;
 }
 
+export function toggleSeedPlatformSelection(prev: TaskFormValues, platform: string): TaskFormValues {
+  if (!(SEED_DISCOVERY_PLATFORMS as readonly string[]).includes(platform)) return prev;
+  const checked = prev.platforms.includes(platform);
+  const next = checked ? prev.platforms.filter((p) => p !== platform) : [...prev.platforms, platform];
+  const platforms = next.filter((p) => (SEED_DISCOVERY_PLATFORMS as readonly string[]).includes(p));
+  return { ...prev, ...resolvePlatformFields(platforms) };
+}
+
 export function toggleKeywordPlatformSelection(
   prev: TaskFormValues,
   platform: string,
@@ -317,10 +348,62 @@ export function toggleKeywordPlatformSelection(
   const checked = prev.platforms.includes(platform);
   const next = checked ? prev.platforms.filter((p) => p !== platform) : [...prev.platforms, platform];
   const platforms = filterKeywordSubmissionPlatforms(next, caps);
-  return { ...prev, ...resolvePlatformFields(platforms) };
+  if (isSeedOnlyDiscoverySelection(platforms)) {
+    return {
+      ...prev,
+      sourceMethod: "shopping_seed_auto",
+      collection_mode: "link_seed_discovery",
+      comment_discovery_enabled: false,
+      ...resolvePlatformFields(platforms),
+    };
+  }
+  return {
+    ...prev,
+    sourceMethod: "keyword_discovery",
+    collection_mode:
+      prev.collection_mode === "link_import" || prev.collection_mode === "link_seed_discovery"
+        ? "discovery"
+        : prev.collection_mode,
+    ...resolvePlatformFields(platforms),
+  };
 }
 
 export { stripUrlOnlyPlatforms };
+
+function validateQualityAndDelivery(values: TaskFormValues): string | null {
+  if (values.email_enabled && splitLines(values.email_recipientsText).length === 0) {
+    return "启用邮件发送时请填写收件人邮箱";
+  }
+  const discoveryLimit = Number(values.discovery_limit);
+  if (!Number.isFinite(discoveryLimit) || discoveryLimit < 1 || discoveryLimit > 500) {
+    return "采集数量上限需在 1-500 之间";
+  }
+  const minEngagementText = values.min_engagement_rate.trim();
+  if (minEngagementText) {
+    const minEngagement = Number(minEngagementText);
+    if (!Number.isFinite(minEngagement) || minEngagement < 0 || minEngagement > 100) {
+      return "最低互动率需在 0-100 之间";
+    }
+  }
+  const minFollowers = values.min_followers_count.trim();
+  const maxFollowers = values.max_followers_count.trim();
+  if (minFollowers) {
+    const n = Number(minFollowers);
+    if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
+      return "最低粉丝数需为非负整数";
+    }
+  }
+  if (maxFollowers) {
+    const n = Number(maxFollowers);
+    if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
+      return "最高粉丝数需为非负整数";
+    }
+  }
+  if (minFollowers && maxFollowers && Number(minFollowers) > Number(maxFollowers)) {
+    return "最低粉丝数不能大于最高粉丝数";
+  }
+  return null;
+}
 
 export function validateForm(values: TaskFormValues, platformCapabilities: PlatformCapability[]): string | null {
   const keywords = splitLines(values.keywordsText);
@@ -329,7 +412,7 @@ export function validateForm(values: TaskFormValues, platformCapabilities: Platf
 
   if (!taskName) return "请填写任务名";
 
-  if (values.sourceMethod === "link_import") {
+  if (isLinkImportTaskForm(values)) {
     if (urls.length === 0) return "请至少粘贴一行红人主页或 Amazon 商品链接";
     const preview = parseLinkImportPreview(values.inputUrlsText);
     if (preview.invalidCount > 0) {
@@ -342,6 +425,20 @@ export function validateForm(values: TaskFormValues, platformCapabilities: Platf
       return "Amazon 商品链接请单独创建商品发现任务，不要与红人主页链接混在同一任务中";
     }
     return null;
+  }
+
+  if (values.collection_mode === "link_seed_discovery") {
+    const competitor = parseCompetitorFormInput(values.competitorInputText);
+    if (!keywords.length && !competitor.keywords.length && !competitor.input_urls.length && !values.category.trim()) {
+      return "导购 seed 自动发现需填写关键词或类目";
+    }
+    const seedPlatforms = values.platforms.filter((p) =>
+      (SEED_DISCOVERY_PLATFORMS as readonly string[]).includes(p),
+    );
+    if (seedPlatforms.length === 0) {
+      return "请至少选择 LTK、ShopMy 或 Pinterest 作为 seed 来源平台";
+    }
+    return validateQualityAndDelivery(values);
   }
 
   if (!values.platforms.length) {
@@ -358,6 +455,9 @@ export function validateForm(values: TaskFormValues, platformCapabilities: Platf
   }
 
   const submissionPlatforms = filterKeywordSubmissionPlatforms(values.platforms, platformCapabilities);
+  if (isSeedOnlyDiscoverySelection(submissionPlatforms)) {
+    return seedOnlyDiscoveryMessage(submissionPlatforms);
+  }
   if (submissionPlatforms.length === 0) {
     if (platformCapabilities.length > 0 && getMultiPlatformAutoPlatforms(platformCapabilities).length === 0) {
       return NO_CONFIGURED_KEYWORD_PLATFORMS_MSG;
@@ -462,7 +562,7 @@ export function formValuesToPayload(
   platformCapabilities: PlatformCapability[] = [],
 ): CollectionTaskPayload {
   const taskName = values.name.trim() || suggestTaskName(values);
-  if (values.sourceMethod === "link_import") {
+  if (isLinkImportTaskForm(values)) {
     return {
       name: taskName,
       collection_mode: "link_import",
@@ -519,7 +619,62 @@ export function formValuesToPayload(
     };
   }
 
+  if (values.collection_mode === "link_seed_discovery") {
+    const competitor = parseCompetitorFormInput(values.competitorInputText);
+    const seedPlatforms = values.platforms.filter((p) =>
+      (SEED_DISCOVERY_PLATFORMS as readonly string[]).includes(p),
+    );
+    const resolvedSeedPlatforms =
+      seedPlatforms.length > 0 ? seedPlatforms : [...SEED_DISCOVERY_PLATFORMS];
+    const { platform, platforms: selectedPlatforms } = resolvePlatformFields(resolvedSeedPlatforms);
+    return {
+      name: taskName,
+      collection_mode: "link_seed_discovery",
+      platform,
+      platforms: selectedPlatforms,
+      keywords: Array.from(new Set([...competitor.keywords, ...splitLines(values.keywordsText)])),
+      input_urls: competitor.input_urls,
+      country: values.country.trim() || null,
+      category: values.category.trim() || null,
+      discovery_limit: Number(values.discovery_limit),
+      ...buildQualityFilterPayload(values),
+      schedule_enabled: values.schedule_enabled,
+      schedule_cron: values.schedule_enabled ? values.schedule_cron.trim() || null : null,
+      email_enabled: values.email_enabled,
+      email_recipients: values.email_enabled ? splitLines(values.email_recipientsText) : [],
+      outreach_enabled: values.outreach_enabled,
+      outreach_provider: values.outreach_provider,
+      outreach_dry_run: values.outreach_dry_run,
+      outreach_templates: formToTemplates(values),
+      comment_discovery_enabled: false,
+    };
+  }
+
   const platforms = filterKeywordSubmissionPlatforms(values.platforms, platformCapabilities);
+  if (isSeedOnlyDiscoverySelection(platforms)) {
+    const { platform, platforms: selectedPlatforms } = resolvePlatformFields(platforms);
+    return {
+      name: taskName,
+      collection_mode: "link_seed_discovery",
+      platform,
+      platforms: selectedPlatforms,
+      keywords: splitLines(values.keywordsText),
+      input_urls: [],
+      country: values.country.trim() || null,
+      category: values.category.trim() || null,
+      discovery_limit: Number(values.discovery_limit),
+      ...buildQualityFilterPayload(values),
+      schedule_enabled: values.schedule_enabled,
+      schedule_cron: values.schedule_enabled ? values.schedule_cron.trim() || null : null,
+      email_enabled: values.email_enabled,
+      email_recipients: values.email_enabled ? splitLines(values.email_recipientsText) : [],
+      outreach_enabled: values.outreach_enabled,
+      outreach_provider: values.outreach_provider,
+      outreach_dry_run: values.outreach_dry_run,
+      outreach_templates: formToTemplates(values),
+      comment_discovery_enabled: false,
+    };
+  }
   const { platform, platforms: selectedPlatforms } = resolvePlatformFields(platforms);
 
   return {
@@ -574,15 +729,20 @@ export function taskToFormValues(task: CollectionTask): TaskFormValues {
   const sourceMethod = taskSourceMethodForMode(task.collection_mode);
   const rawPlatforms = task.platforms?.length ? task.platforms : [task.platform || "instagram"];
   const platforms =
-    sourceMethod === "keyword_discovery"
-      ? rawPlatforms.filter((platform) => !(URL_ONLY_PLATFORMS as readonly string[]).includes(platform))
+    sourceMethod === "keyword_discovery" && task.collection_mode !== "link_seed_discovery"
+      ? rawPlatforms.filter((platform) => !isUrlOnlyPlatform(platform) || isKeywordSeedPlatform(platform))
       : rawPlatforms;
+  const seedOnly = isSeedOnlyDiscoverySelection(platforms);
 
   return {
-    sourceMethod,
+    sourceMethod: seedOnly ? "shopping_seed_auto" : sourceMethod,
     name: task.name,
     collection_mode:
-      task.collection_mode === "comment_authors" ? "urls" : (task.collection_mode ?? "discovery"),
+      seedOnly
+        ? "link_seed_discovery"
+        : task.collection_mode === "comment_authors"
+          ? "urls"
+          : (task.collection_mode ?? "discovery"),
     comment_discovery_enabled: task.comment_discovery_enabled ?? true,
     platform: platforms.length === 1 ? platforms[0] : platforms.length > 1 ? "multi" : task.platform,
     platforms: platforms.length ? platforms : [...DEFAULT_PLATFORMS],
@@ -625,14 +785,23 @@ export function getInitialForm(
   const base: TaskFormValues = {
     ...createEmptyTaskForm(),
     sourceMethod: defaultSourceMethod,
-    collection_mode: defaultSourceMethod === "link_import" ? "link_import" : "discovery",
+    collection_mode:
+      defaultSourceMethod === "link_import"
+        ? "link_import"
+        : defaultSourceMethod === "shopping_seed_auto"
+          ? "link_seed_discovery"
+          : "discovery",
   };
   const template = loadSavedFormTemplate();
   return template ? applyFormTemplate(base, template) : base;
 }
 
 export function discoverySourceFromForm(form: TaskFormValues): DiscoverySource {
-  if (form.sourceMethod === "link_import") return "link_import";
+  if (form.sourceMethod === "shopping_seed_auto" || form.collection_mode === "link_seed_discovery") {
+    return "shopping_seed_auto";
+  }
+  if (isLinkImportTaskForm(form)) return "link_import";
+  if (isSeedOnlyDiscoverySelection(form.platforms)) return "shopping_seed_auto";
   if (form.collection_mode === "discovery" && form.platforms.length > 1) return "multi_platform_auto";
   return "keyword_hashtag";
 }
@@ -650,6 +819,16 @@ export function applyDiscoverySource(
       collection_mode: "link_import",
       platforms: [],
       platform: "instagram",
+    };
+  }
+  if (source === "shopping_seed_auto") {
+    return {
+      ...prev,
+      ...clearLinkImportFields(),
+      sourceMethod: "shopping_seed_auto",
+      collection_mode: "link_seed_discovery",
+      ...resolvePlatformFields([...SEED_DISCOVERY_PLATFORMS]),
+      comment_discovery_enabled: false,
     };
   }
   const configured = getMultiPlatformAutoPlatforms(platformCapabilities);
@@ -670,7 +849,9 @@ export function applyDiscoverySource(
     ...clearLinkImportFields(),
     sourceMethod: "keyword_discovery",
     collection_mode:
-      prev.collection_mode === "link_import" || prev.collection_mode === "competitor_product"
+      prev.collection_mode === "link_import" ||
+      prev.collection_mode === "competitor_product" ||
+      prev.collection_mode === "link_seed_discovery"
         ? "discovery"
         : prev.collection_mode,
     ...resolvePlatformFields(platforms),
@@ -678,7 +859,7 @@ export function applyDiscoverySource(
 }
 
 export function suggestTaskName(form: TaskFormValues): string {
-  if (form.sourceMethod === "link_import") {
+  if (isLinkImportTaskForm(form)) {
     const lines = splitLines(form.inputUrlsText);
     if (lines.length === 0) return "链接导入任务";
     if (lines.length === 1) {
@@ -688,6 +869,20 @@ export function suggestTaskName(form: TaskFormValues): string {
       if (platform) return `${PLATFORM_LABELS[platform] ?? platform} 链接导入`;
     }
     return `链接导入 - ${lines.length} 条`;
+  }
+  if (form.collection_mode === "link_seed_discovery") {
+    const topic =
+      form.category.trim() || splitLines(form.keywordsText)[0]?.replace(/^#/, "") || "导购 seed";
+    const seedLabels = form.platforms
+      .filter((p) => (SEED_DISCOVERY_PLATFORMS as readonly string[]).includes(p))
+      .map((p) => PLATFORM_LABELS[p] ?? p);
+    const platformLabel =
+      seedLabels.length === 0
+        ? "导购 seed"
+        : seedLabels.length === 1
+          ? seedLabels[0]!
+          : seedLabels.join("+");
+    return `${topic} - ${platformLabel}`;
   }
   const keywords = splitLines(form.keywordsText);
   const topic = keywords[0]?.replace(/^#/, "") || "红人发现";
@@ -714,7 +909,7 @@ export function advancedFilterSummary(form: TaskFormValues): string {
   if (form.strict_quality_filter) parts.push("严格过滤");
   if (form.export_qualified_only) parts.push("仅导出达标");
   if (form.comment_discovery_enabled) parts.push("评论区发现");
-  if (form.collection_mode !== "discovery" && form.sourceMethod !== "link_import") {
+  if (form.collection_mode !== "discovery" && !isLinkImportTaskForm(form)) {
     parts.push(COLLECTION_MODE_LABELS[form.collection_mode] ?? form.collection_mode);
   }
   return parts.length ? `已设置：${parts.join("、")}` : "使用默认筛选";

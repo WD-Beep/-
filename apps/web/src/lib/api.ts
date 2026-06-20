@@ -1,4 +1,5 @@
-import { ensureTenantProductId, tenantHeaders } from "./product-context.ts";
+﻿import { ensureTenantProductId, tenantHeaders } from "./product-context.ts";
+import { collectionTaskSeedDiscoveryDiagnosticHint } from "./shopping-seed-diagnostics.ts";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api-proxy";
 const SERVER_API_URL =
@@ -25,7 +26,7 @@ async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promi
     return await fetch(input, { ...init, headers, signal });
   } catch (error) {
     if (error instanceof DOMException && error.name === "TimeoutError") {
-      throw new Error("请求超时，请确认后端服务已启动并可访问。");
+      throw new Error("请求超时，请确认后端服务已启动且可访问。");
     }
     throw error;
   }
@@ -149,6 +150,9 @@ export type Influencer = {
   owner_name: string | null;
   lead_note: string | null;
   last_collected_at: string | null;
+  email_sent: boolean;
+  last_email_sent_at: string | null;
+  last_email_subject: string | null;
   source_discovery_type: string | null;
   source_post_url: string | null;
   source_comment_url: string | null;
@@ -255,10 +259,11 @@ export type CollectionMode =
   | "clustering"
   | "comment_authors"
   | "competitor_product"
-  | "link_import";
+  | "link_import"
+  | "link_seed_discovery";
 
-/** 采集任务顶层来源方式（表单「采集方式」） */
-export type TaskSourceMethod = "keyword_discovery" | "link_import";
+/** 閲囬泦浠诲姟椤跺眰鏉ユ簮鏂瑰紡锛堣〃鍗曘€岄噰闆嗘柟寮忋€嶏級 */
+export type TaskSourceMethod = "keyword_discovery" | "link_import" | "shopping_seed_auto";
 
 export type PlatformCapability = {
   platform: string;
@@ -267,10 +272,13 @@ export type PlatformCapability = {
   message: string;
   endpoints: string[];
   keyword_discovery: boolean;
+  native_keyword_discovery?: boolean;
+  external_seed_discovery?: boolean;
+  reverse_link_expansion?: boolean;
   link_import: boolean;
   product_seed: boolean;
   link_import_hint?: string | null;
-  discovery_category?: "search_discovery" | "external_link_discovery" | "link_completion";
+  discovery_category?: "search_discovery" | "external_seed_discovery" | "external_link_discovery" | "link_completion";
   external_link_discovery?: boolean;
 };
 
@@ -282,6 +290,10 @@ export type PlatformCapabilitiesResponse = {
   youtube_data_provider: string;
   tiktok_data_provider?: string;
   facebook_data_provider?: string;
+  collection_max_running_tasks?: number;
+  collection_profile_enrich_concurrency?: number;
+  collection_profile_request_timeout_seconds?: number;
+  collection_running_stale_seconds?: number;
 };
 
 export type CollectionTask = {
@@ -341,9 +353,13 @@ export type CollectionTask = {
   stale: boolean;
   recoverable: boolean;
   stale_after_seconds: number;
+  is_archived?: boolean;
+  archived_at?: string | null;
   is_ineffective?: boolean;
-  effectiveness_category?: "effective" | "low_value_result" | "no_result";
+  effectiveness_category?: "high_value" | "effective" | "low_value_result" | "no_result" | "failed";
   has_retention_traces?: boolean;
+  management_tags?: string[];
+  is_possible_duplicate?: boolean;
   status_summary: string | null;
   error_message: string | null;
   comment_discovery_enabled: boolean;
@@ -429,6 +445,7 @@ export type PaginatedResponse<T> = {
   page: number;
   page_size: number;
   pages: number;
+  total_pages?: number;
 };
 
 export type CollectionRunResult = {
@@ -455,7 +472,7 @@ export type CollectionRunResult = {
 };
 
 export const COLLECTION_TASK_POLL_INTERVAL_MS = 3000;
-export const COLLECTION_TASK_SLOW_HINT_MS = 3 * 60 * 1000;
+export const COLLECTION_TASK_SLOW_HINT_MS = 180 * 1000;
 
 const COLLECTION_TASK_TERMINAL_STATUSES: CollectionTaskStatus[] = [
   "completed",
@@ -492,7 +509,7 @@ export function isCollectionTaskRateLimited(task: CollectionTask): boolean {
   const checkpoint = task.run_checkpoint ?? {};
   if (checkpoint.rate_limited === true) return true;
   const haystack = `${task.last_error ?? ""} ${task.status_summary ?? ""} ${task.error_message ?? ""}`;
-  return /429|限流|rate.?limit/i.test(haystack);
+  return /429|闄愭祦|rate.?limit/i.test(haystack);
 }
 
 export function getCollectionTaskTargetCount(task: CollectionTask): number {
@@ -507,7 +524,14 @@ export function buildCollectionTaskCompletionMessage(task: CollectionTask): {
     const detail = task.error_message?.trim();
     return {
       tone: "error",
-      message: detail ? `采集失败：${detail}` : "采集失败，请查看任务错误信息",
+      message: detail ? `閲囬泦澶辫触锛?{detail}` : "閲囬泦澶辫触锛岃鏌ョ湅浠诲姟閿欒淇℃伅",
+    };
+  }
+  const seedDiscoveryDiagnostic = collectionTaskSeedDiscoveryDiagnosticHint(task);
+  if (seedDiscoveryDiagnostic) {
+    return {
+      tone: "warning",
+      message: seedDiscoveryDiagnostic,
     };
   }
   const inserted = task.inserted_count ?? task.result_count ?? 0;
@@ -578,6 +602,14 @@ export type CompetitorCandidateSourceMeta = {
   competitor_product_title?: string | null;
   asin?: string | null;
   brand?: string | null;
+  amazon_asin?: string | null;
+  amazon_brand?: string | null;
+  amazon_product_title?: string | null;
+  match_type?: string | null;
+  matched_phrases?: string[];
+  missing_required_phrases?: string[];
+  product_match_confidence?: string | null;
+  selected_reason?: string | null;
   matched_keywords?: string[];
   match_reasons?: string[];
   suspected_collab?: boolean;
@@ -621,11 +653,20 @@ export type EmailLogStatus = "pending" | "sent" | "failed";
 export type EmailLog = {
   id: number;
   task_id: number | null;
+  product_influencer_id: number | null;
+  sender_email: string | null;
+  influencer_username: string | null;
   recipients: string[];
   subject: string;
+  body: string | null;
   status: EmailLogStatus;
   attachment_path: string | null;
   error_message: string | null;
+  generated_by_ai: boolean;
+  ai_provider: string | null;
+  ai_reason: string | null;
+  matched_knowledge: MatchedKnowledgeItem[] | null;
+  risk_notes: string[] | null;
   sent_at: string | null;
 };
 
@@ -633,7 +674,10 @@ export type SmtpStatus = {
   configured: boolean;
   host: string | null;
   port: number | null;
+  user_address: string | null;
   from_address: string | null;
+  from_user_mismatch: boolean;
+  warning: string | null;
   use_tls: boolean;
   message: string;
 };
@@ -714,10 +758,21 @@ export type DashboardSummary = {
 
 async function parseError(response: Response): Promise<string> {
   try {
-    const data = await response.json();
-    if (typeof data.detail === "string") return data.detail;
-    if (Array.isArray(data.detail)) {
-      return data.detail.map((item: { msg?: string }) => item.msg ?? JSON.stringify(item)).join("；");
+    const text = await response.text();
+    if (!text.trim()) {
+      return `Request failed: ${response.status}`;
+    }
+    try {
+      const data = JSON.parse(text) as { detail?: string | Array<{ msg?: string }> };
+      if (typeof data.detail === "string") return data.detail;
+      if (Array.isArray(data.detail)) {
+        return data.detail.map((item: { msg?: string }) => item.msg ?? JSON.stringify(item)).join("；");
+      }
+    } catch {
+      if (response.status >= 500 && /Internal Server Error/i.test(text)) {
+        return "后端 API 当前不可用，请确认本地 8000 端口服务已启动。";
+      }
+      return text;
     }
     return `Request failed: ${response.status}`;
   } catch {
@@ -766,6 +821,7 @@ export type InfluencerListFilters = {
   ownerName?: string;
   missingContact?: boolean;
   highCredibilityContact?: boolean;
+  emailStatus?: "sent" | "unsent";
   collectionTaskId?: number;
   createdWithinHours?: number;
   collectedWithinDays?: number;
@@ -802,6 +858,7 @@ export function buildInfluencerExportUrl(filters: InfluencerListFilters = {}): s
     value_tier: filters.valueTier,
     high_match: filters.highMatch,
     today_recommended: filters.todayRecommended,
+    email_status: filters.emailStatus,
     platform: filters.platform,
     keyword: filters.search,
     lead_status: filters.leadStatus,
@@ -830,6 +887,7 @@ export function influencerFilterQueryParams(
     owner_name: filters.ownerName,
     missing_contact: filters.missingContact,
     high_credibility_contact: filters.highCredibilityContact,
+    email_status: filters.emailStatus,
     collection_task_id: filters.collectionTaskId,
     created_within_hours: filters.createdWithinHours,
     collected_within_days: filters.collectedWithinDays,
@@ -866,6 +924,8 @@ export type InfluencerPlatformStatItem = {
   direct_contact: number;
   missing_contact: number;
   high_value: number;
+  sent_email_count?: number;
+  unsent_email_count?: number;
 };
 
 export type InfluencerPlatformStatsResponse = {
@@ -992,8 +1052,45 @@ export async function fetchPlatformCapabilities(): Promise<PlatformCapabilitiesR
 export async function fetchCollectionTasks(
   page = 1,
   pageSize = 50,
-  options?: { effectiveness?: "effective" | "ineffective" | "low_value_result" | "no_result" },
+  options?: {
+    effectiveness?: "high_value" | "effective" | "ineffective" | "low_value_result" | "no_result" | "failed";
+    task_view?: TaskListView;
+    search?: string;
+    status?: CollectionTaskStatus;
+    platform?: string;
+  },
 ): Promise<PaginatedResponse<CollectionTask>> {
+  const query = buildCollectionTasksQueryString(page, pageSize, options);
+  const response = await apiFetch(`${API_URL}/api/collection-tasks?${query}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export type TaskListView =
+  | "all"
+  | "high_value"
+  | "effective"
+  | "ineffective"
+  | "low_value_result"
+  | "no_result"
+  | "test_history"
+  | "archived";
+
+export function buildCollectionTasksQueryString(
+  page = 1,
+  pageSize = 50,
+  options?: {
+    effectiveness?: "high_value" | "effective" | "ineffective" | "low_value_result" | "no_result" | "failed";
+    task_view?: TaskListView;
+    search?: string;
+    status?: CollectionTaskStatus;
+    platform?: string;
+  },
+): string {
   const params = new URLSearchParams({
     page: String(page),
     page_size: String(pageSize),
@@ -1001,13 +1098,19 @@ export async function fetchCollectionTasks(
   if (options?.effectiveness) {
     params.set("effectiveness", options.effectiveness);
   }
-  const response = await apiFetch(`${API_URL}/api/collection-tasks?${params.toString()}`, {
-    cache: "no-store",
-  });
-  if (!response.ok) {
-    throw new Error(await parseError(response));
+  if (options?.task_view && options.task_view !== "all") {
+    params.set("task_view", options.task_view);
   }
-  return response.json();
+  if (options?.search?.trim()) {
+    params.set("search", options.search.trim());
+  }
+  if (options?.status) {
+    params.set("status", options.status);
+  }
+  if (options?.platform) {
+    params.set("platform", options.platform);
+  }
+  return params.toString();
 }
 
 export async function fetchCollectionTask(id: number): Promise<CollectionTask> {
@@ -1144,6 +1247,73 @@ export type CollectionTaskBulkDeleteResult = {
   archived_ids: number[];
   skipped_ids: number[];
 };
+
+export type CollectionTaskBulkManageAction =
+  | "archive_test_history"
+  | "delete_no_result"
+  | "restore_archived"
+  | "archive_duplicates";
+
+export type CollectionTaskBulkManageResult = {
+  matched_count: number;
+  archived_count: number;
+  deleted_count: number;
+  skipped_count: number;
+  restored_count: number;
+  archived_ids: number[];
+  deleted_ids: number[];
+  restored_ids: number[];
+  skipped_ids: number[];
+  skipped_reasons: Record<string, string>;
+};
+
+export async function bulkManageCollectionTasks(
+  action: CollectionTaskBulkManageAction,
+  taskIds: number[] = [],
+): Promise<CollectionTaskBulkManageResult> {
+  const response = await apiFetch(`${API_URL}/api/collection-tasks/bulk-manage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, task_ids: taskIds }),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  const result = await parseJsonResponse<Partial<CollectionTaskBulkManageResult>>(response);
+  return {
+    matched_count: result.matched_count ?? 0,
+    archived_count: result.archived_count ?? 0,
+    deleted_count: result.deleted_count ?? 0,
+    skipped_count: result.skipped_count ?? 0,
+    restored_count: result.restored_count ?? 0,
+    archived_ids: result.archived_ids ?? [],
+    deleted_ids: result.deleted_ids ?? [],
+    restored_ids: result.restored_ids ?? [],
+    skipped_ids: result.skipped_ids ?? [],
+    skipped_reasons: result.skipped_reasons ?? {},
+  };
+}
+
+export type CollectionTaskBulkRunResult = {
+  started_ids: number[];
+  skipped_ids: number[];
+  skipped_reasons: Record<string, string>;
+  capacity: number;
+  active_count: number;
+  message: string;
+};
+
+export async function bulkRunCollectionTasks(taskIds: number[]): Promise<CollectionTaskBulkRunResult> {
+  const response = await apiFetch(`${API_URL}/api/collection-tasks/bulk-run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_ids: taskIds }),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return parseJsonResponse<CollectionTaskBulkRunResult>(response);
+}
 
 export async function deleteCollectionTask(id: number): Promise<CollectionTaskDeleteResult> {
   const response = await apiFetch(`${API_URL}/api/collection-tasks/${id}`, {
@@ -1482,6 +1652,329 @@ export async function recordMessageTemplateUse(id: number): Promise<MessageTempl
 export async function duplicateMessageTemplate(id: number): Promise<MessageTemplate> {
   const response = await apiFetch(`${API_URL}/api/message-templates/${id}/duplicate`, {
     method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export type KnowledgeBase = {
+  id: number;
+  workspace_id: number;
+  product_id: number;
+  name: string;
+  description: string | null;
+  document_count: number;
+  chunk_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type KnowledgeDocument = {
+  id: number;
+  knowledge_base_id: number;
+  workspace_id: number;
+  product_id: number;
+  file_name: string;
+  file_type: string;
+  source_path: string | null;
+  uploaded_file_path: string | null;
+  status: "pending" | "processing" | "ready" | "failed" | string;
+  error_message: string | null;
+  chunk_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type KnowledgeChunk = {
+  id: number;
+  document_id: number;
+  knowledge_base_id: number;
+  product_id: number;
+  chunk_index: number;
+  title: string | null;
+  content: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+export type KnowledgeSearchResult = {
+  chunk_id: number;
+  document_id: number;
+  document_name: string;
+  title: string | null;
+  section: string | null;
+  content: string;
+  score: number;
+  metadata: Record<string, unknown>;
+};
+
+export type ScriptRecommendPayload = {
+  influencer_id: number;
+  user_intent?: string;
+  selected_script_ids?: number[];
+  contact_status?: string | null;
+  followup_status?: string | null;
+};
+
+export type MatchedKnowledgeItem = {
+  document: string;
+  section?: string | null;
+  summary: string;
+};
+
+export type ScriptRecommendResponse = {
+  recommended_script_id: string | null;
+  recommended_script_title: string;
+  final_message: string;
+  reason: string;
+  matched_knowledge: MatchedKnowledgeItem[];
+  tone: string;
+  risk_notes: string[];
+  provider: string;
+  configured: boolean;
+  error_message?: string | null;
+};
+
+export type OutreachPreviewItem = {
+  influencer_id: number;
+  username: string;
+  display_name: string | null;
+  recipient: string | null;
+  subject: string;
+  body: string;
+  reason: string;
+  matched_knowledge: MatchedKnowledgeItem[];
+  risk_notes: string[];
+  tone: string;
+  can_send: boolean;
+  generated_by_ai: boolean;
+  provider: string;
+  error_message: string | null;
+};
+
+export type OutreachBatchPreviewResponse = {
+  items: OutreachPreviewItem[];
+  summary: {
+    total: number;
+    generated: number;
+    missing_email: number;
+    failed: number;
+  };
+};
+
+export type OutreachBatchSendResponse = {
+  items: Array<{
+    influencer_id: number;
+    username: string;
+    recipient: string | null;
+    subject: string;
+    body: string;
+    status: string;
+    email_log_id: number | null;
+    error_message: string | null;
+    generated_by_ai: boolean;
+  }>;
+  summary: {
+    total: number;
+    generated: number;
+    sent: number;
+    pending: number;
+    failed: number;
+    skipped_missing_email: number;
+  };
+  dry_run: boolean;
+};
+
+export async function previewOutreachBatch(payload: {
+  influencer_ids: number[];
+  user_intent?: string;
+  limit?: number;
+}): Promise<OutreachBatchPreviewResponse> {
+  const response = await apiFetch(`${API_URL}/api/email/outreach/preview-batch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function sendOutreachBatch(payload: {
+  influencer_ids: number[];
+  user_intent?: string;
+  dry_run?: boolean;
+}): Promise<OutreachBatchSendResponse> {
+  const response = await apiFetch(`${API_URL}/api/email/outreach/send-batch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchKnowledgeBases(): Promise<KnowledgeBase[]> {
+  const response = await apiFetch(`${API_URL}/api/knowledge-bases`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function createKnowledgeBase(payload: {
+  name: string;
+  description?: string | null;
+}): Promise<KnowledgeBase> {
+  const response = await apiFetch(`${API_URL}/api/knowledge-bases`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchKnowledgeDocuments(params: {
+  page?: number;
+  pageSize?: number;
+  knowledgeBaseId?: number;
+} = {}): Promise<PaginatedResponse<KnowledgeDocument>> {
+  const query = new URLSearchParams();
+  query.set("page", String(params.page ?? 1));
+  query.set("page_size", String(params.pageSize ?? 20));
+  if (params.knowledgeBaseId) {
+    query.set("knowledge_base_id", String(params.knowledgeBaseId));
+  }
+  const response = await apiFetch(`${API_URL}/api/knowledge-documents?${query.toString()}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchKnowledgeDocumentChunks(
+  documentId: number,
+  params: { page?: number; pageSize?: number } = {},
+): Promise<PaginatedResponse<KnowledgeChunk>> {
+  const query = new URLSearchParams();
+  query.set("page", String(params.page ?? 1));
+  query.set("page_size", String(params.pageSize ?? 50));
+  const response = await apiFetch(
+    `${API_URL}/api/knowledge-documents/${documentId}/chunks?${query.toString()}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function uploadKnowledgeDocument(
+  file: File,
+  knowledgeBaseId?: number,
+): Promise<KnowledgeDocument> {
+  const form = new FormData();
+  form.append("file", file);
+  if (knowledgeBaseId) {
+    form.append("knowledge_base_id", String(knowledgeBaseId));
+  }
+  const response = await apiFetch(`${API_URL}/api/knowledge-documents/upload`, {
+    method: "POST",
+    body: form,
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export type KnowledgeImportPreset = {
+  id: string;
+  label: string;
+  file_path: string;
+  available: boolean;
+};
+
+export async function fetchKnowledgeImportPresets(): Promise<KnowledgeImportPreset[]> {
+  const response = await apiFetch(`${API_URL}/api/knowledge-documents/import-presets`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function importKnowledgeDocument(payload: {
+  file_path: string;
+  knowledge_base_id?: number;
+}): Promise<KnowledgeDocument> {
+  const response = await apiFetch(`${API_URL}/api/knowledge-documents/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function reprocessKnowledgeDocument(documentId: number): Promise<KnowledgeDocument> {
+  const response = await apiFetch(`${API_URL}/api/knowledge-documents/${documentId}/reprocess`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function deleteKnowledgeDocument(documentId: number): Promise<void> {
+  const response = await apiFetch(`${API_URL}/api/knowledge-documents/${documentId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+}
+
+export async function searchKnowledge(
+  query: string,
+  params: { knowledgeBaseId?: number; limit?: number } = {},
+): Promise<KnowledgeSearchResult[]> {
+  const search = new URLSearchParams();
+  search.set("q", query);
+  if (params.knowledgeBaseId) {
+    search.set("knowledge_base_id", String(params.knowledgeBaseId));
+  }
+  if (params.limit) {
+    search.set("limit", String(params.limit));
+  }
+  const response = await apiFetch(`${API_URL}/api/knowledge-search?${search.toString()}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function recommendScript(payload: ScriptRecommendPayload): Promise<ScriptRecommendResponse> {
+  const response = await apiFetch(`${API_URL}/api/scripts/recommend`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
   if (!response.ok) {
     throw new Error(await parseError(response));

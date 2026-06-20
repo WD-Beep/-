@@ -22,12 +22,13 @@ test("url-only link import matchers accept backend-supported URLs", () => {
   assert.equal(matchesPinterestLinkImportUrl("https://www.pinterest.com/pin/123/"), true);
   assert.equal(matchesLtkLinkImportUrl("https://www.shopltk.com/explore/example_user"), true);
   assert.equal(matchesShopmyLinkImportUrl("https://shopmy.us/example_user"), true);
+  assert.equal(matchesShopmyLinkImportUrl("https://shopmy.us/shop/example_user"), true);
 });
 
 test("url-only link import matchers reject unsupported path shapes", () => {
   assert.equal(matchesPinterestLinkImportUrl("https://www.pinterest.com/some_user/some_board/"), false);
   assert.equal(matchesLtkLinkImportUrl("https://shopltk.com/not-explore/example_user"), false);
-  assert.equal(matchesShopmyLinkImportUrl("https://shopmy.us/shop/example"), false);
+  assert.equal(matchesShopmyLinkImportUrl("https://shopmy.us/shop"), false);
 });
 
 test("parseLinkImportPreview rejects unsupported Pinterest LTK ShopMy URLs", () => {
@@ -35,7 +36,7 @@ test("parseLinkImportPreview rejects unsupported Pinterest LTK ShopMy URLs", () 
     [
       "https://www.pinterest.com/some_user/some_board/",
       "https://shopltk.com/not-explore/example_user",
-      "https://shopmy.us/shop/example",
+      "https://shopmy.us/shop",
     ].join("\n"),
   );
   assert.equal(preview.validCount, 0);
@@ -49,10 +50,11 @@ test("parseLinkImportPreview accepts supported Pinterest LTK ShopMy URLs", () =>
       "https://www.pinterest.com/example_user/",
       "https://shopltk.com/explore/example_user",
       "https://shopmy.us/example_user",
+      "https://shopmy.us/shop/example_user",
     ].join("\n"),
   );
   assert.equal(preview.counts.pinterest, 2);
   assert.equal(preview.counts.ltk, 1);
-  assert.equal(preview.counts.shopmy, 1);
+  assert.equal(preview.counts.shopmy, 2);
   assert.equal(preview.invalidCount, 0);
 });

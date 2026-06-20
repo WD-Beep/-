@@ -8,6 +8,8 @@ from app.schemas.common import ORMModel, TimestampMixin
 
 
 from app.services.platform_types import KEYWORD_DISCOVERY_PLATFORMS, URL_ONLY_PLATFORMS
+
+KEYWORD_SEED_PLATFORMS = frozenset({"pinterest", "shopmy"})
 from app.services.url_parser import split_link_import_entries, validate_link_import_url_lines
 
 
@@ -47,9 +49,15 @@ def build_link_import_task_fields(valid: list[dict[str, str]]) -> dict[str, Any]
                 "weak_keywords": list(entry.get("weak_keywords") or []),
                 "negative_keywords": list(entry.get("negative_keywords") or []),
                 "search_keywords": list(entry.get("search_keywords") or []),
+                "exact_phrases": list(entry.get("exact_phrases") or []),
+                "variant_attributes": list(entry.get("variant_attributes") or []),
+                "broad_category_keywords": list(entry.get("broad_category_keywords") or []),
+                "product_videos": list(entry.get("product_videos") or []),
                 "title_slug": entry.get("title_slug"),
+                "product_title": entry.get("product_title"),
                 "brand": entry.get("brand"),
                 "product_category": entry.get("product_category"),
+                "require_brand_match": entry.get("require_brand_match"),
             }
             for entry in amazon_entries
         ]
@@ -168,10 +176,14 @@ def validate_url_only_platforms_for_mode(
     """Pinterest / LTK / ShopMy 仅支持链接导入，不可用于关键词/自动发现/竞品商品发现。"""
     if collection_mode in (CollectionMode.LINK_IMPORT, CollectionMode.URLS, CollectionMode.COMMENT_AUTHORS):
         return
+    if collection_mode == CollectionMode.LINK_SEED_DISCOVERY:
+        return
     if collection_mode not in ACTIVE_DISCOVERY_MODE_BLOCK:
         return
     resolved = _resolved_task_platforms(platform, platforms)
     blocked = set(resolved) & URL_ONLY_PLATFORMS
+    if collection_mode in (CollectionMode.KEYWORD, CollectionMode.DISCOVERY, CollectionMode.MIXED):
+        blocked = blocked - KEYWORD_SEED_PLATFORMS
     if blocked:
         labels = [URL_ONLY_PLATFORM_LABELS.get(name, name) for name in sorted(blocked)]
         if len(labels) == 1:
@@ -184,6 +196,23 @@ def validate_url_only_platforms_for_mode(
             raise ValueError(
                 "竞品商品发现仅支持 Instagram / YouTube / TikTok / Facebook 作为后续发现平台"
             )
+
+
+def validate_seed_only_discovery_mode(
+    collection_mode: CollectionMode,
+    platform: str,
+    platforms: list[str],
+) -> None:
+    if collection_mode not in (CollectionMode.KEYWORD, CollectionMode.DISCOVERY, CollectionMode.MIXED):
+        return
+    resolved = _resolved_task_platforms(platform, platforms)
+    if not resolved:
+        return
+    if set(resolved).issubset(KEYWORD_SEED_PLATFORMS):
+        labels = [URL_ONLY_PLATFORM_LABELS.get(name, name) for name in resolved]
+        raise ValueError(
+            f"{' / '.join(labels)} 鍏抽敭璇嶉噰闆嗚浣跨敤銆岄瀵艰喘 seed 鑷姩鍙戠幇銆嶏紝涓嶈鐢ㄦ櫘閫氬叧閿瘝鍙戠幇"
+        )
 
 
 def normalize_platform_list(platforms: list[str] | None) -> list[str]:
@@ -393,6 +422,36 @@ class CollectionTaskCreate(BaseModel):
             if not _has_amazon_product_seeds(self):
                 valid = validate_link_import_url_lines(urls)
                 _finalize_link_import_urls(self, valid)
+        elif self.collection_mode == CollectionMode.LINK_SEED_DISCOVERY:
+            checkpoint = dict(self.run_checkpoint or {})
+            if urls and not checkpoint.get("amazon_product_seeds"):
+                seeds = []
+                normalized_urls: list[str] = []
+                for raw in urls:
+                    from app.services.amazon_url import parse_amazon_product_input
+
+                    seed = parse_amazon_product_input(raw)
+                    if seed:
+                        seeds.append(seed)
+                        normalized_urls.append(str(seed.get("normalized_url") or raw))
+                    else:
+                        normalized_urls.append(raw)
+                if seeds:
+                    self.input_urls = list(dict.fromkeys(normalized_urls))
+                    checkpoint["amazon_product_seeds"] = seeds
+                    self.run_checkpoint = checkpoint
+                    for seed in seeds:
+                        asin = str(seed.get("asin") or "").strip()
+                        if asin and asin not in self.keywords:
+                            self.keywords.append(asin)
+            if not keywords and not urls and not (self.category or "").strip():
+                raise ValueError("导购 seed 自动发现需填写关键词或类目")
+            resolved = _resolved_task_platforms(self.platform, self.platforms)
+            if not resolved:
+                self.platforms = ["ltk", "shopmy", "pinterest"]
+                self.platform = "multi"
+            elif not set(resolved) & URL_ONLY_PLATFORMS:
+                raise ValueError("导购 seed 自动发现请至少选择 LTK、ShopMy 或 Pinterest 作为 seed 来源平台")
         elif self.collection_mode == CollectionMode.COMPETITOR_PRODUCT:
             if not keywords and not urls:
                 raise ValueError("竞品商品发现需填写 Amazon 链接、ASIN 或商品关键词")
@@ -402,9 +461,9 @@ class CollectionTaskCreate(BaseModel):
                 seeds = []
                 normalized_urls: list[str] = []
                 for raw in urls:
-                    from app.services.amazon_url import parse_amazon_product_url
+                    from app.services.amazon_url import parse_amazon_product_input
 
-                    seed = parse_amazon_product_url(raw)
+                    seed = parse_amazon_product_input(raw)
                     if seed:
                         seeds.append(seed)
                         normalized_urls.append(seed["normalized_url"])
@@ -445,6 +504,7 @@ class CollectionTaskCreate(BaseModel):
             raise ValueError("最低粉丝数不能大于最高粉丝数")
         self.filter_include_keywords = [k.strip() for k in self.filter_include_keywords if k and k.strip()]
         self.filter_exclude_keywords = [k.strip() for k in self.filter_exclude_keywords if k and k.strip()]
+        validate_seed_only_discovery_mode(self.collection_mode, self.platform, self.platforms)
         validate_url_only_platforms_for_mode(self.collection_mode, self.platform, self.platforms)
         return self
 
@@ -544,6 +604,11 @@ class CollectionTaskUpdate(BaseModel):
                 self.comment_discovery_enabled = fields["comment_discovery_enabled"]
                 self.run_checkpoint = fields["run_checkpoint"]
         if self.collection_mode is not None:
+            validate_seed_only_discovery_mode(
+                self.collection_mode,
+                self.platform or "",
+                self.platforms or [],
+            )
             validate_url_only_platforms_for_mode(
                 self.collection_mode,
                 self.platform or "",
@@ -560,12 +625,16 @@ class CollectionTaskUpdate(BaseModel):
 
 class CollectionTaskRead(CollectionTaskBase, TimestampMixin, ORMModel):
     id: int
+    is_archived: bool = False
+    archived_at: datetime | None = None
     stale: bool = False
     recoverable: bool = False
     stale_after_seconds: int = Field(default=0, ge=0)
     is_ineffective: bool = False
-    effectiveness_category: Literal["effective", "low_value_result", "no_result"] = "no_result"
+    effectiveness_category: Literal["high_value", "effective", "low_value_result", "no_result", "failed"] = "no_result"
     has_retention_traces: bool = False
+    management_tags: list[str] = Field(default_factory=list)
+    is_possible_duplicate: bool = False
 
 
 class CollectionTaskFilter(BaseModel):
@@ -573,7 +642,17 @@ class CollectionTaskFilter(BaseModel):
     platform: str | None = None
     status: CollectionTaskStatus | None = None
     search: str | None = None
-    effectiveness: Literal["effective", "ineffective", "low_value_result", "no_result"] | None = None
+    effectiveness: Literal["high_value", "effective", "ineffective", "low_value_result", "no_result", "failed"] | None = None
+    task_view: Literal[
+        "all",
+        "high_value",
+        "effective",
+        "ineffective",
+        "low_value_result",
+        "no_result",
+        "test_history",
+        "archived",
+    ] | None = None
 
 
 class CollectionTaskBulkDelete(BaseModel):
@@ -587,6 +666,42 @@ class CollectionTaskBulkDeleteResult(BaseModel):
     deleted_ids: list[int] = Field(default_factory=list)
     archived_ids: list[int] = Field(default_factory=list)
     skipped_ids: list[int] = Field(default_factory=list)
+
+
+class CollectionTaskBulkRun(BaseModel):
+    task_ids: list[int] = Field(min_length=1, max_length=50)
+
+
+class CollectionTaskBulkRunResult(BaseModel):
+    started_ids: list[int] = Field(default_factory=list)
+    skipped_ids: list[int] = Field(default_factory=list)
+    skipped_reasons: dict[str, str] = Field(default_factory=dict)
+    capacity: int = 1
+    active_count: int = 0
+    message: str = ""
+
+
+class CollectionTaskBulkManage(BaseModel):
+    action: Literal[
+        "archive_test_history",
+        "delete_no_result",
+        "restore_archived",
+        "archive_duplicates",
+    ]
+    task_ids: list[int] = Field(default_factory=list, max_length=200)
+
+
+class CollectionTaskBulkManageResult(BaseModel):
+    matched_count: int = 0
+    archived_count: int = 0
+    deleted_count: int = 0
+    skipped_count: int = 0
+    restored_count: int = 0
+    archived_ids: list[int] = Field(default_factory=list)
+    deleted_ids: list[int] = Field(default_factory=list)
+    restored_ids: list[int] = Field(default_factory=list)
+    skipped_ids: list[int] = Field(default_factory=list)
+    skipped_reasons: dict[str, str] = Field(default_factory=dict)
 
 
 class CollectionTaskDeleteResult(BaseModel):

@@ -10,8 +10,8 @@ class InfluencerAnalysisResult(BaseModel):
     tags: list[str]
     risk_level: str
     score_reason: str
-    source: str = Field(description="kimi | heuristic | heuristic_fallback")
-    error_message: str | None = Field(default=None, description="Kimi 调用失败时的错误详情")
+    source: str = Field(description="openai | heuristic | heuristic_fallback")
+    error_message: str | None = Field(default=None, description="LLM 调用失败时的错误详情")
 
 
 class AnalyzeInfluencerResponse(BaseModel):

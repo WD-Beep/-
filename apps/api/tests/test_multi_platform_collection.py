@@ -10,19 +10,24 @@ import pytest
 from pydantic import ValidationError
 
 from app.models.collection_task import CollectionTask
-from app.models.enums import CollectionMode, CollectionTaskStatus
+from app.models.enums import CandidateStatus, CollectionMode, CollectionTaskStatus
 from app.schemas.collection_task import CollectionTaskCreate
 from app.services.collection_runner import (
     CollectionRunnerService,
     _annotate_instagram_failure_in_aggregate,
+    _split_keyword_seed_platforms,
     run_instagram_pipeline_with_provider_check,
 )
 from app.services.link_import import LinkImportService
+from app.services.link_import import LinkImportExecuteResult
 from app.services.multi_platform_runner import (
+    build_multi_platform_error_prefix,
     build_multi_platform_summary,
     determine_multi_platform_status,
     merge_platform_results,
 )
+from app.services.shopping_seed_runner import KeywordSeedDiscoveryResult
+from app.services.collect_errors import summarize_errors
 from app.services.instagram_pipeline import PipelineRunStats
 from app.services.platform_types import PlatformDiscoveryResult
 from app.services.influencer_persistence import (
@@ -73,6 +78,108 @@ def test_link_import_profile_platforms_still_supported():
         )
         assert task.collection_mode == CollectionMode.LINK_IMPORT
         assert task.platform == platform
+
+
+def test_keyword_seed_platforms_split_from_provider_discovery():
+    task = CollectionTask(
+        name="keyword seed",
+        collection_mode=CollectionMode.DISCOVERY.value,
+        platform="multi",
+        platforms=["instagram", "pinterest", "shopmy"],
+        keywords=["travel bag"],
+    )
+    discovery_platforms, seed_platforms = _split_keyword_seed_platforms(
+        task,
+        ["instagram", "pinterest", "shopmy"],
+    )
+    assert discovery_platforms == ["instagram"]
+    assert seed_platforms == ["pinterest", "shopmy"]
+
+
+def test_keyword_seed_platforms_run_seed_discovery_from_main_runner(monkeypatch):
+    task = CollectionTask(
+        id=456,
+        name="shopmy keyword seed",
+        collection_mode=CollectionMode.DISCOVERY.value,
+        platform="shopmy",
+        platforms=["shopmy"],
+        product_id=1,
+        keywords=["travel bag"],
+        discovery_limit=10,
+        status=CollectionTaskStatus.PENDING.value,
+        schedule_enabled=False,
+        email_enabled=False,
+    )
+    calls = []
+    inserted_rows = []
+
+    exec_result = LinkImportExecuteResult(
+        new_count=1,
+        updated_count=0,
+        not_inserted_count=0,
+        filtered_out_count=0,
+        hydrated_profile_count=1,
+        candidate_rows=[{"platform": "shopmy", "username": "seed_creator"}],
+    )
+
+    async def fake_seed_discovery(db, task_arg, *, run_at=None):
+        calls.append((db, task_arg, run_at))
+        return KeywordSeedDiscoveryResult(
+            exec_result=exec_result,
+            discovered_count=1,
+            seed_enriched_count=1,
+            platform_failed_count=0,
+            skipped_platform_count=0,
+        )
+
+    async def noop_async(*_args, **_kwargs):
+        return None
+
+    async def empty_existing(*_args, **_kwargs):
+        return {}
+
+    async def capture_bulk_insert(_db, _task_id, rows, **_kwargs):
+        inserted_rows.extend(rows)
+
+    monkeypatch.setattr(CollectionRunnerService, "_claim_collection_run", noop_async)
+    monkeypatch.setattr(CollectionRunnerService, "_release_collection_run", noop_async)
+    monkeypatch.setattr("app.services.collection_runner.InfluencerPersistenceService.find_global_profiles_batch", empty_existing)
+    monkeypatch.setattr(
+        "app.services.collection_runner.InfluencerPersistenceService.find_product_influencers_batch",
+        empty_existing,
+    )
+    monkeypatch.setattr("app.services.collection_runner.TaskCandidateService.clear_for_task", noop_async)
+    monkeypatch.setattr("app.services.collection_runner.TaskCandidateService.bulk_insert", capture_bulk_insert)
+    monkeypatch.setattr("app.services.collection_runner.TaskCandidateService.sync_task_inserted_stats", noop_async)
+    monkeypatch.setattr("app.services.collection_runner.TaskInfluencerService.refresh_task_stats", noop_async)
+    monkeypatch.setattr(
+        "app.services.shopping_seed_runner.ShoppingSeedDiscoveryService.run_keyword_seed_discovery",
+        fake_seed_discovery,
+    )
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+        async def refresh(self, *_args, **_kwargs):
+            return None
+
+        async def execute(self, *_args, **_kwargs):
+            return None
+
+        async def flush(self):
+            return None
+
+    result = anyio.run(CollectionRunnerService.run_task, FakeDb(), task)
+
+    assert len(calls) == 1
+    assert result["new_count"] == 1
+    assert result["inserted_count"] == 1
+    assert result["profile_fetched_count"] == 1
+    assert task.status == CollectionTaskStatus.COMPLETED_WITH_RESULTS.value
+    assert task.result_count == 1
+    assert task.run_checkpoint["keyword_seed_discovery"]["seed_platforms"] == ["shopmy"]
+    assert inserted_rows == exec_result.candidate_rows
 
 
 def test_collection_runner_routes_link_import_tasks_to_link_import_service(monkeypatch):
@@ -287,3 +394,360 @@ def test_collection_persistence_writes_product_and_global_records():
 def test_create_rejects_unknown_platform():
     with pytest.raises(ValidationError):
         CollectionTaskCreate(**_discovery_payload(platform="twitter", platforms=["twitter"]))
+
+
+def test_multi_platform_summary_preserves_platform_error_detail_and_skip_reason():
+    aggregate = merge_platform_results(
+        instagram_result=None,
+        instagram_funnel=None,
+        instagram_errors=["[instagram] Apify actor timed out after 90s"],
+        instagram_candidate_rows=[],
+        instagram_collected=[],
+        platform_results=[
+            PlatformDiscoveryResult(
+                platform="tiktok",
+                api_requests=8,
+                fatal=True,
+                errors=[
+                    "query HOMEHIVE clear PVC jewelry bags: API Direct 429 rate limit",
+                    "query HOMEHIVE 20 clear bags: actor timeout",
+                ],
+            ),
+            PlatformDiscoveryResult(platform="facebook", api_requests=9, errors=[]),
+            PlatformDiscoveryResult(
+                platform="youtube",
+                api_requests=0,
+                skipped=True,
+                skip_reason="YouTube 未执行：API Direct Token 未配置",
+            ),
+        ],
+    )
+    status = determine_multi_platform_status(
+        aggregate,
+        inserted_count=0,
+        instagram_only=False,
+        instagram_fatal=True,
+    )
+    summary = build_multi_platform_summary(
+        aggregate,
+        status=status,
+        inserted_count=0,
+        target_qualified_count=50,
+        overfetch_stop_reason="平台无更多结果",
+    )
+
+    assert status == CollectionTaskStatus.PARTIAL_FAILED
+    assert "instagram: Apify actor timed out after 90s" in summary
+    assert "tiktok: failed (API 8 calls): query HOMEHIVE clear PVC jewelry bags: API Direct 429 rate limit" in summary
+    assert "facebook: no same-product results (API 9 calls)" in summary
+    assert "youtube: skipped (API 0 calls): YouTube 未执行：API Direct Token 未配置" in summary
+    assert "queries 2" in summary
+
+
+def test_multi_platform_all_apis_normal_empty_is_completed_no_results():
+    aggregate = merge_platform_results(
+        instagram_result=object(),
+        instagram_funnel=PipelineRunStats(discovered_count=0),
+        instagram_errors=[],
+        instagram_candidate_rows=[],
+        instagram_collected=[],
+        platform_results=[
+            PlatformDiscoveryResult(platform="tiktok", api_requests=2),
+            PlatformDiscoveryResult(platform="facebook", api_requests=3),
+            PlatformDiscoveryResult(platform="youtube", api_requests=4),
+        ],
+    )
+    status = determine_multi_platform_status(
+        aggregate,
+        inserted_count=0,
+        instagram_only=False,
+        instagram_fatal=False,
+    )
+    summary = build_multi_platform_summary(
+        aggregate,
+        status=status,
+        inserted_count=0,
+        target_qualified_count=50,
+    )
+
+    assert status == CollectionTaskStatus.COMPLETED_NO_RESULTS
+    assert "多平台任务完成，未发现同款产品合作红人" in summary
+    assert "平台无更多结果" not in summary
+    assert "未发现同款产品合作红人" in summary
+
+
+def test_multi_platform_error_message_uses_platform_api_prefix_not_instagram_only():
+    aggregate = merge_platform_results(
+        instagram_result=None,
+        instagram_funnel=None,
+        instagram_errors=["[instagram] Apify actor timed out after 90s"],
+        instagram_candidate_rows=[],
+        instagram_collected=[],
+        platform_results=[
+            PlatformDiscoveryResult(
+                platform="tiktok",
+                api_requests=8,
+                fatal=True,
+                errors=["query HOMEHIVE clear PVC jewelry bags: API Direct 429 rate limit"],
+            ),
+            PlatformDiscoveryResult(
+                platform="youtube",
+                api_requests=0,
+                skipped=True,
+                skip_reason="YouTube 未执行：API Direct Token 未配置",
+            ),
+        ],
+    )
+
+    message = summarize_errors(
+        aggregate.collection_errors,
+        prefix=build_multi_platform_error_prefix(
+            aggregate,
+            discovery_api_failed=True,
+            instagram_only=False,
+        ),
+    )
+
+    assert message is not None
+    assert message.startswith("多平台采集部分平台异常：")
+    assert "Instagram 采集 API 失败" not in message
+    assert "Apify actor timed out after 90s" in message
+    assert "API Direct 429 rate limit" in message
+    assert "YouTube 未执行：API Direct Token 未配置" in message
+
+
+def test_facebook_slow_empty_discovery_is_completed_no_results():
+    aggregate = merge_platform_results(
+        instagram_result=None,
+        instagram_funnel=None,
+        instagram_errors=[],
+        instagram_candidate_rows=[],
+        instagram_collected=[],
+        platform_results=[
+            PlatformDiscoveryResult(
+                platform="facebook",
+                api_requests=2,
+                errors=[
+                    "Facebook Apify 搜索「amazon home decor」耗时 45s 但未返回候选，可能关键词无结果或平台响应慢",
+                    "Facebook 发现阶段结束：Apify/API 响应较慢或关键词暂无匹配结果（共搜索 2/2 个关键词）",
+                ],
+                fatal=False,
+            ),
+        ],
+    )
+    status = determine_multi_platform_status(
+        aggregate,
+        inserted_count=0,
+        instagram_only=False,
+        instagram_fatal=False,
+    )
+
+    assert status == CollectionTaskStatus.COMPLETED_NO_RESULTS
+    assert "facebook" in aggregate.platform_completed
+    assert not aggregate.platform_failures
+
+
+def test_multi_platform_api_zero_with_error_is_skipped_not_no_result():
+    aggregate = merge_platform_results(
+        instagram_result=object(),
+        instagram_funnel=PipelineRunStats(discovered_count=0),
+        instagram_errors=[],
+        instagram_candidate_rows=[],
+        instagram_collected=[],
+        platform_results=[
+            PlatformDiscoveryResult(
+                platform="youtube",
+                api_requests=0,
+                errors=["youtube 平台发现超时（90s），已跳过该平台继续其他平台"],
+                skip_reason="youtube 平台发现超时（90s），已跳过该平台继续其他平台",
+            ),
+            PlatformDiscoveryResult(platform="facebook", api_requests=3),
+        ],
+    )
+    status = determine_multi_platform_status(
+        aggregate,
+        inserted_count=0,
+        instagram_only=False,
+        instagram_fatal=False,
+    )
+    summary = build_multi_platform_summary(
+        aggregate,
+        status=status,
+        inserted_count=0,
+        target_qualified_count=50,
+    )
+
+    assert status == CollectionTaskStatus.PARTIAL_FAILED
+    assert "youtube: skipped (API 0 calls): youtube 平台发现超时" in summary
+    assert "youtube: no same-product results" not in summary
+
+
+def test_multi_platform_summary_compacts_many_instagram_errors():
+    aggregate = merge_platform_results(
+        instagram_result=object(),
+        instagram_funnel=PipelineRunStats(discovered_count=0),
+        instagram_errors=[
+            "[instagram] Hashtag 帖子 post#1 post_author_missing: 无法提取作者主页",
+            "[instagram] Hashtag ['b0d9w576kq'] 共 1 条帖子，但未解析到任何作者主页",
+            "[instagram] Hashtag ['homehivejewelrybags'] 共 1 条帖子，但未解析到任何作者主页",
+        ],
+        instagram_candidate_rows=[],
+        instagram_collected=[],
+        platform_results=[],
+    )
+
+    summary = build_multi_platform_summary(
+        aggregate,
+        status=CollectionTaskStatus.COMPLETED_NO_RESULTS,
+        inserted_count=0,
+        target_qualified_count=50,
+    )
+
+    assert "post#1" in summary
+    assert "b0d9w576kq" in summary
+    assert "homehivejewelrybags" not in summary
+    assert "另有 1 条详情见错误详情" in summary
+    assert len(aggregate.collection_errors) == 3
+
+
+def test_merge_platform_results_preserves_same_product_filtered_counts_and_rows():
+    aggregate = merge_platform_results(
+        instagram_result=object(),
+        instagram_funnel=PipelineRunStats(discovered_count=0),
+        instagram_errors=[],
+        instagram_candidate_rows=[],
+        instagram_collected=[],
+        platform_results=[
+            PlatformDiscoveryResult(
+                platform="youtube",
+                items=[],
+                profiles=[],
+                candidate_rows=[
+                    {
+                        "username": "other_brand",
+                        "profile_url": "https://www.youtube.com/@other-brand",
+                        "platform": "youtube",
+                        "status": CandidateStatus.FILTERED_OUT.value,
+                        "failure_reason": "no_same_product_match",
+                    }
+                ],
+                discovered_count=3,
+                deduped_count=2,
+                profile_fetched_count=2,
+                api_requests=8,
+                errors=["YouTube same-product filter kept 0/2: missing_brand_for_same_product 2"],
+            )
+        ],
+    )
+
+    assert aggregate.funnel.discovered_count == 3
+    assert aggregate.funnel.deduped_count == 2
+    assert aggregate.funnel.profile_fetched_count == 2
+    assert aggregate.funnel.filtered_out_count == 1
+    assert aggregate.candidate_rows[0]["failure_reason"] == "no_same_product_match"
+    assert "youtube" in aggregate.platform_completed
+    assert "youtube" not in aggregate.platform_failures
+
+
+def test_multi_platform_filtered_candidates_are_not_failed():
+    aggregate = merge_platform_results(
+        instagram_result=object(),
+        instagram_funnel=PipelineRunStats(discovered_count=3, deduped_count=3, profile_fetched_count=3),
+        instagram_errors=[],
+        instagram_candidate_rows=[],
+        instagram_collected=[],
+        platform_results=[],
+    )
+    aggregate.funnel.discovered_count = 3
+    aggregate.funnel.filtered_out_count = 3
+    status = determine_multi_platform_status(
+        aggregate,
+        inserted_count=0,
+        instagram_only=False,
+        instagram_fatal=False,
+    )
+    summary = build_multi_platform_summary(
+        aggregate,
+        status=status,
+        inserted_count=0,
+        target_qualified_count=50,
+        filtered_out=3,
+    )
+
+    assert status == CollectionTaskStatus.COMPLETED_NO_RESULTS
+    assert "发现候选但未达入库条件" in summary
+
+
+def test_facebook_only_empty_discovery_is_completed_no_results():
+    aggregate = merge_platform_results(
+        instagram_result=None,
+        instagram_funnel=None,
+        instagram_errors=[],
+        instagram_candidate_rows=[],
+        instagram_collected=[],
+        platform_results=[
+            PlatformDiscoveryResult(
+                platform="facebook",
+                api_requests=2,
+                errors=[
+                    "Facebook 发现阶段结束：关键词/API 暂无候选结果（共搜索 2/2 个关键词）"
+                ],
+                fatal=False,
+            ),
+        ],
+    )
+    status = determine_multi_platform_status(
+        aggregate,
+        inserted_count=0,
+        instagram_only=False,
+        instagram_fatal=False,
+    )
+    summary = build_multi_platform_summary(
+        aggregate,
+        status=status,
+        inserted_count=0,
+        target_qualified_count=3,
+    )
+
+    assert status == CollectionTaskStatus.COMPLETED_NO_RESULTS
+    assert "facebook" in aggregate.platform_completed
+    assert "facebook" not in [failure.split(":")[0] for failure in aggregate.platform_failures]
+    assert "暂无候选结果" in summary
+    assert aggregate.discovery_api_failed is False
+
+
+def test_apply_terminal_task_state_clears_stale_interrupt_on_success():
+    from app.services.task_run_progress import apply_terminal_task_state
+
+    task = CollectionTask(
+        id=1,
+        name="youtube",
+        platform="youtube",
+        platforms=["youtube"],
+        keywords=["amazon"],
+        collection_mode="discovery",
+        status=CollectionTaskStatus.PARTIAL_FAILED.value,
+        error_message="任务已超时中断（阶段：discovery），可重新运行从 checkpoint 继续",
+        last_error="任务已超时中断（阶段：discovery），可重新运行从 checkpoint 继续",
+        status_summary="任务已超时中断（阶段：discovery），可重新运行从 checkpoint 继续",
+        run_checkpoint={
+            "interrupted": True,
+            "interrupted_stage": "discovery",
+            "interrupted_at": "2026-06-19T00:00:00+00:00",
+        },
+    )
+    # Simulate in-memory clears while DB still holds stale interrupt text.
+    task.error_message = None
+    task.last_error = None
+    apply_terminal_task_state(
+        task,
+        status=CollectionTaskStatus.COMPLETED_WITH_RESULTS,
+        errors=["任务已超时中断（阶段：discovery），可重新运行从 checkpoint 继续"],
+        prefix="多平台采集 API 失败：",
+    )
+
+    assert task.status == CollectionTaskStatus.COMPLETED_WITH_RESULTS.value
+    assert task.error_message is None
+    assert task.last_error is None
+    assert task.status_summary is None
+    assert task.run_checkpoint.get("interrupted") is None

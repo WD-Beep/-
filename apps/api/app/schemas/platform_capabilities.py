@@ -8,6 +8,9 @@ class PlatformCapabilityRead(BaseModel):
     message: str
     endpoints: list[str] = Field(default_factory=list)
     keyword_discovery: bool = False
+    native_keyword_discovery: bool = False
+    external_seed_discovery: bool = False
+    reverse_link_expansion: bool = False
     link_import: bool = False
     product_seed: bool = False
     link_import_hint: str | None = None
@@ -23,3 +26,7 @@ class PlatformCapabilitiesResponse(BaseModel):
     youtube_data_provider: str
     tiktok_data_provider: str = ""
     facebook_data_provider: str = ""
+    collection_max_running_tasks: int = Field(default=2, ge=1)
+    collection_profile_enrich_concurrency: int = Field(default=3, ge=1)
+    collection_profile_request_timeout_seconds: int = Field(default=20, ge=5)
+    collection_running_stale_seconds: int = Field(default=180, ge=30)

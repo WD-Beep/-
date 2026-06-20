@@ -22,7 +22,7 @@ from app.services.apify_instagram import _username_from_url
 from app.services.candidate_pool import hard_filter_failure_detail
 from app.services.collect_errors import summarize_errors
 from app.services.ai_service import analyze_influencer
-from app.services.collection_filters import evaluate_post_hydration_hard_filter
+from app.services.collection_filters import evaluate_post_hydration_hard_filter, PostHydrationHardFilterResult
 from app.services.contact_discovery import ContactDiscoveryService
 from app.services.high_value_filter import (
     assessment_row_fields,
@@ -62,6 +62,7 @@ from app.services.url_parser import (
 )
 from app.services.link_seed_enrichment import (
     LINK_SEED_PLATFORMS,
+    collected_profile_snapshot,
     enrich_link_seed_item,
     enrichment_meta_dict,
     link_seed_low_value_detail,
@@ -500,18 +501,47 @@ class LinkImportService:
         source_input_url: str | None = None,
         run_at: datetime,
         enrichment_meta: dict | None = None,
+        source_type: str | None = None,
+        source_discovery_type: str | None = None,
     ) -> dict:
         meta = {
             "source_input_url": source_input_url or getattr(item, "source_input_url", None),
         }
         if enrichment_meta:
             meta["link_seed_enrichment"] = enrichment_meta
+            meta["link_seed_platform"] = enrichment_meta.get("link_seed_platform")
+            meta["link_seed_profile_url"] = enrichment_meta.get("link_seed_profile_url")
+            meta["link_seed_username"] = enrichment_meta.get("link_seed_username")
+            enriched = enrichment_meta.get("enriched_platform") or enrichment_meta.get("primary_platform")
+            if enriched:
+                meta["enriched_platform"] = enriched
+            if enrichment_meta.get("enriched_profile_url"):
+                meta["enriched_profile_url"] = enrichment_meta.get("enriched_profile_url")
+            if enrichment_meta.get("enrichment_candidates"):
+                meta["enrichment_candidates"] = enrichment_meta.get("enrichment_candidates")
+            if enrichment_meta.get("selected_reason"):
+                meta["selected_reason"] = enrichment_meta.get("selected_reason")
+            for key in (
+                "discovery_source",
+                "discovery_query",
+                "source_platform",
+                "source_profile_url",
+                "source_post_url",
+                "source_input_url",
+            ):
+                if enrichment_meta.get(key):
+                    meta[key] = enrichment_meta.get(key)
+            detail_fetched = enrichment_meta.get("platform_detail_fetched") or enrichment_meta.get("instagram_detail_fetched")
+            if detail_fetched:
+                meta["instagram_detail_fetched"] = enrichment_meta.get("instagram_detail_fetched")
+                meta["platform_detail_fetched"] = enrichment_meta.get("platform_detail_fetched")
+                meta["profile_snapshot"] = collected_profile_snapshot(item)
         return {
             "username": item.username or "",
             "profile_url": item.profile_url,
             "platform": item.platform or "instagram",
-            "source_type": CandidateSourceType.INPUT_PROFILE.value,
-            "source_discovery_type": item.source_discovery_type or "url_profile",
+            "source_type": source_type or CandidateSourceType.LINK_IMPORT.value,
+            "source_discovery_type": source_discovery_type or item.source_discovery_type or "url_profile",
             "source_post_url": source_post_url or item.source_post_url,
             "source_meta": meta,
             "source_input_url": source_input_url or getattr(item, "source_input_url", None),
@@ -546,6 +576,25 @@ class LinkImportService:
         )
 
     @staticmethod
+    def _seed_enriched_detail_pending(enrichment_meta: dict | None) -> bool:
+        if not enrichment_meta:
+            return False
+        seed = str(enrichment_meta.get("link_seed_platform") or "").strip().lower()
+        if seed not in LINK_SEED_PLATFORMS:
+            return False
+        enriched = str(
+            enrichment_meta.get("enriched_platform") or enrichment_meta.get("primary_platform") or ""
+        ).strip().lower()
+        if not enriched or enriched in LINK_SEED_PLATFORMS:
+            return False
+        fetched = enrichment_meta.get("platform_detail_fetched") or enrichment_meta.get("instagram_detail_fetched")
+        return not bool(fetched)
+
+    @staticmethod
+    def _seed_enriched_instagram_detail_pending(enrichment_meta: dict | None) -> bool:
+        return LinkImportService._seed_enriched_detail_pending(enrichment_meta)
+
+    @staticmethod
     async def _process_import_item(
         db: AsyncSession,
         item: CollectedInfluencer,
@@ -557,6 +606,8 @@ class LinkImportService:
         task: CollectionTask | None,
         exec_result: LinkImportExecuteResult,
         enrichment_meta: dict | None = None,
+        source_type: str | None = None,
+        source_discovery_type: str | None = None,
     ) -> None:
         if source_post_url and not item.source_post_url:
             item.source_post_url = source_post_url
@@ -579,9 +630,18 @@ class LinkImportService:
             source_input_url=source_input_url or getattr(item, "source_input_url", None),
             run_at=run_at,
             enrichment_meta=enrichment_meta,
+            source_type=source_type,
+            source_discovery_type=source_discovery_type,
         )
 
         hard = evaluate_post_hydration_hard_filter(item, task)
+        if (
+            not hard.passed
+            and hard.reason == "below_min_followers"
+            and item.followers_count is None
+            and LinkImportService._seed_enriched_detail_pending(enrichment_meta)
+        ):
+            hard = PostHydrationHardFilterResult(True)
         if not hard.passed:
             follower_deferred = (
                 hard.reason == "below_min_followers"
@@ -644,6 +704,26 @@ class LinkImportService:
             seed_platform = str(enrichment_meta.get("link_seed_platform") or "").strip().lower() or None
         elif platform in LINK_SEED_PLATFORMS:
             seed_platform = platform
+
+        if seed_platform and LinkImportService._seed_enriched_detail_pending(enrichment_meta):
+            low_value_detail = link_seed_low_value_detail(seed_platform)
+            exec_result.low_value_seed_count += 1
+            exec_result.not_inserted_count += 1
+            row = TaskCandidateService.row_from_not_inserted(
+                failure_reason="low_value_seed",
+                failure_detail=low_value_detail,
+                insert_blocked_reason=low_value_detail,
+                is_high_value=False,
+                has_email=assessment.has_email,
+                has_contact=assessment.has_contact,
+                contact_status=assessment.contact_status,
+                **base,
+            )
+            row.update(assessment_row_fields(assessment))
+            row["is_high_value"] = False
+            row["status"] = CandidateStatus.NOT_INSERTED.value
+            exec_result.candidate_rows.append(row)
+            return
 
         if seed_platform and not is_influencer_profile_valuable(item):
             low_value_detail = link_seed_low_value_detail(seed_platform)
@@ -733,10 +813,12 @@ class LinkImportService:
             followers_count=item.followers_count,
             engagement_rate=item.engagement_rate,
             profile_fetched_at=run_at,
-            source_type=CandidateSourceType.INPUT_PROFILE.value,
-            source_discovery_type="url_profile",
-            source_post_url=source_post_url or item.source_post_url,
+            source_type=base["source_type"],
+            source_discovery_type=base["source_discovery_type"],
+            source_post_url=base["source_post_url"],
+            source_input_url=base.get("source_input_url"),
         )
+        row.update(base)
         row.update(assessment_row_fields(assessment))
         exec_result.candidate_rows.append(row)
 

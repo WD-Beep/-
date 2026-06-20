@@ -37,6 +37,11 @@ def _is_timeout_error(message: str) -> bool:
     return "超时" in message or "timeout" in lowered
 
 
+def _is_memory_limit_error(message: str) -> bool:
+    lowered = (message or "").lower()
+    return "actor-memory-limit-exceeded" in lowered or "memory limit" in lowered or "内存" in lowered
+
+
 def _facebook_keyword_timeout_message(*, keyword: str) -> str:
     return (
         f"Facebook Apify 搜索「{keyword}」超时，建议调大 "
@@ -67,8 +72,6 @@ def _discovery_deadline(task=None) -> float:
         from app.services.competitor_product_discovery import is_competitor_product_task
 
         if is_competitor_product_task(task):
-            from app.core.config import settings
-
             return time.perf_counter() + max(30, settings.competitor_product_platform_timeout_seconds)
     return time.perf_counter() + max(30, settings.facebook_discovery_max_duration_seconds)
 
@@ -260,6 +263,14 @@ class FacebookApifyProvider:
                 skipped=True,
                 skip_reason=cap.message,
                 errors=[cap.message],
+                provider_availability_state={
+                    "facebook": {
+                        "status": "provider_unavailable",
+                        "reason": "provider_not_configured",
+                        "message": cap.message,
+                        "api_calls": 0,
+                    }
+                },
             )
 
         checkpoint = checkpoint or RunCheckpoint.from_task(task)
@@ -283,6 +294,7 @@ class FacebookApifyProvider:
         errors: list[str] = []
         rate_limit_count = 0
         slow_api = False
+        provider_unavailable_state: dict | None = None
         discovery_started = time.perf_counter()
         deadline = _discovery_deadline(task)
         keyword_timeout = max(1, settings.facebook_discovery_keyword_timeout_seconds)
@@ -354,6 +366,11 @@ class FacebookApifyProvider:
                 elif "(429)" in detail or "429" in detail:
                     local_rate_limits += 1
                     _append_error(local_errors, f"Facebook Apify 限流（关键词「{keyword}」）: {detail}")
+                elif _is_memory_limit_error(detail):
+                    _append_error(
+                        local_errors,
+                        "actor-memory-limit-exceeded: Apify 内存额度已满/并发 actor 过多",
+                    )
                 else:
                     _append_error(local_errors, f"Facebook Apify 搜索「{keyword}」: {detail}")
                 return keyword, local_profiles, local_errors, local_rate_limits, local_slow
@@ -417,6 +434,13 @@ class FacebookApifyProvider:
                 rate_limit_count += local_rate_limits
                 slow_api = slow_api or local_slow
                 errors.extend(local_errors)
+                if any(_is_memory_limit_error(err) for err in local_errors):
+                    provider_unavailable_state = {
+                        "status": "provider_unavailable",
+                        "reason": "apify_memory_limit_exceeded",
+                        "message": "Apify 内存额度已满/并发 actor 过多，已短路跳过后续 Facebook query",
+                        "api_calls": keywords_completed,
+                    }
                 profiles.extend(local_profiles)
                 profiles = dedupe_profiles(profiles)
                 await report_discovery_progress(
@@ -434,6 +458,8 @@ class FacebookApifyProvider:
                 )
                 if len(profiles) >= limit:
                     break
+            if provider_unavailable_state:
+                break
 
         if input_urls:
             started = time.perf_counter()
@@ -481,6 +507,14 @@ class FacebookApifyProvider:
                     slow_api = True
                 if "(429)" in detail or "429" in detail:
                     rate_limit_count += 1
+                if _is_memory_limit_error(detail):
+                    provider_unavailable_state = {
+                        "status": "provider_unavailable",
+                        "reason": "apify_memory_limit_exceeded",
+                        "message": "Apify 内存额度已满/并发 actor 过多，已跳过 Facebook Page URL 导入",
+                        "api_calls": keywords_completed + 1,
+                    }
+                    _append_error(errors, "actor-memory-limit-exceeded: Apify 内存额度已满/并发 actor 过多")
                 _append_error(errors, f"Facebook Page URL 导入: {detail}")
 
         deduped = dedupe_profiles(profiles)[:limit]
@@ -631,6 +665,11 @@ class FacebookApifyProvider:
 
         errors = [err for err in errors if err and err.strip()]
         items = [profile_to_collected(p) for p in deduped]
+        from app.services.collect_errors import filter_fatal_discovery_errors
+
+        fatal_errors = filter_fatal_discovery_errors(errors)
+        api_calls = keywords_completed + len(hydration_targets) + (1 if input_urls else 0)
+        empty_success = not deduped and not items and not fatal_errors
         return PlatformDiscoveryResult(
             platform="facebook",
             items=items,
@@ -638,9 +677,17 @@ class FacebookApifyProvider:
             discovered_count=len(profiles),
             deduped_count=len(deduped),
             profile_fetched_count=len(deduped),
-            api_requests=len(keywords) + len(hydration_targets) + (1 if input_urls else 0),
+            api_requests=api_calls,
             errors=errors,
             rate_limited=rate_limited,
             rate_limit_count=rate_limit_count,
-            fatal=bool(errors) and not deduped and not rate_limited and not slow_api,
+            fatal=bool(fatal_errors)
+            and not empty_success
+            and not deduped
+            and not rate_limited
+            and not slow_api
+            and not provider_unavailable_state,
+            skipped=bool(provider_unavailable_state and not deduped),
+            skip_reason=provider_unavailable_state.get("message") if provider_unavailable_state and not deduped else None,
+            provider_availability_state={"facebook": provider_unavailable_state} if provider_unavailable_state else {},
         )

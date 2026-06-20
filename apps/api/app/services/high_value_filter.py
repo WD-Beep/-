@@ -42,6 +42,17 @@ REASON_LABELS: dict[str, str] = {
 }
 
 
+def _platform_reason_label(platform: str | None) -> str:
+    key = (platform or "").strip().lower()
+    labels = {
+        "instagram": "Instagram",
+        "tiktok": "TikTok",
+        "youtube": "YouTube",
+        "facebook": "Facebook",
+    }
+    return labels.get(key, key or "社媒平台")
+
+
 @dataclass(frozen=True)
 class HighValueAssessment:
     is_high_value: bool
@@ -167,6 +178,18 @@ def _primary_reason(codes: list[str]) -> str | None:
     return codes[0] if codes else None
 
 
+def _is_link_seed_enriched_after_detail_fetch(item: CollectedInfluencer) -> bool:
+    platform = (getattr(item, "platform", None) or "").strip().lower()
+    if not platform or platform in URL_ONLY_PLATFORMS:
+        return False
+    tags = list(getattr(item, "tags", None) or [])
+    detail_tag = f"{platform}_detail_fetched"
+    has_detail_tag = detail_tag in tags or (platform == "instagram" and "instagram_detail_fetched" in tags)
+    if not has_detail_tag:
+        return False
+    return any(str(tag).startswith("link_seed:") for tag in tags)
+
+
 def _detail_for_reason(
     reason: str | None,
     *,
@@ -200,8 +223,14 @@ def _detail_for_reason(
     if reason == "missing_engagement_rate":
         return "缺少互动率数据，无法判定是否达标"
     if reason == "missing_email":
+        if _is_link_seed_enriched_after_detail_fetch(item):
+            label = _platform_reason_label(item.platform)
+            return f"{label} 详情已采集，未发现公开邮箱"
         return "未发现邮箱"
     if reason == "missing_contact":
+        if _is_link_seed_enriched_after_detail_fetch(item):
+            label = _platform_reason_label(item.platform)
+            return f"{label} 详情已采集，未发现公开联系方式"
         return "未发现邮箱或可联系入口"
     if reason == "missing_include_keyword":
         return "简介/内容未命中偏好关键词"

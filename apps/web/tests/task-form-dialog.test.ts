@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { PlatformCapability } from "../src/lib/api.ts";
+import type { CollectionTask, PlatformCapability } from "../src/lib/api.ts";
 import { formatLinkImportPlatformHints, parseLinkImportPreview } from "../src/lib/collection-sources.ts";
 import {
   applyDiscoverySource,
@@ -18,11 +18,10 @@ import {
   validateForm,
 } from "../src/lib/task-form-payload.ts";
 import {
-  KEYWORD_DISCOVERY_PLATFORMS,
   LINK_IMPORT_USAGE_LINES,
   LINK_ONLY_PLATFORM_CARD_LINES,
-  NO_CONFIGURED_KEYWORD_PLATFORMS_MSG,
-  URL_ONLY_PLATFORMS,
+  SEED_DISCOVERY_PLATFORMS,
+  URL_ONLY_PLATFORM_VALIDATION_MSG,
 } from "../src/lib/labels.ts";
 
 function mockPlatformCapability(
@@ -146,6 +145,73 @@ const allUnavailableCaps: PlatformCapability[] = [
     product_seed: false,
   }),
 ];
+
+function collectionTask(overrides: Partial<CollectionTask> = {}): CollectionTask {
+  return {
+    id: 1,
+    name: "seed discovery edit",
+    collection_mode: "discovery",
+    platform: "youtube",
+    platforms: ["youtube"],
+    keywords: ["home decor"],
+    input_urls: [],
+    country: null,
+    category: null,
+    discovery_limit: 50,
+    min_engagement_rate: null,
+    min_followers_count: null,
+    max_followers_count: null,
+    filter_include_keywords: [],
+    filter_exclude_keywords: [],
+    require_email: false,
+    require_contact: false,
+    strict_quality_filter: false,
+    insert_qualified_only: false,
+    export_qualified_only: false,
+    schedule_enabled: false,
+    schedule_cron: null,
+    email_enabled: false,
+    email_recipients: [],
+    outreach_enabled: false,
+    outreach_provider: "mailchimp",
+    outreach_dry_run: true,
+    outreach_templates: {},
+    comment_discovery_enabled: false,
+    status: "pending",
+    result_count: 0,
+    email_count: 0,
+    missing_contact_count: 0,
+    discovered_count: 0,
+    deduped_count: 0,
+    profile_fetched_count: 0,
+    profile_failed_count: 0,
+    filtered_out_count: 0,
+    inserted_count: 0,
+    hashtag_count: 0,
+    post_count: 0,
+    comment_author_count: 0,
+    filtered_below_min_followers_count: 0,
+    filtered_excluded_keyword_count: 0,
+    processed_count: 0,
+    success_count: 0,
+    failed_count: 0,
+    skipped_count: 0,
+    total_estimate: 0,
+    current_stage: null,
+    last_error: null,
+    run_checkpoint: {},
+    stale: false,
+    recoverable: false,
+    stale_after_seconds: 300,
+    status_summary: null,
+    error_message: null,
+    last_run_at: null,
+    next_run_at: null,
+    created_at: "2026-06-16T00:00:00Z",
+    updated_at: "2026-06-16T00:00:00Z",
+    ...overrides,
+  };
+}
 
 test("switching back from link import omits stale input_urls in payload", () => {
   const dirty = {
@@ -316,8 +382,68 @@ test("deselecting a platform removes it from payload", () => {
 test("multi platform auto defaults to verified keyword platforms", () => {
   const form = applyDiscoverySource("multi_platform_auto", createEmptyTaskForm(), noopCaps);
   assert.deepEqual(form.platforms, getMultiPlatformAutoPlatforms(noopCaps));
-  assert.deepEqual(form.platforms, [...KEYWORD_DISCOVERY_PLATFORMS]);
+  assert.deepEqual(form.platforms, ["instagram", "youtube", "tiktok", "facebook"]);
   assert.equal(form.platform, "multi");
+});
+
+test("shopping seed auto source switches directly to seed discovery mode", () => {
+  const form = applyDiscoverySource("shopping_seed_auto", createEmptyTaskForm(), noopCaps);
+  assert.equal(form.sourceMethod, "shopping_seed_auto");
+  assert.equal(form.collection_mode, "link_seed_discovery");
+  assert.deepEqual(form.platforms, [...SEED_DISCOVERY_PLATFORMS]);
+  assert.equal(form.platform, "multi");
+});
+
+test("shopping seed auto source accepts amazon asin without link import mode", () => {
+  const form = applyDiscoverySource("shopping_seed_auto", createEmptyTaskForm(), noopCaps);
+  const payload = formValuesToPayload(
+    {
+      ...form,
+      name: "HOMEHIVE seed",
+      competitorInputText: "B0D9W576KQ\nHOMEHIVE jewelry storage bags",
+    },
+    noopCaps,
+  );
+  assert.equal(payload.collection_mode, "link_seed_discovery");
+  assert.notEqual(payload.collection_mode, "link_import");
+  assert.ok(payload.input_urls.includes("B0D9W576KQ"));
+  assert.ok(payload.keywords.includes("HOMEHIVE jewelry storage bags"));
+});
+
+test("editing link seed discovery initializes shopping seed auto mode", () => {
+  const initial = getInitialForm(
+    true,
+    collectionTask({
+      collection_mode: "link_seed_discovery",
+      platform: "multi",
+      platforms: ["ltk", "shopmy"],
+      keywords: ["home decor"],
+      input_urls: [],
+    }),
+  );
+
+  assert.equal(initial.sourceMethod, "shopping_seed_auto");
+  assert.equal(initial.collection_mode, "link_seed_discovery");
+  assert.deepEqual(initial.platforms, ["ltk", "shopmy"]);
+  assert.equal(initial.inputUrlsText, "");
+});
+
+test("link seed discovery submit ignores stale link import source method", () => {
+  const form = {
+    ...keywordForm({ name: "seed discovery stale source" }),
+    sourceMethod: "link_import" as const,
+    collection_mode: "link_seed_discovery" as const,
+    platforms: ["ltk", "shopmy"],
+    platform: "multi",
+    keywordsText: "home decor",
+    inputUrlsText: "",
+  };
+
+  assert.equal(validateForm(form, noopCaps), null);
+  const payload = formValuesToPayload(form, noopCaps);
+  assert.equal(payload.collection_mode, "link_seed_discovery");
+  assert.deepEqual(payload.input_urls, []);
+  assert.ok(payload.keywords.includes("home decor"));
 });
 
 test("multi platform auto selects only configured platforms when others are unavailable", () => {
@@ -329,14 +455,11 @@ test("multi platform auto selects only configured platforms when others are unav
   assert.equal(form.platforms.includes("tiktok"), false);
 });
 
-test("multi platform auto does not select unavailable platforms when none are configured", () => {
+test("multi platform auto no longer falls back to seed-only platforms", () => {
   const form = applyDiscoverySource("multi_platform_auto", createEmptyTaskForm(), allUnavailableCaps);
   assert.deepEqual(form.platforms, []);
   assert.deepEqual(getMultiPlatformAutoPlatforms(allUnavailableCaps), []);
-  assert.equal(
-    validateForm({ ...keywordForm(), platforms: [] }, allUnavailableCaps),
-    NO_CONFIGURED_KEYWORD_PLATFORMS_MSG,
-  );
+  assert.match(validateForm({ ...keywordForm(), platforms: ["pinterest", "shopmy"] }, allUnavailableCaps) ?? "", /导购 seed 自动发现/);
 });
 
 test("validateForm uses platform message for unavailable core platforms", () => {
@@ -344,19 +467,43 @@ test("validateForm uses platform message for unavailable core platforms", () => 
   assert.equal(validateForm(form, allUnavailableCaps), "ok");
 });
 
-test("validateForm uses link-only message for Pinterest", () => {
+test("validateForm allows Pinterest keyword seed discovery", () => {
   const form = keywordForm({ platforms: ["pinterest"], platform: "pinterest" });
-  assert.match(validateForm(form, youtubeOnlyCaps) ?? "", /链接导入/);
+  assert.match(validateForm(form, youtubeOnlyCaps) ?? "", /导购 seed 自动发现/);
 });
 
-test("url-only platforms are not submitted for keyword discovery", () => {
+test("keyword seed platforms are submitted for keyword discovery", () => {
   const form = keywordForm({
     platforms: ["youtube", "pinterest", "ltk", "shopmy"],
     platform: "multi",
   });
   const payload = formValuesToPayload(form, noopCaps);
-  assert.deepEqual(payload.platforms, ["youtube"]);
-  assert.equal(payload.platform, "youtube");
+  assert.deepEqual(payload.platforms, ["youtube", "pinterest", "ltk", "shopmy"]);
+  assert.equal(payload.platform, "multi");
+});
+
+test("seed-only keyword platform selection switches to shopping seed mode", () => {
+  let form = keywordForm({ platforms: ["youtube"], platform: "youtube" });
+  form = toggleKeywordPlatformSelection(form, "youtube", noopCaps);
+  form = toggleKeywordPlatformSelection(form, "pinterest", noopCaps);
+  form = toggleKeywordPlatformSelection(form, "shopmy", noopCaps);
+  assert.equal(form.sourceMethod, "shopping_seed_auto");
+  assert.equal(form.collection_mode, "link_seed_discovery");
+  assert.deepEqual(form.platforms, ["pinterest", "shopmy"]);
+});
+
+test("seed-only keyword payload is normalized to link seed discovery", () => {
+  const payload = formValuesToPayload(
+    keywordForm({
+      collection_mode: "discovery",
+      platforms: ["pinterest", "shopmy"],
+      platform: "multi",
+      name: "seed only legacy payload",
+    }),
+    noopCaps,
+  );
+  assert.equal(payload.collection_mode, "link_seed_discovery");
+  assert.deepEqual(payload.platforms, ["pinterest", "shopmy"]);
 });
 
 test("link import recognizes valid Pinterest LTK ShopMy URLs", () => {
@@ -388,20 +535,19 @@ test("Amazon product links cannot mix with profile links in link import", () => 
   assert.equal(preview.mixedAmazonAndProfiles, true);
 });
 
-test("url-only platforms are visible in keyword mode but not selectable", () => {
-  for (const platform of URL_ONLY_PLATFORMS) {
-    assert.equal(isKeywordPlatformSelectable(platform, noopCaps.find((cap) => cap.platform === platform)), false);
-  }
+test("Pinterest LTK and ShopMy are selectable keyword seed platforms", () => {
+  assert.equal(isKeywordPlatformSelectable("pinterest", noopCaps.find((cap) => cap.platform === "pinterest")), true);
+  assert.equal(isKeywordPlatformSelectable("shopmy", noopCaps.find((cap) => cap.platform === "shopmy")), true);
+  assert.equal(isKeywordPlatformSelectable("ltk", noopCaps.find((cap) => cap.platform === "ltk")), true);
 });
 
-test("clicking url-only platform toggle does not change platforms", () => {
+test("clicking keyword seed platform toggle keeps it in payload", () => {
   let form = keywordForm({ platforms: ["youtube"], platform: "youtube" });
-  for (const platform of URL_ONLY_PLATFORMS) {
-    const next = toggleKeywordPlatformSelection(form, platform, noopCaps);
-    assert.deepEqual(next.platforms, ["youtube"]);
-    assert.equal(next.platform, "youtube");
-    form = next;
-  }
+  form = toggleKeywordPlatformSelection(form, "pinterest", noopCaps);
+  form = toggleKeywordPlatformSelection(form, "ltk", noopCaps);
+  form = toggleKeywordPlatformSelection(form, "shopmy", noopCaps);
+  assert.deepEqual(form.platforms, ["youtube", "pinterest", "ltk", "shopmy"]);
+  assert.equal(form.platform, "multi");
 });
 
 test("link import mode does not require manual platform selection", () => {
@@ -436,9 +582,12 @@ test("link import usage copy covers auto-detect and Amazon separation", () => {
 
 test("pending platform card copy explains link completion and external discovery", () => {
   const text = LINK_ONLY_PLATFORM_CARD_LINES.join("\n");
-  assert.match(text, /链接导入或其他社媒外链发现/);
-  assert.match(text, /低信息量结果/);
+  assert.match(text, /公共网页 seed 自动发现/);
+  assert.match(text, /反向扩展外链/);
+  assert.match(text, /低信息量 seed/);
   assert.match(text, /链接导入/);
+  assert.doesNotMatch(URL_ONLY_PLATFORM_VALIDATION_MSG, /请切换到「链接导入」/);
+  assert.match(URL_ONLY_PLATFORM_VALIDATION_MSG, /导购 seed 自动发现/);
 });
 
 test("quality filter fields are included in keyword discovery payload", () => {
@@ -487,6 +636,91 @@ test("link import payload carries quality filters without mode-specific pollutio
   assert.equal(payload.min_followers_count, 20000);
   assert.equal(payload.require_email, true);
   assert.equal(payload.insert_qualified_only, true);
+});
+
+test("link seed discovery payload uses seed platforms and keywords", () => {
+  const form = {
+    ...keywordForm({ name: "seed discovery task" }),
+    collection_mode: "link_seed_discovery" as const,
+    platforms: ["ltk", "shopmy"],
+    platform: "multi",
+    keywordsText: "fashion creator",
+    category: "Fashion",
+  };
+  const payload = formValuesToPayload(form, noopCaps);
+  assert.equal(payload.collection_mode, "link_seed_discovery");
+  assert.deepEqual(payload.platforms, ["ltk", "shopmy"]);
+  assert.ok(payload.keywords.includes("fashion creator"));
+  assert.equal(payload.category, "Fashion");
+  assert.deepEqual(payload.input_urls, []);
+});
+
+test("link seed discovery payload keeps amazon input for automatic seed search", () => {
+  const form = {
+    ...keywordForm({ name: "amazon seed discovery" }),
+    collection_mode: "link_seed_discovery" as const,
+    platforms: ["ltk", "shopmy"],
+    platform: "multi",
+    competitorInputText:
+      "https://www.amazon.com/dp/B0D9W576KQ/\nB0CPF3W9B2\nHOMEHIVE jewelry storage bags",
+    keywordsText: "Amazon finds creator",
+    category: "",
+  };
+  const payload = formValuesToPayload(form, noopCaps);
+  assert.equal(payload.collection_mode, "link_seed_discovery");
+  assert.ok(payload.input_urls.some((url) => url.includes("B0D9W576KQ")));
+  assert.ok(payload.input_urls.includes("B0CPF3W9B2"));
+  assert.ok(payload.keywords.includes("HOMEHIVE jewelry storage bags"));
+  assert.ok(payload.keywords.includes("Amazon finds creator"));
+});
+
+test("validateForm requires keywords or category for link seed discovery", () => {
+  const form = {
+    ...keywordForm(),
+    collection_mode: "link_seed_discovery" as const,
+    platforms: ["ltk"],
+    keywordsText: "",
+    category: "",
+    name: "seed task",
+  };
+  assert.match(validateForm(form, noopCaps) ?? "", /关键词或类目/);
+});
+
+test("validateForm accepts category-only link seed discovery", () => {
+  const form = {
+    ...keywordForm(),
+    collection_mode: "link_seed_discovery" as const,
+    platforms: ["pinterest"],
+    keywordsText: "",
+    category: "Home Decor",
+    name: "seed category task",
+  };
+  assert.equal(validateForm(form, noopCaps), null);
+});
+
+test("validateForm accepts amazon asin-only link seed discovery", () => {
+  const form = {
+    ...keywordForm(),
+    collection_mode: "link_seed_discovery" as const,
+    platforms: ["ltk"],
+    competitorInputText: "B0D9W576KQ",
+    keywordsText: "",
+    category: "",
+    name: "seed asin task",
+  };
+  assert.equal(validateForm(form, noopCaps), null);
+});
+
+test("validateForm applies quality filters to link seed discovery", () => {
+  const form = {
+    ...keywordForm(),
+    collection_mode: "link_seed_discovery" as const,
+    platforms: ["pinterest"],
+    keywordsText: "home decor",
+    min_followers_count: "abc",
+    name: "seed quality task",
+  };
+  assert.notEqual(validateForm(form, noopCaps), null);
 });
 
 test("saved template keeps quality filters but not mode-specific fields", () => {

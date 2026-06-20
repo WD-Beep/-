@@ -14,6 +14,7 @@ import {
   Search,
   Settings,
   Users,
+  BookOpen,
 } from "lucide-react";
 
 import { ProductCreateDialog } from "@/components/layout/product-create-dialog";
@@ -36,6 +37,7 @@ const navItems = [
   { href: "/link-import", label: "链接导入", icon: Link2 },
   { href: "/email-logs", label: "邮件日志", icon: Mail },
   { href: "/message-templates", label: "话术库", icon: MessageSquareText },
+  { href: "/knowledge-bases", label: "知识库", icon: BookOpen },
   { href: "/settings", label: "系统设置", icon: Settings },
 ];
 

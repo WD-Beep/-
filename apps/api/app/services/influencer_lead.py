@@ -34,6 +34,31 @@ EXCLUDED_FROM_TODAY = frozenset(
     }
 )
 
+PRESERVE_FOLLOW_ON_EMAIL = frozenset(
+    {
+        LeadStatus.INVALID.value,
+        LeadStatus.BLACKLISTED.value,
+        LeadStatus.REPLIED.value,
+        LeadStatus.INTERESTED.value,
+        LeadStatus.QUOTED.value,
+        LeadStatus.COOPERATING.value,
+        LeadStatus.COOPERATED.value,
+        "negotiating",
+        "collaborated",
+        "rejected",
+    }
+)
+
+AUTO_CONTACT_ON_EMAIL = frozenset(
+    {
+        LeadStatus.NEW.value,
+        LeadStatus.TO_CONTACT.value,
+        LeadStatus.CONTACTED.value,
+        None,
+        "",
+    }
+)
+
 TODAY_RECOMMENDED_STATUSES = frozenset(
     {
         LeadStatus.NEW.value,
@@ -178,10 +203,15 @@ class InfluencerLeadService:
         operator_name: str | None = None,
     ) -> ProductInfluencer:
         old_status = product_row.follow_status
-        new_status = LeadStatus.CONTACTED.value
         now = datetime.now(UTC)
+        new_status = old_status
 
-        product_row.follow_status = new_status
+        if old_status in PRESERVE_FOLLOW_ON_EMAIL:
+            new_status = old_status
+        elif old_status in AUTO_CONTACT_ON_EMAIL:
+            product_row.follow_status = LeadStatus.CONTACTED.value
+            new_status = LeadStatus.CONTACTED.value
+
         product_row.last_contacted_at = now
 
         await InfluencerLeadService.create_product_followup(
@@ -192,7 +222,7 @@ class InfluencerLeadService:
             operator_name=operator_name,
             contact_channel="email",
             old_status=old_status,
-            new_status=new_status,
+            new_status=new_status if new_status != old_status else None,
         )
         await db.commit()
         await db.refresh(product_row)
@@ -207,10 +237,15 @@ class InfluencerLeadService:
         operator_name: str | None = None,
     ) -> Influencer:
         old_status = influencer.follow_status
-        new_status = LeadStatus.CONTACTED.value
         now = datetime.now(UTC)
+        new_status = old_status
 
-        influencer.follow_status = new_status
+        if old_status in PRESERVE_FOLLOW_ON_EMAIL:
+            new_status = old_status
+        elif old_status in AUTO_CONTACT_ON_EMAIL:
+            influencer.follow_status = LeadStatus.CONTACTED.value
+            new_status = LeadStatus.CONTACTED.value
+
         influencer.last_contacted_at = now
 
         await InfluencerLeadService.create_followup(
@@ -221,7 +256,7 @@ class InfluencerLeadService:
             operator_name=operator_name,
             contact_channel="email",
             old_status=old_status,
-            new_status=new_status,
+            new_status=new_status if new_status != old_status else None,
         )
         await db.commit()
         await db.refresh(influencer)

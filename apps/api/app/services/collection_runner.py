@@ -31,11 +31,11 @@ from app.services.instagram_urls import (
     normalize_instagram_post_url,
     normalize_instagram_profile_url,
 )
-from app.services.collect_errors import summarize_errors
 from app.services.email import EmailService
 from app.services.instagram_pipeline import InstagramCollectionPipeline, InstagramPipelineResult, PipelineRunStats
 from app.services.link_import import LinkImportService
 from app.services.multi_platform_runner import (
+    build_multi_platform_error_prefix,
     build_multi_platform_summary,
     determine_multi_platform_status,
     merge_platform_results,
@@ -52,7 +52,26 @@ from app.services.business_quality import apply_creator_quality
 logger = logging.getLogger(__name__)
 
 _collection_run_lock = asyncio.Lock()
-_active_collection_task_id: int | None = None
+_active_collection_task_ids: set[int] = set()
+KEYWORD_SEED_PLATFORMS = frozenset({"pinterest", "shopmy"})
+KEYWORD_SEED_COLLECTION_MODES = frozenset(
+    {
+        CollectionMode.KEYWORD.value,
+        CollectionMode.DISCOVERY.value,
+        CollectionMode.MIXED.value,
+    }
+)
+
+
+def _split_keyword_seed_platforms(
+    task: CollectionTask,
+    platforms: list[str],
+) -> tuple[list[str], list[str]]:
+    if (task.collection_mode or "") not in KEYWORD_SEED_COLLECTION_MODES:
+        return platforms, []
+    seed_platforms = [platform for platform in platforms if platform in KEYWORD_SEED_PLATFORMS]
+    discovery_platforms = [platform for platform in platforms if platform not in KEYWORD_SEED_PLATFORMS]
+    return discovery_platforms, seed_platforms
 
 
 async def run_instagram_pipeline_with_provider_check(
@@ -137,6 +156,10 @@ from app.services.task_run_progress import (
     STAGE_DISCOVERY,
     STAGE_FAILED,
     STAGE_PERSIST,
+    apply_terminal_task_state,
+    clear_interrupted_checkpoint,
+    clear_task_error_fields,
+    is_terminal_success_status,
     reset_run_progress,
     update_task_progress,
 )
@@ -144,29 +167,67 @@ from app.services.task_run_progress import (
 
 class CollectionRunnerService:
     @staticmethod
+    def get_active_collection_task_ids() -> set[int]:
+        return set(_active_collection_task_ids)
+
+    @staticmethod
     def get_active_collection_task_id() -> int | None:
-        return _active_collection_task_id
+        if not _active_collection_task_ids:
+            return None
+        return next(iter(_active_collection_task_ids))
+
+    @staticmethod
+    def active_collection_run_count() -> int:
+        return len(_active_collection_task_ids)
+
+    @staticmethod
+    def collection_run_capacity() -> int:
+        return max(1, settings.collection_max_running_tasks)
 
     @staticmethod
     def has_active_collection_run() -> bool:
-        return _active_collection_task_id is not None
+        return len(_active_collection_task_ids) >= CollectionRunnerService.collection_run_capacity()
+
+    @staticmethod
+    def is_task_active_in_process(task_id: int) -> bool:
+        return task_id in _active_collection_task_ids
+
+    @staticmethod
+    async def reconcile_in_process_runs(db: AsyncSession) -> int:
+        """Drop in-memory run claims that no longer match RUNNING rows in DB."""
+        async with _collection_run_lock:
+            if not _active_collection_task_ids:
+                return 0
+            result = await db.execute(
+                select(CollectionTask.id).where(
+                    CollectionTask.id.in_(_active_collection_task_ids),
+                    CollectionTask.status == CollectionTaskStatus.RUNNING.value,
+                )
+            )
+            live_ids = {row[0] for row in result.all()}
+            stale_ids = _active_collection_task_ids - live_ids
+            for task_id in stale_ids:
+                _active_collection_task_ids.discard(task_id)
+            return len(stale_ids)
 
     @staticmethod
     async def _claim_collection_run(task_id: int) -> None:
-        global _active_collection_task_id
         async with _collection_run_lock:
-            if _active_collection_task_id is not None:
+            if task_id in _active_collection_task_ids:
+                return
+            capacity = CollectionRunnerService.collection_run_capacity()
+            if len(_active_collection_task_ids) >= capacity:
+                other_id = next(iter(_active_collection_task_ids))
                 raise ValueError(
-                    f"任务 {_active_collection_task_id} 正在采集中，请等待完成后再运行其他任务"
+                    f"已有 {len(_active_collection_task_ids)} 个任务在采集中（上限 {capacity}），"
+                    f"请等待任务 {other_id} 完成后再运行"
                 )
-            _active_collection_task_id = task_id
+            _active_collection_task_ids.add(task_id)
 
     @staticmethod
     async def _release_collection_run(task_id: int) -> None:
-        global _active_collection_task_id
         async with _collection_run_lock:
-            if _active_collection_task_id == task_id:
-                _active_collection_task_id = None
+            _active_collection_task_ids.discard(task_id)
 
     @staticmethod
     def _collect_external_link_funnel_stats(
@@ -1029,7 +1090,7 @@ class CollectionRunnerService:
         await CollectionRunnerService._claim_collection_run(task.id)
 
         task.status = CollectionTaskStatus.RUNNING.value
-        task.error_message = None
+        clear_task_error_fields(task)
         if not resume:
             task.status_summary = None
             reset_run_progress(task)
@@ -1054,11 +1115,17 @@ class CollectionRunnerService:
             if task.collection_mode == CollectionMode.LINK_IMPORT.value:
                 return await LinkImportService.run_collection_task(db, task)
 
+            if task.collection_mode == CollectionMode.LINK_SEED_DISCOVERY.value:
+                from app.services.shopping_seed_runner import ShoppingSeedDiscoveryService
+
+                return await ShoppingSeedDiscoveryService.run_collection_task(db, task)
+
             apply_category_discovery_expansion(task)
             run_at = datetime.now(UTC)
             platforms = task_platforms(task)
-            instagram_only = platforms == ["instagram"]
-            non_instagram = [p for p in platforms if p != "instagram"]
+            discovery_platforms, keyword_seed_platforms = _split_keyword_seed_platforms(task, platforms)
+            instagram_only = discovery_platforms == ["instagram"] and not keyword_seed_platforms
+            non_instagram = [p for p in discovery_platforms if p != "instagram"]
             qualified_target = target_qualified_count(task)
             max_candidates = max_candidates_to_process(task)
             run_ctx = CollectionRunContext(
@@ -1089,7 +1156,7 @@ class CollectionRunnerService:
                     checkpoint=checkpoint,
                 )
 
-            if "instagram" in platforms and non_instagram:
+            if "instagram" in discovery_platforms and non_instagram:
                 discovery_reporter = DiscoveryProgressReporter(db, task, checkpoint, qualified_target)
                 discovery_reporter_token = set_discovery_reporter(discovery_reporter)
                 discovery_tasks: list[asyncio.Task] = [
@@ -1134,7 +1201,7 @@ class CollectionRunnerService:
                     collection_errors = list(pipeline_result.errors)
                     stats = pipeline_result.stats
             else:
-                if "instagram" in platforms:
+                if "instagram" in discovery_platforms:
                     pipeline_result = await run_instagram_pipeline_with_provider_check(
                         task,
                         db=db,
@@ -1169,6 +1236,22 @@ class CollectionRunnerService:
                     else:
                         platform_results = await _run_non_instagram_discovery()
 
+            if task.collection_mode == CollectionMode.COMPETITOR_PRODUCT.value and platform_results:
+                from app.services.competitor_product_discovery import discover_instagram_from_cross_platform_evidence
+
+                existing_ig_usernames = {
+                    (getattr(item, "username", "") or "").strip().lower()
+                    for item in collected
+                    if getattr(item, "platform", None) == "instagram"
+                }
+                instagram_probe_result = await discover_instagram_from_cross_platform_evidence(
+                    task,
+                    platform_results,
+                    existing_usernames=existing_ig_usernames,
+                )
+                if instagram_probe_result is not None:
+                    platform_results.append(instagram_probe_result)
+
             aggregate = merge_platform_results(
                 instagram_result=pipeline_result,
                 instagram_funnel=stats if pipeline_result else None,
@@ -1184,13 +1267,33 @@ class CollectionRunnerService:
             stats = aggregate.funnel
             total_candidates_seen += total_count
 
+            keyword_seed_result = None
+            if keyword_seed_platforms:
+                from app.services.shopping_seed_runner import ShoppingSeedDiscoveryService
+
+                keyword_seed_result = await ShoppingSeedDiscoveryService.run_keyword_seed_discovery(
+                    db,
+                    task,
+                    run_at=run_at,
+                )
+                seed_exec = keyword_seed_result.exec_result
+                collection_errors.extend(seed_exec.import_errors)
+
             funnel = CollectionFunnelStats(
-                discovered_count=stats.discovered_count,
-                deduped_count=stats.deduped_count,
-                profile_fetched_count=stats.profile_fetched_count,
-                profile_failed_count=stats.profile_failed_count,
-                filtered_out_count=0,
-                inserted_count=0,
+                discovered_count=stats.discovered_count
+                + (keyword_seed_result.discovered_count if keyword_seed_result else 0),
+                deduped_count=stats.deduped_count
+                + (keyword_seed_result.discovered_count if keyword_seed_result else 0),
+                profile_fetched_count=stats.profile_fetched_count
+                + (keyword_seed_result.exec_result.hydrated_profile_count if keyword_seed_result else 0),
+                profile_failed_count=stats.profile_failed_count
+                + (keyword_seed_result.exec_result.import_failed if keyword_seed_result else 0),
+                filtered_out_count=(keyword_seed_result.exec_result.filtered_out_count if keyword_seed_result else 0),
+                inserted_count=(
+                    keyword_seed_result.exec_result.new_count + keyword_seed_result.exec_result.updated_count
+                    if keyword_seed_result
+                    else 0
+                ),
                 preference_mismatch_count=0,
                 hashtag_count=getattr(stats, "hashtag_count", 0),
                 post_count=getattr(stats, "post_count", 0),
@@ -1290,6 +1393,7 @@ class CollectionRunnerService:
             )
             processed_count = len(checkpoint.persisted_profiles)
             batch_commit_size = max(1, settings.collection_batch_commit_size)
+            persist_failed_count = 0
             if resume:
                 skipped_count = task.skipped_count or 0
                 filtered_count = task.failed_count or 0
@@ -1481,8 +1585,6 @@ class CollectionRunnerService:
                         if not global_profile:
                             global_profile = create_global_profile_from_collected(item, run_at=run_at)
                             db.add(global_profile)
-                            await db.flush()
-                            global_map[identity_key] = global_profile
                         elif should_refresh_global_profile(global_profile, now=run_at) or global_profile_has_changes(
                             global_profile, item
                         ):
@@ -1495,8 +1597,11 @@ class CollectionRunnerService:
                             task=task,
                             run_at=run_at,
                         )
+                        if global_profile.id is None:
+                            product_record.global_profile = global_profile
                         db.add(product_record)
                         await db.flush()
+                        global_map[identity_key] = global_profile
                         await InfluencerSourceService.record_from_collected(
                             db, product_record, item, task=task, run_at=run_at
                         )
@@ -1522,6 +1627,31 @@ class CollectionRunnerService:
                         if (new_count + updated_count) >= qualified_target:
                             target_reached = True
                             break
+                except Exception as exc:
+                    persist_failed_count += 1
+                    filtered_count += 1
+                    user_key = (item.username or "").lower()
+                    profile_key = collected_identity_key(item)
+                    detail = str(exc).strip()[:500] or exc.__class__.__name__
+                    logger.exception(
+                        "Persist failed for @%s (%s): %s",
+                        item.username,
+                        item.platform,
+                        detail,
+                    )
+                    outcome = {
+                        "status": "profile_failed",
+                        "item": item,
+                        "detail": detail,
+                    }
+                    platform_outcomes[profile_key] = outcome
+                    if item.platform == "instagram":
+                        outcomes[user_key] = outcome
+                    checkpoint.mark_persisted(
+                        item.platform,
+                        item.profile_url,
+                        platform_unique_id=item.platform_unique_id,
+                    )
                 finally:
                     processed_count += 1
                     if processed_count % batch_commit_size == 0 or processed_count == total_count:
@@ -1534,6 +1664,17 @@ class CollectionRunnerService:
                                     outcome["global_influencer_id"] = pending.global_influencer_id
                         funnel.filtered_out_count = filtered_count
                         funnel.inserted_count = new_count + updated_count
+                        logger.info(
+                            "[Persist] batch commit processed=%d/%d inserted=%d updated=%d "
+                            "skipped=%d filtered=%d persist_errors=%d",
+                            processed_count,
+                            total_count,
+                            new_count,
+                            updated_count,
+                            skipped_count,
+                            filtered_count,
+                            persist_failed_count,
+                        )
                         await update_task_progress(
                             db,
                             task,
@@ -1572,19 +1713,81 @@ class CollectionRunnerService:
                     )
                 )
 
+            # Include same-product filtered diagnostic rows from aggregate
+            if aggregate.candidate_rows:
+                candidate_rows.extend(aggregate.candidate_rows)
+
+            amazon_product_video_rows = []
+            if task.collection_mode == CollectionMode.COMPETITOR_PRODUCT.value:
+                from app.services.competitor_product_discovery import amazon_product_video_candidate_rows
+
+                amazon_product_video_rows = amazon_product_video_candidate_rows(task)
+                if amazon_product_video_rows:
+                    candidate_rows.extend(amazon_product_video_rows)
+
+            if keyword_seed_result and keyword_seed_result.exec_result.candidate_rows:
+                candidate_rows.extend(keyword_seed_result.exec_result.candidate_rows)
+
             await db.flush()
 
-            inserted_count = new_count + updated_count
-            funnel.filtered_out_count = filtered_count
+            seed_new_count = keyword_seed_result.exec_result.new_count if keyword_seed_result else 0
+            seed_updated_count = keyword_seed_result.exec_result.updated_count if keyword_seed_result else 0
+            seed_filtered_count = keyword_seed_result.exec_result.filtered_out_count if keyword_seed_result else 0
+            seed_not_inserted_count = keyword_seed_result.exec_result.not_inserted_count if keyword_seed_result else 0
+            inserted_count = new_count + updated_count + seed_new_count + seed_updated_count
+            # Include same-product filtered_out counts from aggregate (merge_platform_results)
+            same_product_filtered = aggregate.funnel.filtered_out_count
+            funnel.filtered_out_count = filtered_count + same_product_filtered + seed_filtered_count
+            if amazon_product_video_rows:
+                funnel.discovered_count += len(amazon_product_video_rows)
+                funnel.deduped_count += len(amazon_product_video_rows)
             funnel.inserted_count = inserted_count
             funnel.preference_mismatch_count = preference_mismatch_count
-            funnel.filtered_below_min_followers_count = filtered_below_min
-            funnel.filtered_excluded_keyword_count = filtered_excluded
+            funnel.filtered_below_min_followers_count = filtered_below_min + (
+                keyword_seed_result.exec_result.filtered_below_min if keyword_seed_result else 0
+            )
+            funnel.filtered_excluded_keyword_count = filtered_excluded + (
+                keyword_seed_result.exec_result.filtered_excluded if keyword_seed_result else 0
+            )
             CollectionRunnerService._collect_external_link_funnel_stats(
                 aggregate.platform_profiles or [],
                 funnel,
             )
             aggregate.funnel = funnel
+            if keyword_seed_result:
+                checkpoint_extra = dict(task.run_checkpoint or {})
+                checkpoint_extra["link_seed_enrichment"] = {
+                    "attempted": keyword_seed_result.exec_result.seed_enrichment_attempted,
+                    "social_profiles_found": keyword_seed_result.exec_result.seed_social_profiles_found,
+                    "low_value_seed_count": keyword_seed_result.exec_result.low_value_seed_count,
+                    "mode": task.collection_mode,
+                    "platforms": keyword_seed_platforms,
+                }
+                checkpoint_extra["keyword_seed_discovery"] = {
+                    "seed_platforms": keyword_seed_platforms,
+                    "discovered_count": keyword_seed_result.discovered_count,
+                    "seed_enriched_count": keyword_seed_result.seed_enriched_count,
+                    "platform_failed_count": keyword_seed_result.platform_failed_count,
+                    "skipped_platform_count": keyword_seed_result.skipped_platform_count,
+                    "new_count": seed_new_count,
+                    "updated_count": seed_updated_count,
+                    "not_inserted_count": seed_not_inserted_count,
+                    "filtered_out_count": seed_filtered_count,
+                }
+                task.run_checkpoint = checkpoint_extra
+            if aggregate.provider_availability_state or aggregate.platform_api_counts:
+                checkpoint_extra = dict(task.run_checkpoint or {})
+                if aggregate.provider_availability_state:
+                    state = dict(checkpoint_extra.get("provider_availability_state") or {})
+                    state.update(aggregate.provider_availability_state)
+                    checkpoint_extra["provider_availability_state"] = state
+                if aggregate.platform_api_counts:
+                    checkpoint_extra["platform_api_counts"] = dict(aggregate.platform_api_counts)
+                task.run_checkpoint = checkpoint_extra
+            if amazon_product_video_rows:
+                checkpoint_extra = dict(task.run_checkpoint or {})
+                checkpoint_extra["amazon_product_page_strong_leads_count"] = len(amazon_product_video_rows)
+                task.run_checkpoint = checkpoint_extra
             discovery_api_failed = getattr(stats, "discovery_api_failed", False) if pipeline_result else aggregate.discovery_api_failed
             has_api_warnings = bool(
                 aggregate.has_api_warnings
@@ -1611,8 +1814,6 @@ class CollectionRunnerService:
                 has_api_warnings=has_api_warnings,
             )
 
-            task.status = final_status.value
-            task.last_error = None
             task.last_run_at = run_at
             task.discovered_count = funnel.discovered_count
             task.deduped_count = funnel.deduped_count
@@ -1627,7 +1828,7 @@ class CollectionRunnerService:
             task.filtered_excluded_keyword_count = funnel.filtered_excluded_keyword_count
             task.result_count = inserted_count
             funnel.overfetch_stop_reason = overfetch_stop_reason
-            if (new_count + updated_count) < qualified_target and not overfetch_stop_reason:
+            if inserted_count < qualified_target and not overfetch_stop_reason:
                 if total_candidates_seen >= max_candidates:
                     funnel.overfetch_stop_reason = "已达安全上限"
                 elif any("429" in err or "限流" in err for err in collection_errors):
@@ -1658,12 +1859,14 @@ class CollectionRunnerService:
                 task.status_summary = (
                     "Instagram 采集 API 全部失败，未获得任何候选账号，请查看错误详情"
                 )
-            task.error_message = summarize_errors(
-                collection_errors,
-                prefix=(
-                    "Instagram 采集 API 失败："
-                    if discovery_api_failed
-                    else ("采集已完成，部分条目存在问题：" if collection_errors else "")
+            apply_terminal_task_state(
+                task,
+                status=final_status,
+                errors=collection_errors,
+                prefix=build_multi_platform_error_prefix(
+                    aggregate,
+                    discovery_api_failed=discovery_api_failed,
+                    instagram_only=instagram_only,
                 ),
             )
 
@@ -1681,6 +1884,11 @@ class CollectionRunnerService:
             await db.flush()
             await TaskCandidateService.sync_task_inserted_stats(db, task)
             await TaskInfluencerService.refresh_task_stats(db, task)
+            if is_terminal_success_status(final_status):
+                clear_task_error_fields(task)
+                task.run_checkpoint = clear_interrupted_checkpoint(
+                    task.run_checkpoint if isinstance(task.run_checkpoint, dict) else {}
+                )
             await db.commit()
 
             ai_ids = [inf.id for inf in touched_influencers if inf.id]
@@ -1707,11 +1915,11 @@ class CollectionRunnerService:
                 await EmailService.sync_outreach_contacts_after_collection(db, task)
 
             return {
-                "new_count": new_count,
-                "updated_count": updated_count,
-                "skipped_count": skipped_count,
-                "filtered_count": filtered_count,
-                "total_count": total_count,
+                "new_count": new_count + seed_new_count,
+                "updated_count": updated_count + seed_updated_count,
+                "skipped_count": skipped_count + seed_not_inserted_count,
+                "filtered_count": filtered_count + seed_filtered_count,
+                "total_count": total_count + (keyword_seed_result.discovered_count if keyword_seed_result else 0),
                 "discovered_count": funnel.discovered_count,
                 "deduped_count": funnel.deduped_count,
                 "profile_fetched_count": funnel.profile_fetched_count,

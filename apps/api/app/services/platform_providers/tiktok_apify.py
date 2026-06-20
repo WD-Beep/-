@@ -25,6 +25,11 @@ from app.services.platform_providers.tiktok_api_direct import _tiktok_profile_ur
 logger = logging.getLogger(__name__)
 
 
+def _is_memory_limit_error(message: str) -> bool:
+    lowered = (message or "").lower()
+    return "memory-limit-exceeded" in lowered or "memory limit" in lowered or "内存" in lowered
+
+
 def _author_meta(item: dict) -> dict:
     meta = item.get("authorMeta")
     if isinstance(meta, dict):
@@ -116,6 +121,14 @@ class TikTokApifyProvider:
                 skipped=True,
                 skip_reason=cap.message,
                 errors=[cap.message],
+                provider_availability_state={
+                    "tiktok": {
+                        "status": "provider_unavailable",
+                        "reason": "provider_not_configured",
+                        "message": cap.message,
+                        "api_calls": 0,
+                    }
+                },
             )
 
         keywords = [k.strip().lstrip("#") for k in (task.keywords or []) if k and str(k).strip()]
@@ -141,11 +154,16 @@ class TikTokApifyProvider:
         else:
             apify_timeout = keyword_timeout
         concurrency = max(1, settings.tiktok_apify_keyword_concurrency)
+        if is_competitor_product_task(task):
+            concurrency = 1
         region = tiktok_region_from_task(task)
+        memory_mbytes = max(512, settings.tiktok_apify_memory_mbytes)
 
         profiles: list[PlatformCandidateProfile] = []
         errors: list[str] = []
         rate_limit_count = 0
+        provider_unavailable_state: dict | None = None
+        attempted_queries = 0
 
         async def _search_keyword(keyword: str) -> tuple[str, list[PlatformCandidateProfile], list[str], int]:
             local_profiles: list[PlatformCandidateProfile] = []
@@ -153,38 +171,72 @@ class TikTokApifyProvider:
             local_rate_limits = 0
             started = time.perf_counter()
 
-            run_input: dict = {
-                "searchQueries": [keyword],
-                "resultsPerPage": max_results,
-                "shouldDownloadVideos": False,
-                "shouldDownloadAvatars": False,
-                "shouldDownloadCovers": False,
-            }
-            if region:
-                run_input["proxyCountryCode"] = region.upper()
+            def _run_input(results_per_page: int) -> dict:
+                value: dict = {
+                    "searchQueries": [keyword],
+                    "resultsPerPage": results_per_page,
+                    "shouldDownloadVideos": False,
+                    "shouldDownloadAvatars": False,
+                    "shouldDownloadCovers": False,
+                }
+                if region:
+                    value["proxyCountryCode"] = region.upper()
+                return value
 
-            try:
-                items = await asyncio.wait_for(
+            run_input = _run_input(max_results)
+
+            async def _run_search(current_input: dict, *, current_memory: int) -> list[dict]:
+                return await asyncio.wait_for(
                     run_actor_sync(
                         settings.apify_tiktok_actor_id,
-                        run_input,
+                        current_input,
                         timeout=apify_timeout,
                         max_retries=settings.apify_tiktok_max_retries,
+                        memory_mbytes=current_memory,
                     ),
                     timeout=keyword_timeout + 5,
                 )
+
+            try:
+                items = await _run_search(run_input, current_memory=memory_mbytes)
             except asyncio.TimeoutError:
-                local_errors.append(f"TikTok Apify 搜索「{keyword}」超时（>{keyword_timeout}s），已跳过")
+                local_errors.append(
+                    f"query {keyword}: TikTok Apify 搜索超时（>{keyword_timeout}s），已继续其他 query"
+                )
                 logger.warning("TikTok Apify keyword timeout keyword=%s", keyword)
                 return keyword, local_profiles, local_errors, local_rate_limits
             except ApifyError as exc:
                 detail = str(exc)
-                if "(429)" in detail or "429" in detail:
+                if _is_memory_limit_error(detail):
+                    retry_results = max(5, min(max_results // 2, max_results - 1))
+                    retry_memory = max(512, min(memory_mbytes, 1024))
+                    local_errors.append(
+                        f"query {keyword}: TikTok Apify 内存限制，已降级重试 1 次"
+                    )
+                    try:
+                        items = await _run_search(_run_input(retry_results), current_memory=retry_memory)
+                    except asyncio.TimeoutError:
+                        local_errors.append(
+                            f"query {keyword}: TikTok Apify 内存限制，已降级重试 1 次后超时（>{keyword_timeout}s）"
+                        )
+                        logger.warning("TikTok Apify memory retry timeout keyword=%s", keyword)
+                        return keyword, local_profiles, local_errors, local_rate_limits
+                    except ApifyError as retry_exc:
+                        retry_detail = str(retry_exc)
+                        local_errors.append(
+                            f"query {keyword}: TikTok Apify 内存限制，已降级重试 1 次仍失败: {retry_detail}"
+                        )
+                        local_errors.append(
+                            "actor-memory-limit-exceeded: Apify 内存额度已满/并发 actor 过多"
+                        )
+                        return keyword, local_profiles, local_errors, local_rate_limits
+                elif "(429)" in detail or "429" in detail:
                     local_rate_limits += 1
-                    local_errors.append(f"TikTok Apify 限流（关键词「{keyword}」）: {detail}")
+                    local_errors.append(f"query {keyword}: TikTok Apify 限流: {detail}")
+                    return keyword, local_profiles, local_errors, local_rate_limits
                 else:
-                    local_errors.append(f"TikTok Apify 搜索「{keyword}」: {detail}")
-                return keyword, local_profiles, local_errors, local_rate_limits
+                    local_errors.append(f"query {keyword}: TikTok Apify provider error: {detail}")
+                    return keyword, local_profiles, local_errors, local_rate_limits
 
             for item in items:
                 if not isinstance(item, dict):
@@ -212,14 +264,24 @@ class TikTokApifyProvider:
                     errors.append(str(outcome))
                     continue
                 _keyword, local_profiles, local_errors, local_rate_limits = outcome
+                attempted_queries += 1
                 rate_limit_count += local_rate_limits
                 errors.extend(local_errors)
+                if any(_is_memory_limit_error(err) for err in local_errors):
+                    provider_unavailable_state = {
+                        "status": "provider_unavailable",
+                        "reason": "apify_memory_limit_exceeded",
+                        "message": "Apify 内存额度已满/并发 actor 过多，已短路跳过后续 TikTok query",
+                        "api_calls": attempted_queries,
+                    }
                 for profile in local_profiles:
                     if len(profiles) >= limit:
                         break
                     profiles.append(profile)
                 if len(profiles) >= limit:
                     break
+            if provider_unavailable_state:
+                break
 
         deduped = dedupe_profiles(profiles)[:limit]
         rate_limited = rate_limit_count > 0
@@ -238,9 +300,12 @@ class TikTokApifyProvider:
             discovered_count=len(profiles),
             deduped_count=len(deduped),
             profile_fetched_count=len(deduped),
-            api_requests=len(keywords),
+            api_requests=attempted_queries,
             errors=errors,
             rate_limited=rate_limited,
             rate_limit_count=rate_limit_count,
-            fatal=bool(errors) and not deduped and not rate_limited,
+            skipped=bool(provider_unavailable_state and not deduped),
+            skip_reason=provider_unavailable_state.get("message") if provider_unavailable_state and not deduped else None,
+            provider_availability_state={"tiktok": provider_unavailable_state} if provider_unavailable_state else {},
+            fatal=bool(errors) and not deduped and not rate_limited and not provider_unavailable_state,
         )

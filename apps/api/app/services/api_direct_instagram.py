@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from app.collectors.base import CollectedInfluencer
@@ -29,7 +31,7 @@ from app.services.instagram_urls import (
     sanitize_url_text,
 )
 from app.services.api_direct_client import ApiDirectError, ad_get
-from app.services.concurrency import map_bounded
+from app.services.concurrency import map_bounded, map_bounded_incremental
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -132,7 +134,20 @@ async def _scrape_one_profile(
     meta = candidate_meta.get(key)
 
     try:
-        payload = await ad_get("/v1/instagram/user", params=params, platform="instagram")
+        payload = await asyncio.wait_for(
+            ad_get("/v1/instagram/user", params=params, platform="instagram"),
+            timeout=max(5, settings.collection_profile_request_timeout_seconds),
+        )
+    except asyncio.TimeoutError:
+        detail = f"@{username} 主页请求超时（{settings.collection_profile_request_timeout_seconds}s）"
+        failed = FailedProfile(
+            username=username,
+            profile_url=profile_url,
+            reason=ProfileFailureReason.SCRAPER_BLOCKED,
+            detail=detail,
+            **_source_fields_from_meta(meta),
+        )
+        return None, detail, failed
     except ApiDirectError as exc:
         detail = str(exc)
         failed = FailedProfile(
@@ -187,6 +202,9 @@ async def scrape_instagram_profiles(
     urls_or_usernames: list[str],
     *,
     candidate_meta: dict[str, PostAuthorCandidate] | None = None,
+    on_item_complete: Callable[[str, CollectedInfluencer | FailedProfile | None, str | None], Awaitable[None]]
+    | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> ProfileScrapeResult:
     if not urls_or_usernames:
         return ProfileScrapeResult()
@@ -200,16 +218,15 @@ async def scrape_instagram_profiles(
     async def _worker(item: str) -> tuple[CollectedInfluencer | None, str | None, FailedProfile | None]:
         return await _scrape_one_profile(item, candidate_meta=candidate_meta)
 
-    outcomes = await map_bounded(
-        urls_or_usernames,
-        _worker,
-        concurrency=settings.collection_profile_concurrency,
-    )
-
-    for outcome in outcomes:
+    async def _on_complete(
+        item: str,
+        outcome: tuple[CollectedInfluencer | None, str | None, FailedProfile | None] | BaseException,
+    ) -> None:
         if isinstance(outcome, BaseException):
             errors.append(str(outcome))
-            continue
+            if on_item_complete is not None:
+                await on_item_complete(item, None, str(outcome))
+            return
         profile, err, failed = outcome
         if err:
             errors.append(err)
@@ -220,6 +237,16 @@ async def scrape_instagram_profiles(
                 failed_profiles.append(failed)
         if profile:
             results.append(profile)
+        if on_item_complete is not None:
+            await on_item_complete(item, profile if profile else failed, err)
+
+    await map_bounded_incremental(
+        urls_or_usernames,
+        _worker,
+        concurrency=settings.effective_profile_enrich_concurrency,
+        on_complete=_on_complete,
+        should_stop=should_stop,
+    )
 
     return ProfileScrapeResult(profiles=results, errors=errors, failed_profiles=failed_profiles)
 

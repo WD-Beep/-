@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import fields
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import and_, func, not_, or_, select, exists
@@ -33,12 +34,15 @@ from app.services.influencer_persistence import (
 )
 from app.services.influencer_projection import to_influencer_read
 from app.services.influencer_source import InfluencerSourceService
+from app.services.email_sent_status import load_email_sent_map, successful_email_sent_exists
 from app.services.platform_utils import normalize_profile_url
 from app.services.tenant_scope import ALL_PRODUCTS_ID
 
 PRIMARY_PLATFORMS: tuple[str, ...] = ("tiktok", "youtube", "instagram", "facebook")
 LINK_IMPORT_STAT_PLATFORMS: tuple[str, ...] = ("pinterest", "ltk", "shopmy")
 ALL_STAT_PLATFORMS: tuple[str, ...] = PRIMARY_PLATFORMS + LINK_IMPORT_STAT_PLATFORMS
+
+_COLLECTED_INFLUENCER_FIELDS = frozenset(field.name for field in fields(CollectedInfluencer))
 
 _PRODUCT_UPDATE_FIELDS = frozenset(
     {
@@ -91,7 +95,14 @@ class ProductInfluencerService:
         )
 
     @staticmethod
-    def _apply_filters(query, filters: InfluencerFilter, *, PI=ProductInfluencer, GP=GlobalInfluencerProfile):
+    def _apply_filters(
+        query,
+        filters: InfluencerFilter,
+        *,
+        product_id: int | None = None,
+        PI=ProductInfluencer,
+        GP=GlobalInfluencerProfile,
+    ):
         min_score = filters.min_score
         if filters.high_match:
             query = query.where(
@@ -198,6 +209,12 @@ class ProductInfluencerService:
         if filters.collected_within_days:
             cutoff = datetime.now(UTC) - timedelta(days=filters.collected_within_days)
             query = query.where(PI.last_collected_at >= cutoff)
+        if filters.email_status in ("sent", "unsent") and product_id is not None:
+            sent_exists = successful_email_sent_exists(product_id, PI=PI, GP=GP)
+            if filters.email_status == "sent":
+                query = query.where(sent_exists)
+            else:
+                query = query.where(not_(sent_exists))
         return query
 
     @staticmethod
@@ -210,7 +227,7 @@ class ProductInfluencerService:
         page_size: int,
     ) -> PaginatedResponse[InfluencerRead]:
         base_query = ProductInfluencerService._apply_filters(
-            ProductInfluencerService._base_join(product_id), filters
+            ProductInfluencerService._base_join(product_id), filters, product_id=product_id
         )
         total = await db.scalar(select(func.count()).select_from(base_query.subquery()))
         total = total or 0
@@ -223,10 +240,24 @@ class ProductInfluencerService:
         rows = (await db.execute(query)).all()
         influencer_ids = [pi.id for pi, _gp in rows]
         sources_by_id = await InfluencerSourceService.list_for_product_influencers(db, influencer_ids)
-        items = [
-            to_influencer_read(pi, gp, sources=sources_by_id.get(pi.id, []))
-            for pi, gp in rows
-        ]
+        email_sent_map = await load_email_sent_map(
+            db,
+            product_id=product_id,
+            product_influencer_ids=influencer_ids,
+        )
+        items = []
+        for pi, gp in rows:
+            read = to_influencer_read(pi, gp, sources=sources_by_id.get(pi.id, []))
+            sent_info = email_sent_map.get(pi.id)
+            if sent_info:
+                read = read.model_copy(
+                    update={
+                        "email_sent": sent_info.email_sent,
+                        "last_email_sent_at": sent_info.last_email_sent_at,
+                        "last_email_subject": sent_info.last_email_subject,
+                    }
+                )
+            items.append(read)
         return PaginatedResponse(
             items=items,
             total=total,
@@ -244,11 +275,26 @@ class ProductInfluencerService:
         sources_map = await InfluencerSourceService.list_for_product_influencers(
             db, [product_row.id]
         )
-        return to_influencer_read(
+        read = to_influencer_read(
             product_row,
             global_row,
             sources=sources_map.get(product_row.id, []),
         )
+        email_sent_map = await load_email_sent_map(
+            db,
+            product_id=product_row.product_id,
+            product_influencer_ids=[product_row.id],
+        )
+        sent_info = email_sent_map.get(product_row.id)
+        if sent_info:
+            read = read.model_copy(
+                update={
+                    "email_sent": sent_info.email_sent,
+                    "last_email_sent_at": sent_info.last_email_sent_at,
+                    "last_email_subject": sent_info.last_email_subject,
+                }
+            )
+        return read
 
     @staticmethod
     async def get_product_influencer(
@@ -272,7 +318,8 @@ class ProductInfluencerService:
         for field in ("email", "final_email", "public_email", "business_email"):
             if payload.get(field) is not None:
                 payload[field] = str(payload[field])
-        return CollectedInfluencer(**payload)
+        filtered = {key: value for key, value in payload.items() if key in _COLLECTED_INFLUENCER_FIELDS}
+        return CollectedInfluencer(**filtered)
 
     @staticmethod
     async def create_influencer(
@@ -372,7 +419,7 @@ class ProductInfluencerService:
     ) -> list[InfluencerRead]:
         PI, GP = ProductInfluencer, GlobalInfluencerProfile
         base_query = ProductInfluencerService._apply_filters(
-            ProductInfluencerService._base_join(product_id), filters
+            ProductInfluencerService._base_join(product_id), filters, product_id=product_id
         )
         if filters.pending_follow_up:
             ordering = (PI.next_follow_up_at.asc().nullslast(), PI.last_collected_at.desc().nullslast(), PI.id.desc())
@@ -381,10 +428,25 @@ class ProductInfluencerService:
         rows = (await db.execute(base_query.order_by(*ordering))).all()
         influencer_ids = [pi.id for pi, _gp in rows]
         sources_by_id = await InfluencerSourceService.list_for_product_influencers(db, influencer_ids)
-        return [
-            to_influencer_read(pi, gp, sources=sources_by_id.get(pi.id, []))
-            for pi, gp in rows
-        ]
+        email_sent_map = await load_email_sent_map(
+            db,
+            product_id=product_id,
+            product_influencer_ids=influencer_ids,
+        )
+        items = []
+        for pi, gp in rows:
+            read = to_influencer_read(pi, gp, sources=sources_by_id.get(pi.id, []))
+            sent_info = email_sent_map.get(pi.id)
+            if sent_info:
+                read = read.model_copy(
+                    update={
+                        "email_sent": sent_info.email_sent,
+                        "last_email_sent_at": sent_info.last_email_sent_at,
+                        "last_email_subject": sent_info.last_email_subject,
+                    }
+                )
+            items.append(read)
+        return items
 
     @staticmethod
     async def get_platform_stats(
@@ -402,12 +464,20 @@ class ProductInfluencerService:
                         GP, PI.global_influencer_id == GP.id
                     ).where(ProductInfluencerService._inserted_scope(product_id, PI=PI)),
                     stats_filters,
+                    product_id=product_id,
                 )
             )
         ).all()
 
+        row_pairs = [(platform, pi, gp) for platform, pi, gp in rows]
+        email_sent_map = await load_email_sent_map(
+            db,
+            product_id=product_id,
+            product_influencer_ids=[pi.id for _platform, pi, _gp in row_pairs],
+        )
+
         buckets: dict[str, PlatformStatItem] = {}
-        for platform, pi, gp in rows:
+        for platform, pi, gp in row_pairs:
             platform_key = platform if platform in ALL_STAT_PLATFORMS else "other"
             has_mail = bool(gp.final_email or gp.email or gp.public_email or gp.business_email)
             has_reach = bool(
@@ -416,6 +486,8 @@ class ProductInfluencerService:
             )
             is_high = pi.final_priority in ("P0", "P1") or (pi.score or 0) >= 62.0
             is_direct = has_reach and bool(gp.final_email or gp.email or gp.public_email or gp.business_email)
+            sent_info = email_sent_map.get(pi.id)
+            is_sent = bool(sent_info and sent_info.email_sent)
             current = buckets.get(platform_key)
             if current is None:
                 buckets[platform_key] = PlatformStatItem(
@@ -425,6 +497,8 @@ class ProductInfluencerService:
                     direct_contact=1 if is_direct else 0,
                     missing_contact=0 if has_reach else 1,
                     high_value=1 if is_high else 0,
+                    sent_email_count=1 if is_sent else 0,
+                    unsent_email_count=0 if is_sent else 1,
                 )
             else:
                 buckets[platform_key] = PlatformStatItem(
@@ -434,6 +508,8 @@ class ProductInfluencerService:
                     direct_contact=current.direct_contact + (1 if is_direct else 0),
                     missing_contact=current.missing_contact + (0 if has_reach else 1),
                     high_value=current.high_value + (1 if is_high else 0),
+                    sent_email_count=current.sent_email_count + (1 if is_sent else 0),
+                    unsent_email_count=current.unsent_email_count + (0 if is_sent else 1),
                 )
 
         empty = PlatformStatItem(
@@ -443,6 +519,8 @@ class ProductInfluencerService:
             direct_contact=0,
             missing_contact=0,
             high_value=0,
+            sent_email_count=0,
+            unsent_email_count=0,
         )
         ordered_keys = list(PRIMARY_PLATFORMS)
         for platform_key in LINK_IMPORT_STAT_PLATFORMS:
