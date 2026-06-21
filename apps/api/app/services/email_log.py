@@ -3,10 +3,21 @@ import math
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.deps.tenant import TenantContext
 from app.models.email_log import EmailLog
 from app.models.enums import EmailLogStatus
+from app.models.global_influencer_profile import GlobalInfluencerProfile
+from app.models.message_template import MessageTemplate
+from app.models.product_influencer import ProductInfluencer
 from app.schemas.common import PaginatedResponse
-from app.schemas.email_log import EmailLogFilter, EmailLogRead
+from app.schemas.email_log import (
+    EmailLogFilter,
+    EmailLogRead,
+    SaveEmailLogAsTemplateRequest,
+    SaveEmailLogAsTemplateResponse,
+)
+from app.schemas.message_template import MessageTemplateCreate
+from app.services.message_template import MessageTemplateService
 
 
 class EmailLogService:
@@ -69,3 +80,99 @@ class EmailLogService:
             query = query.where(EmailLog.product_id == product_id)
         count = await db.scalar(query)
         return count or 0
+
+    @staticmethod
+    async def get_log(
+        db: AsyncSession,
+        *,
+        log_id: int,
+        product_id: int,
+    ) -> EmailLog | None:
+        return await db.scalar(
+            select(EmailLog).where(EmailLog.id == log_id, EmailLog.product_id == product_id)
+        )
+
+    @staticmethod
+    async def save_as_message_template(
+        db: AsyncSession,
+        *,
+        log: EmailLog,
+        ctx: TenantContext,
+        payload: SaveEmailLogAsTemplateRequest,
+    ) -> SaveEmailLogAsTemplateResponse:
+        product_id = ctx.product_id
+        if not log.generated_by_ai:
+            return SaveEmailLogAsTemplateResponse(
+                created=False,
+                message="仅支持将 AI 生成的邮件保存为话术",
+                template=None,
+            )
+        if log.status != EmailLogStatus.SENT.value:
+            return SaveEmailLogAsTemplateResponse(
+                created=False,
+                message="仅支持保存已成功发送的 AI 邮件",
+                template=None,
+            )
+        body = (payload.content or log.body or "").strip()
+        if not body:
+            return SaveEmailLogAsTemplateResponse(
+                created=False,
+                message="邮件正文为空，无法保存",
+                template=None,
+            )
+        title = (payload.title or log.subject or "Saved outreach email").strip()
+        if not title:
+            title = "Saved outreach email"
+
+        duplicate = await db.scalar(
+            select(MessageTemplate.id).where(
+                MessageTemplate.product_id == product_id,
+                MessageTemplate.title == title,
+                MessageTemplate.content == body,
+            )
+        )
+        if duplicate and not payload.save_as_copy:
+            return SaveEmailLogAsTemplateResponse(
+                created=False,
+                duplicate=True,
+                message="当前产品下已存在相同标题和正文的话术，可确认另存为副本",
+                template=None,
+            )
+        if duplicate and payload.save_as_copy:
+            title = f"{title}（副本）"[:255]
+
+        platform = (payload.platform or "").strip() or None
+        if not platform and log.product_influencer_id:
+            product_row = await db.scalar(
+                select(ProductInfluencer).where(
+                    ProductInfluencer.id == log.product_influencer_id,
+                    ProductInfluencer.product_id == product_id,
+                )
+            )
+            if product_row:
+                global_row = await db.scalar(
+                    select(GlobalInfluencerProfile).where(
+                        GlobalInfluencerProfile.id == product_row.global_influencer_id
+                    )
+                )
+                if global_row and global_row.platform:
+                    platform = global_row.platform
+
+        row = await MessageTemplateService.create_template(
+            db,
+            MessageTemplateCreate(
+                title=title,
+                scenario=(payload.scenario or "first_contact").strip(),
+                platform=platform,
+                language=(payload.language or "en").strip() or "en",
+                tags=payload.tags or ["ai_outreach", "saved_from_email"],
+                content=body,
+                note=(payload.note or f"Saved from email log #{log.id}").strip() or None,
+            ),
+            ctx=ctx,
+        )
+        return SaveEmailLogAsTemplateResponse(
+            created=True,
+            message="已保存为话术模板",
+            template=MessageTemplateService._to_read(row),
+        )

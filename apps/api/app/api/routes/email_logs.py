@@ -1,15 +1,29 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.deps.tenant import TenantContext, get_tenant_context
-from app.services.tenant_scope import scoped_product_id
+from app.services.tenant_scope import ALL_PRODUCTS_ID, scoped_product_id
 from app.models.enums import EmailLogStatus
 from app.schemas.common import PaginatedResponse
-from app.schemas.email_log import EmailLogFilter, EmailLogRead
+from app.schemas.email_log import (
+    EmailLogFilter,
+    EmailLogRead,
+    SaveEmailLogAsTemplateRequest,
+    SaveEmailLogAsTemplateResponse,
+)
 from app.services.email_log import EmailLogService
 
 router = APIRouter(prefix="/email-logs", tags=["email-logs"])
+
+
+def _require_product_scope(ctx: TenantContext) -> int:
+    if ctx.product_id == ALL_PRODUCTS_ID:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请先选择具体产品/品牌后再操作邮件日志",
+        )
+    return ctx.product_id
 
 
 @router.get("", response_model=PaginatedResponse[EmailLogRead])
@@ -23,3 +37,20 @@ async def list_email_logs(
 ) -> PaginatedResponse[EmailLogRead]:
     filters = EmailLogFilter(product_id=scoped_product_id(ctx.product_id), task_id=task_id, status=status)
     return await EmailLogService.list_logs(db, filters, page, page_size)
+
+
+@router.post(
+    "/{log_id}/save-as-message-template",
+    response_model=SaveEmailLogAsTemplateResponse,
+)
+async def save_email_log_as_message_template(
+    log_id: int,
+    payload: SaveEmailLogAsTemplateRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> SaveEmailLogAsTemplateResponse:
+    product_id = _require_product_scope(ctx)
+    log = await EmailLogService.get_log(db, log_id=log_id, product_id=product_id)
+    if not log:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="邮件日志不存在")
+    return await EmailLogService.save_as_message_template(db, log=log, ctx=ctx, payload=payload)

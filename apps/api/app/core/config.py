@@ -31,6 +31,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("SMTP_FROM", "SMTP_FROM_EMAIL"),
     )
     smtp_use_tls: bool = True
+    smtp_from_name: str = ""
+    outreach_daily_send_limit: int = 20
 
     openai_api_key: str = ""
     openai_model: str = "gpt-5.5"
@@ -215,10 +217,12 @@ class Settings(BaseSettings):
             "port": self.smtp_port if self.smtp_host else None,
             "user_address": self.smtp_user.strip() or None,
             "from_address": self.smtp_from or None,
+            "from_name": self.smtp_from_name.strip() or None,
             "from_user_mismatch": self.smtp_from_user_mismatch,
             "warning": warning,
             "use_tls": self.smtp_use_tls,
             "message": message,
+            "outreach_daily_send_limit": self.outreach_daily_send_limit,
         }
 
     @property

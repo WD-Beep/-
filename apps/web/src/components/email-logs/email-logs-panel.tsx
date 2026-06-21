@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Copy, Loader2, RefreshCw } from "lucide-react";
 
+import { SaveEmailAsTemplateDialog } from "@/components/email-logs/save-email-as-template-dialog";
+import { OutreachSendQueueCard } from "@/components/email-logs/outreach-send-queue-card";
 import { AdminShell } from "@/components/layout/admin-shell";
 import { useActiveProductId } from "@/components/providers/product-provider";
 import { EmptyState, ErrorAlert, LoadingState, SuccessAlert } from "@/components/shared/page-states";
@@ -17,6 +19,7 @@ import {
   type EmailLog,
 } from "@/lib/api";
 import { EMAIL_LOG_STATUS_LABELS, translateErrorMessage } from "@/lib/labels";
+import { EmailAddressCell } from "@/lib/email-address-cell";
 
 function formatDate(value: string | null): string {
   if (!value) return "-";
@@ -84,6 +87,8 @@ export function EmailLogsPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [smtpConfigured, setSmtpConfigured] = useState<boolean | null>(null);
+  const [saveLog, setSaveLog] = useState<EmailLog | null>(null);
+  const [saveDuplicateHint, setSaveDuplicateHint] = useState(false);
 
   const taskNameMap = useMemo(() => {
     const map = new Map<number, string>();
@@ -148,6 +153,8 @@ export function EmailLogsPanel() {
         />
       ) : null}
 
+      <OutreachSendQueueCard />
+
       <Card>
         <CardHeader>
           <CardTitle>发送记录</CardTitle>
@@ -176,7 +183,8 @@ export function EmailLogsPanel() {
                     <th className="pb-3 pr-4 font-medium">状态</th>
                     <th className="pb-3 pr-4 font-medium">附件路径</th>
                     <th className="pb-3 pr-4 font-medium">错误信息</th>
-                    <th className="pb-3 font-medium">发送时间</th>
+                    <th className="pb-3 pr-4 font-medium">发送时间</th>
+                    <th className="pb-3 font-medium">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -185,14 +193,14 @@ export function EmailLogsPanel() {
                     return (
                       <tr key={log.id} className="border-b align-top last:border-0">
                         <td className="py-3 pr-4 font-medium">{resolveTaskName(log.task_id)}</td>
-                        <td className="max-w-[200px] py-3 pr-4">
-                          <p className="break-all">{log.sender_email || "-"}</p>
+                        <td className="py-3 pr-4">
+                          <EmailAddressCell email={log.sender_email} />
                         </td>
                         <td className="py-3 pr-4 text-xs">
                           {log.influencer_username ? `@${log.influencer_username}` : "-"}
                         </td>
-                        <td className="max-w-[200px] py-3 pr-4">
-                          <p className="break-all">{log.recipients.join(", ") || "-"}</p>
+                        <td className="py-3 pr-4">
+                          <EmailAddressCell email={log.recipients[0] ?? null} />
                         </td>
                         <td className="max-w-[240px] py-3 pr-4">
                           <p className="break-all">{log.subject}</p>
@@ -240,6 +248,22 @@ export function EmailLogsPanel() {
                           </p>
                         </td>
                         <td className="py-3 whitespace-nowrap">{formatDate(log.sent_at)}</td>
+                        <td className="py-3">
+                          {log.generated_by_ai && log.status === "sent" && log.body ? (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                setSaveDuplicateHint(false);
+                                setSaveLog(log);
+                              }}
+                            >
+                              保存为话术
+                            </Button>
+                          ) : (
+                            <span className="text-muted-foreground">-</span>
+                          )}
+                        </td>
                       </tr>
                     );
                   })}
@@ -249,6 +273,16 @@ export function EmailLogsPanel() {
           )}
         </CardContent>
       </Card>
+
+      {saveLog ? (
+        <SaveEmailAsTemplateDialog
+          log={saveLog}
+          open={Boolean(saveLog)}
+          duplicateHint={saveDuplicateHint}
+          onClose={() => setSaveLog(null)}
+          onSaved={() => setSaveLog(null)}
+        />
+      ) : null}
     </AdminShell>
   );
 }

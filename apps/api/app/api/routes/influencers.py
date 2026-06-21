@@ -21,10 +21,17 @@ from app.services.contact_discovery import ContactDiscoveryService
 from app.services.export import build_influencer_library_excel
 from app.services.influencer_lead import InfluencerLeadService
 from app.services.influencer_source import InfluencerSourceService
+from app.schemas.outreach_email import (
+    SingleOutreachEmailPreviewResponse,
+    SingleOutreachEmailSendRequest,
+    SingleOutreachEmailSendResponse,
+    OutreachSendQueueEnqueueRequest,
+    OutreachSendQueueRead,
+)
+from app.services.outreach_send_queue_service import OutreachSendQueueService
+from app.services.single_outreach_email_service import SingleOutreachEmailService
 
 router = APIRouter(prefix="/influencers", tags=["influencers"])
-
-
 async def _require_product_influencer(db: AsyncSession, ctx: TenantContext, influencer_id: int):
     pair = await ProductInfluencerService.get_product_influencer(
         db, product_id=ctx.product_id, record_id=influencer_id
@@ -356,6 +363,60 @@ async def refresh_influencer_contact(
         linktree_url=result.linktree_url,
         whatsapp=result.whatsapp,
         telegram=result.telegram,
+    )
+
+
+@router.post(
+    "/{influencer_id}/outreach-email/preview",
+    response_model=SingleOutreachEmailPreviewResponse,
+)
+async def preview_influencer_outreach_email(
+    influencer_id: int,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> SingleOutreachEmailPreviewResponse:
+    return await SingleOutreachEmailService.preview(
+        db,
+        product_id=ctx.product_id,
+        influencer_id=influencer_id,
+    )
+
+
+@router.post(
+    "/{influencer_id}/outreach-email/send",
+    response_model=SingleOutreachEmailSendResponse,
+)
+async def send_influencer_outreach_email(
+    influencer_id: int,
+    payload: SingleOutreachEmailSendRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> SingleOutreachEmailSendResponse:
+    return await SingleOutreachEmailService.send(
+        db,
+        product_id=ctx.product_id,
+        user_id=ctx.user_id,
+        influencer_id=influencer_id,
+        payload=payload,
+    )
+
+
+@router.post(
+    "/{influencer_id}/outreach-email/enqueue",
+    response_model=OutreachSendQueueRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def enqueue_influencer_outreach_email(
+    influencer_id: int,
+    payload: OutreachSendQueueEnqueueRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> OutreachSendQueueRead:
+    return await OutreachSendQueueService.enqueue(
+        db,
+        ctx=ctx,
+        influencer_id=influencer_id,
+        payload=payload,
     )
 
 

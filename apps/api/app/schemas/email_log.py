@@ -5,6 +5,7 @@ from pydantic import BaseModel, EmailStr, Field
 from app.models.enums import EmailLogStatus
 from app.schemas.common import ORMModel
 from app.schemas.knowledge import MatchedKnowledgeItem
+from app.schemas.message_template import MessageTemplateRead
 
 
 class EmailLogRead(ORMModel):
@@ -31,3 +32,21 @@ class EmailLogFilter(BaseModel):
     product_id: int | None = None
     task_id: int | None = None
     status: EmailLogStatus | None = None
+
+
+class SaveEmailLogAsTemplateRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=255)
+    scenario: str = Field(default="first_contact", max_length=64)
+    platform: str | None = Field(default=None, max_length=32)
+    language: str | None = Field(default="en", max_length=16)
+    tags: list[str] = Field(default_factory=lambda: ["ai_outreach", "saved_from_email"])
+    content: str | None = None
+    note: str | None = None
+    save_as_copy: bool = False
+
+
+class SaveEmailLogAsTemplateResponse(BaseModel):
+    created: bool
+    duplicate: bool = False
+    message: str
+    template: MessageTemplateRead | None = None

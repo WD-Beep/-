@@ -95,20 +95,12 @@ def select_outreach_template(influencer: Influencer, templates: dict | None) -> 
 
 
 def resolve_influencer_email(influencer: Influencer) -> str | None:
-    if not influencer.final_email:
-        fallback = (
-            influencer.business_email
-            or influencer.public_email
-            or influencer.email
-        )
-        if fallback:
-            return str(fallback).lower()
-    return (
-        influencer.final_email
-        or influencer.business_email
-        or influencer.public_email
-        or influencer.email
-    )
+    """收件邮箱优先级：final_email > business_email > public_email > email。"""
+    for field in ("final_email", "business_email", "public_email", "email"):
+        value = getattr(influencer, field, None)
+        if value and str(value).strip():
+            return str(value).strip().lower()
+    return None
 
 
 def resolve_follower_tier(followers: int | None) -> str:

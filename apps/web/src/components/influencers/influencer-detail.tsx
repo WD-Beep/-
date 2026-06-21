@@ -108,8 +108,8 @@ function followStatusLabel(status: string | null): string {
 function resolvePrimaryEmail(influencer: Influencer): string | null {
   return (
     influencer.final_email ||
-    influencer.public_email ||
     influencer.business_email ||
+    influencer.public_email ||
     influencer.email
   );
 }

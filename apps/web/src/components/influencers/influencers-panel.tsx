@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 
 import { BatchOutreachDialog } from "@/components/influencers/batch-outreach-dialog";
+import { OutreachEmailDialog } from "@/components/influencers/outreach-email-dialog";
 import { PlatformOrganizer } from "@/components/influencers/platform-organizer";
 import { ScriptRecommendDialog } from "@/components/influencers/script-recommend-dialog";
 import { AdminShell } from "@/components/layout/admin-shell";
@@ -183,7 +184,12 @@ function priorityBadgeClass(priority: string | null | undefined): string {
 }
 
 function resolveEmail(item: Influencer): string | null {
-  return item.final_email || item.public_email || item.business_email || item.email;
+  return (
+    item.final_email ||
+    item.business_email ||
+    item.public_email ||
+    item.email
+  );
 }
 
 function resolveContactSummary(item: Influencer): string {
@@ -288,6 +294,7 @@ export function InfluencersPanel() {
   const [searchQuery, setSearchQuery] = useState("");
   const [operatorName, setOperatorName] = useState("");
   const [scriptRecommendTarget, setScriptRecommendTarget] = useState<Influencer | null>(null);
+  const [outreachEmailTarget, setOutreachEmailTarget] = useState<Influencer | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [batchOutreachOpen, setBatchOutreachOpen] = useState(false);
 
@@ -830,6 +837,17 @@ export function InfluencersPanel() {
                                   </span>
                                 )}
                               </Button>
+                              {email ? (
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  disabled={busy}
+                                  onClick={() => setOutreachEmailTarget(item)}
+                                >
+                                  <Mail className="mr-1 h-3.5 w-3.5" />
+                                  AI 定制邮件
+                                </Button>
+                              ) : null}
                               <Button
                                 size="sm"
                                 variant="secondary"
@@ -887,6 +905,17 @@ export function InfluencersPanel() {
           influencer={scriptRecommendTarget}
           open
           onClose={() => setScriptRecommendTarget(null)}
+        />
+      ) : null}
+
+      {outreachEmailTarget ? (
+        <OutreachEmailDialog
+          influencer={outreachEmailTarget}
+          open
+          onClose={() => setOutreachEmailTarget(null)}
+          onSent={() => {
+            void load(apiFilters, page);
+          }}
         />
       ) : null}
 

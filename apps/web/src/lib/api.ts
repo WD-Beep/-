@@ -676,10 +676,12 @@ export type SmtpStatus = {
   port: number | null;
   user_address: string | null;
   from_address: string | null;
+  from_name?: string | null;
   from_user_mismatch: boolean;
   warning: string | null;
   use_tls: boolean;
   message: string;
+  outreach_daily_send_limit?: number;
 };
 
 export type AiStatus = {
@@ -1561,6 +1563,7 @@ export type MessageTemplate = {
   last_used_at: string | null;
   created_at: string;
   updated_at: string;
+  is_system_default?: boolean;
 };
 
 export type MessageTemplatePayload = {
@@ -1812,6 +1815,180 @@ export async function sendOutreachBatch(payload: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export type SaveEmailLogAsTemplatePayload = {
+  title?: string;
+  scenario?: string;
+  platform?: string | null;
+  language?: string | null;
+  tags?: string[];
+  content?: string;
+  note?: string | null;
+  save_as_copy?: boolean;
+};
+
+export type SaveEmailLogAsTemplateResponse = {
+  created: boolean;
+  duplicate: boolean;
+  message: string;
+  template: MessageTemplate | null;
+};
+
+export async function saveEmailLogAsMessageTemplate(
+  logId: number,
+  payload: SaveEmailLogAsTemplatePayload,
+): Promise<SaveEmailLogAsTemplateResponse> {
+  const response = await apiFetch(`${API_URL}/api/email-logs/${logId}/save-as-message-template`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export type SingleOutreachEmailPreview = {
+  subject: string;
+  body: string;
+  recipient: string;
+  sender_email: string;
+  sender_display?: string;
+  template_title: string;
+  reason: string;
+  matched_knowledge: MatchedKnowledgeItem[];
+};
+
+export type SingleOutreachEmailSendResponse = {
+  success: boolean;
+  message: string;
+  email_log: EmailLog | null;
+};
+
+export async function previewInfluencerOutreachEmail(
+  influencerId: number,
+): Promise<SingleOutreachEmailPreview> {
+  const response = await apiFetch(
+    `${API_URL}/api/influencers/${influencerId}/outreach-email/preview`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function sendInfluencerOutreachEmail(
+  influencerId: number,
+  payload: { subject: string; body: string },
+): Promise<SingleOutreachEmailSendResponse> {
+  const response = await apiFetch(
+    `${API_URL}/api/influencers/${influencerId}/outreach-email/send`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export type OutreachSendQueueItem = {
+  id: number;
+  product_id: number;
+  user_id: number;
+  product_influencer_id: number;
+  recipient: string;
+  sender_email: string | null;
+  subject: string;
+  body: string;
+  status: string;
+  scheduled_at: string | null;
+  sent_at: string | null;
+  error_message: string | null;
+  generated_by_ai: boolean;
+  ai_reason: string | null;
+  email_log_id: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OutreachSendQueueProcessResult = {
+  processed: number;
+  sent: number;
+  failed: number;
+  skipped: number;
+  daily_limit: number;
+  sent_today: number;
+  message: string;
+};
+
+export async function enqueueInfluencerOutreachEmail(
+  influencerId: number,
+  payload: {
+    subject: string;
+    body: string;
+    matched_knowledge?: MatchedKnowledgeItem[];
+    ai_reason?: string;
+    template_title?: string;
+    allow_resend?: boolean;
+  },
+): Promise<OutreachSendQueueItem> {
+  const response = await apiFetch(
+    `${API_URL}/api/influencers/${influencerId}/outreach-email/enqueue`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchOutreachSendQueue(params: {
+  page?: number;
+  pageSize?: number;
+  status?: string;
+} = {}): Promise<PaginatedResponse<OutreachSendQueueItem>> {
+  const query = new URLSearchParams();
+  query.set("page", String(params.page ?? 1));
+  query.set("page_size", String(params.pageSize ?? 50));
+  if (params.status) query.set("status", params.status);
+  const response = await apiFetch(`${API_URL}/api/outreach-send-queue?${query.toString()}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function processTodayOutreachQueue(): Promise<OutreachSendQueueProcessResult> {
+  const response = await apiFetch(`${API_URL}/api/outreach-send-queue/process-today`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function cancelOutreachQueueItem(itemId: number): Promise<OutreachSendQueueItem> {
+  const response = await apiFetch(`${API_URL}/api/outreach-send-queue/${itemId}`, {
+    method: "DELETE",
   });
   if (!response.ok) {
     throw new Error(await parseError(response));

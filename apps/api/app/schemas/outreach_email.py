@@ -1,5 +1,8 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
+from app.schemas.email_log import EmailLogRead
 from app.schemas.knowledge import MatchedKnowledgeItem
 
 
@@ -90,3 +93,69 @@ class OutreachBatchSendResponse(BaseModel):
     items: list[OutreachSendItemResult]
     summary: OutreachBatchSendSummary
     dry_run: bool
+
+
+class SingleOutreachEmailPreviewResponse(BaseModel):
+    subject: str
+    body: str
+    recipient: str
+    sender_email: str
+    sender_display: str = ""
+    template_title: str = ""
+    reason: str = ""
+    matched_knowledge: list[MatchedKnowledgeItem] = Field(default_factory=list)
+
+
+class SingleOutreachEmailSendRequest(BaseModel):
+    subject: str = Field(min_length=1, max_length=500)
+    body: str = Field(min_length=1, max_length=20000)
+
+
+class SingleOutreachEmailSendResponse(BaseModel):
+    success: bool
+    message: str
+    email_log: EmailLogRead | None = None
+
+
+class OutreachSendQueueEnqueueRequest(BaseModel):
+    subject: str = Field(min_length=1, max_length=500)
+    body: str = Field(min_length=1, max_length=20000)
+    matched_knowledge: list[MatchedKnowledgeItem] | None = None
+    ai_reason: str | None = None
+    template_title: str | None = None
+    scheduled_at: datetime | None = None
+    allow_resend: bool = False
+
+
+class OutreachSendQueueRead(BaseModel):
+    id: int
+    product_id: int
+    user_id: int
+    product_influencer_id: int
+    recipient: str
+    sender_email: str | None
+    subject: str
+    body: str
+    status: str
+    scheduled_at: datetime | None
+    sent_at: datetime | None
+    error_message: str | None
+    generated_by_ai: bool
+    matched_knowledge: list[MatchedKnowledgeItem] | None = None
+    ai_reason: str | None = None
+    allow_resend: bool = False
+    email_log_id: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class OutreachSendQueueProcessResponse(BaseModel):
+    processed: int
+    sent: int
+    failed: int
+    skipped: int
+    daily_limit: int
+    sent_today: int
+    message: str

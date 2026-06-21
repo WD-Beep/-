@@ -14,6 +14,7 @@ from app.models.influencer_followup import InfluencerFollowup
 from app.models.link_import_batch import LinkImportBatch
 from app.models.knowledge import KnowledgeBase, KnowledgeChunk, KnowledgeDocument
 from app.models.message_template import MessageTemplate
+from app.models.outreach_send_queue import OutreachSendQueueItem
 from app.models.product_influencer import ProductInfluencer
 from app.models.product_influencer_source import ProductInfluencerSource
 from app.models.tenant import Product, User, Workspace, WorkspaceMember
@@ -29,6 +30,7 @@ __all__ = [
     "EmailLog",
     "LinkImportBatch",
     "MessageTemplate",
+    "OutreachSendQueueItem",
     "KnowledgeBase",
     "KnowledgeDocument",
     "KnowledgeChunk",

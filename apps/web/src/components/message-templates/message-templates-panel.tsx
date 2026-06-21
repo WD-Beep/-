@@ -332,7 +332,7 @@ export function MessageTemplatesPanel() {
           ) : items.length === 0 ? (
             <EmptyState
               title="暂无话术"
-              description="点击「新增话术」保存首次联系、跟进、报价等常用沟通模板。"
+              description="首次打开将自动加载系统默认英文外联模板；也可点击「新增话术」保存自定义模板。"
             />
           ) : (
             <div className="space-y-4">
@@ -350,6 +350,11 @@ export function MessageTemplatesPanel() {
                       <div className="min-w-0 flex-1 space-y-2">
                         <div className="flex flex-wrap items-center gap-2">
                           <h3 className="font-medium">{template.title}</h3>
+                          {template.is_system_default ? (
+                            <Badge variant="outline" className="text-xs">
+                              系统默认
+                            </Badge>
+                          ) : null}
                           <Badge variant="secondary">
                             {messageTemplateScenarioLabel(template.scenario)}
                           </Badge>

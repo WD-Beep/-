@@ -21,6 +21,7 @@ class MessageTemplateRead(ORMModel):
     last_used_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    is_system_default: bool = False
 
 
 class MessageTemplateCreate(BaseModel):

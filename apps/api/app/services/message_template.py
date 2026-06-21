@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps.tenant import TenantContext, require_write_product_id
 from app.models.message_template import MessageTemplate
+from app.services.default_message_templates import is_system_default_template
 from app.schemas.common import PaginatedResponse
 from app.schemas.message_template import (
     MessageTemplateCreate,
@@ -16,6 +17,11 @@ from app.schemas.message_template import (
 
 
 class MessageTemplateService:
+    @staticmethod
+    def _to_read(row: MessageTemplate) -> MessageTemplateRead:
+        data = MessageTemplateRead.model_validate(row)
+        return data.model_copy(update={"is_system_default": is_system_default_template(row)})
+
     @staticmethod
     def _normalize_tags(tags: list[str] | None) -> list[str]:
         if not tags:
@@ -70,7 +76,7 @@ class MessageTemplateService:
             .offset((page - 1) * page_size)
             .limit(page_size)
         )
-        items = [MessageTemplateRead.model_validate(row) for row in result.scalars().all()]
+        items = [MessageTemplateService._to_read(row) for row in result.scalars().all()]
         return PaginatedResponse(
             items=items,
             total=total,

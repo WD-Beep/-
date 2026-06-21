@@ -88,3 +88,22 @@ async def load_email_sent_map(
         )
 
     return details
+
+
+async def product_influencer_has_successful_email_sent(
+    db: AsyncSession,
+    *,
+    product_id: int,
+    product_influencer_id: int,
+) -> bool:
+    """当前产品下该 product_influencer 是否已有成功 email_logs。"""
+    found = await db.scalar(
+        select(EmailLog.id)
+        .where(
+            EmailLog.product_id == product_id,
+            EmailLog.product_influencer_id == product_influencer_id,
+            EmailLog.status.in_(tuple(SUCCESS_EMAIL_STATUSES)),
+        )
+        .limit(1)
+    )
+    return found is not None

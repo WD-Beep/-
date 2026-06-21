@@ -11,6 +11,7 @@ from app.schemas.message_template import (
     MessageTemplateRead,
     MessageTemplateUpdate,
 )
+from app.services.default_message_templates import ensure_default_templates_for_product
 from app.services.message_template import MessageTemplateService
 from app.services.tenant_scope import ALL_PRODUCTS_ID
 
@@ -44,8 +45,10 @@ async def list_message_templates(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> PaginatedResponse[MessageTemplateRead]:
+    product_id = _require_product_scope(ctx)
+    await ensure_default_templates_for_product(db, ctx=ctx, product_id=product_id)
     filters = MessageTemplateFilter(
-        product_id=_require_product_scope(ctx),
+        product_id=product_id,
         search=search,
         scenario=scenario,
         platform=platform,
@@ -63,7 +66,7 @@ async def create_message_template(
 ) -> MessageTemplateRead:
     _require_product_scope(ctx)
     row = await MessageTemplateService.create_template(db, data, ctx=ctx)
-    return MessageTemplateRead.model_validate(row)
+    return MessageTemplateService._to_read(row)
 
 
 @router.get("/{template_id}", response_model=MessageTemplateRead)
@@ -76,7 +79,7 @@ async def get_message_template(
     row = await MessageTemplateService.get_template(db, template_id, product_id=product_id)
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="话术不存在")
-    return MessageTemplateRead.model_validate(row)
+    return MessageTemplateService._to_read(row)
 
 
 @router.patch("/{template_id}", response_model=MessageTemplateRead)
@@ -92,7 +95,7 @@ async def update_message_template(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="话术不存在")
     _ensure_template_access(row, ctx)
     updated = await MessageTemplateService.update_template(db, row, data)
-    return MessageTemplateRead.model_validate(updated)
+    return MessageTemplateService._to_read(updated)
 
 
 @router.delete("/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -121,7 +124,7 @@ async def use_message_template(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="话术不存在")
     _ensure_template_access(row, ctx)
     updated = await MessageTemplateService.record_use(db, row)
-    return MessageTemplateRead.model_validate(updated)
+    return MessageTemplateService._to_read(updated)
 
 
 @router.post("/{template_id}/duplicate", response_model=MessageTemplateRead, status_code=status.HTTP_201_CREATED)
@@ -135,4 +138,4 @@ async def duplicate_message_template(
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="话术不存在")
     copy = await MessageTemplateService.duplicate_template(db, row, ctx=ctx)
-    return MessageTemplateRead.model_validate(copy)
+    return MessageTemplateService._to_read(copy)
