@@ -28,7 +28,7 @@ export function LoginForm() {
   const redirectTo = searchParams.get("from") || "/";
 
   const [username, setUsername] = useState(AUTH_USERNAME);
-  const [password, setPassword] = useState("");
+  const [password, setPassword] = useState(AUTH_PASSWORD);
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
   const [error, setError] = useState<string | null>(null);
