@@ -157,8 +157,8 @@ export function matchesLtkLinkImportUrl(raw: string): boolean {
 export function matchesShopmyLinkImportUrl(raw: string): boolean {
   if (!hostIn(raw, ["shopmy.us", "www.shopmy.us"])) return false;
   const parts = urlPathParts(raw);
-  if (parts.length !== 1 && !(parts.length === 2 && parts[0].toLowerCase() === "shop")) return false;
-  const username = parts.length === 2 ? parts[1] : parts[0];
+  if (parts.length !== 1) return false;
+  const username = parts[0];
   return !SHOPMY_RESERVED.has(username.toLowerCase()) && HANDLE_RE.test(username);
 }
 

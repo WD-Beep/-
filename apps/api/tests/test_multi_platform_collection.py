@@ -18,6 +18,7 @@ from app.services.collection_runner import (
     _split_keyword_seed_platforms,
     run_instagram_pipeline_with_provider_check,
 )
+from app.services.collection_task import CollectionTaskService
 from app.services.link_import import LinkImportService
 from app.services.link_import import LinkImportExecuteResult
 from app.services.multi_platform_runner import (
@@ -26,6 +27,7 @@ from app.services.multi_platform_runner import (
     determine_multi_platform_status,
     merge_platform_results,
 )
+from app.services.api_direct_provider import discover_non_instagram_platforms
 from app.services.shopping_seed_runner import KeywordSeedDiscoveryResult
 from app.services.collect_errors import summarize_errors
 from app.services.instagram_pipeline import PipelineRunStats
@@ -60,6 +62,33 @@ def test_keyword_discovery_task_create_for_core_platforms(platform: str):
     assert task.platform == platform
     assert task.platforms == [platform]
     assert task.keywords == ["amazon finds"]
+
+
+def test_stable_collection_mode_applies_conservative_task_defaults():
+    payload = CollectionTaskCreate(
+        **_discovery_payload(
+            platform="multi",
+            platforms=["youtube", "tiktok", "facebook"],
+            discovery_limit=100,
+            require_email=True,
+            require_contact=True,
+            strict_quality_filter=True,
+            insert_qualified_only=True,
+            stable_collection_mode=True,
+        )
+    )
+    data = CollectionTaskService._serialize_task_data(payload.model_dump())
+    data = CollectionTaskService._apply_high_value_first_defaults(data, set(payload.model_fields_set))
+    data = CollectionTaskService._apply_stable_collection_defaults(data)
+
+    assert data["discovery_limit"] == 20
+    assert data["require_email"] is False
+    assert data["require_contact"] is False
+    assert data["strict_quality_filter"] is False
+    assert data["insert_qualified_only"] is False
+    assert data["platform"] == "youtube"
+    assert data["platforms"] == ["youtube"]
+    assert data["run_checkpoint"]["stable_collection_mode"] is True
 
 
 def test_link_import_profile_platforms_still_supported():
@@ -322,6 +351,68 @@ def test_multi_platform_instagram_failure_other_platform_continues():
     assert status == CollectionTaskStatus.PARTIAL_FAILED
     assert "tiktok" in aggregate.platform_successes
     assert any("instagram" in failure.lower() for failure in aggregate.platform_failures)
+
+
+def test_single_platform_timeout_does_not_block_other_platform(monkeypatch):
+    task = CollectionTask(
+        id=1,
+        name="competitor timeout isolation",
+        platform="multi",
+        platforms=["youtube", "facebook"],
+        keywords=["amazon finds"],
+        collection_mode=CollectionMode.COMPETITOR_PRODUCT.value,
+        discovery_limit=10,
+    )
+
+    async def fake_discover_platform(_task, platform, *, checkpoint=None):
+        if platform == "youtube":
+            raise TimeoutError("youtube timeout")
+        return PlatformDiscoveryResult(
+            platform=platform,
+            items=[object()],
+            discovered_count=1,
+            deduped_count=1,
+            profile_fetched_count=1,
+            api_requests=1,
+        )
+
+    monkeypatch.setattr(
+        "app.services.api_direct_provider.discover_platform",
+        fake_discover_platform,
+    )
+    monkeypatch.setattr(
+        "app.services.competitor_product_discovery.competitor_task_for_platform_discovery",
+        lambda task_arg: task_arg,
+    )
+    monkeypatch.setattr(
+        "app.services.competitor_product_discovery.order_competitor_discovery_platforms",
+        lambda platforms: platforms,
+    )
+    monkeypatch.setattr(
+        "app.services.competitor_product_discovery.apply_competitor_product_relevance_to_platform_results",
+        lambda results, task_arg: None,
+    )
+
+    results = anyio.run(
+        discover_non_instagram_platforms,
+        task,
+        ["youtube", "facebook"],
+    )
+
+    by_platform = {result.platform: result for result in results}
+    assert by_platform["youtube"].skipped is True
+    assert by_platform["youtube"].provider_availability_state["youtube"]["reason"] == "timeout"
+    assert by_platform["facebook"].items
+    aggregate = merge_platform_results(
+        instagram_result=None,
+        instagram_funnel=None,
+        instagram_errors=[],
+        instagram_candidate_rows=[],
+        instagram_collected=[],
+        platform_results=results,
+    )
+    assert aggregate.platform_api_counts["facebook"] == 1
+    assert aggregate.provider_availability_state["youtube"]["reason"] == "timeout"
 
 
 def test_merge_platform_results_accepts_pipeline_run_stats_without_external_link_fields():

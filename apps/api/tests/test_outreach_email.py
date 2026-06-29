@@ -417,3 +417,50 @@ def test_send_uses_profile_email_not_client_payload():
             await db.commit()
 
     asyncio.run(_run())
+
+
+def test_send_rejects_recipient_same_as_sender():
+    async def _run() -> None:
+        suffix = _suffix()
+        sender = "sender@company.com"
+        async with async_session_factory() as db:
+            record = await _create_influencer(
+                db, suffix=suffix, email=sender, follow_status="new"
+            )
+            await db.commit()
+            try:
+                from unittest.mock import patch
+
+                from app.core.config import Settings
+
+                mock_settings = Settings(
+                    database_url="postgresql+asyncpg://postgres:postgres@localhost:5432/test",
+                    smtp_host="smtp.example.com",
+                    smtp_port=465,
+                    smtp_user=sender,
+                    smtp_password="secret",
+                    smtp_from=sender,
+                )
+                with patch("app.services.outreach_recipient.settings", mock_settings):
+                    with pytest.raises(Exception) as exc:
+                        await SingleOutreachEmailService.send(
+                            db,
+                            product_id=1,
+                            user_id=1,
+                            influencer_id=record.id,
+                            payload=SingleOutreachEmailSendRequest(
+                                subject="S",
+                                body="B",
+                            ),
+                        )
+                assert "发件邮箱相同" in str(exc.value.detail)
+            finally:
+                await db.execute(delete(ProductInfluencer).where(ProductInfluencer.id == record.id))
+                gp = await db.get(GlobalInfluencerProfile, record.global_influencer_id)
+                if gp:
+                    await db.execute(
+                        delete(GlobalInfluencerProfile).where(GlobalInfluencerProfile.id == gp.id)
+                    )
+                await db.commit()
+
+    asyncio.run(_run())

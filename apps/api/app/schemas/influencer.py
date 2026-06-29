@@ -330,6 +330,11 @@ class InfluencerFilter(BaseModel):
     platform: str | None = None
     country: str | None = None
     category: str | None = None
+    niche: str | None = None
+    tag: str | None = Field(
+        default=None,
+        description="Match product influencer tags (single tag)",
+    )
     follow_status: str | None = None
     lead_status: str | None = None
     lead_priority: str | None = None
@@ -356,6 +361,10 @@ class InfluencerFilter(BaseModel):
         default=None,
         description="sent | unsent — filter by successful email send history",
     )
+    exclude_terminal_statuses: bool | None = Field(
+        default=None,
+        description="Exclude blacklisted, invalid, replied and active follow-up statuses",
+    )
     collection_task_id: int | None = Field(default=None, ge=1)
     created_within_hours: int | None = Field(default=None, ge=1, le=720)
     collected_within_days: int | None = Field(default=None, ge=1, le=365)
@@ -376,6 +385,16 @@ class PlatformStatsResponse(BaseModel):
     items: list[PlatformStatItem]
 
 
+class InfluencerBulkDeleteRequest(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=500)
+
+
+class InfluencerBulkDeleteResponse(BaseModel):
+    deleted_count: int
+    deleted_ids: list[int] = Field(default_factory=list)
+    missing_ids: list[int] = Field(default_factory=list)
+
+
 class InfluencerExportFilter(InfluencerFilter):
     keyword: str | None = None
 
@@ -384,6 +403,8 @@ class InfluencerExportFilter(InfluencerFilter):
             platform=self.platform,
             country=self.country,
             category=self.category,
+            niche=self.niche,
+            tag=self.tag,
             follow_status=self.follow_status,
             lead_status=self.lead_status,
             lead_priority=self.lead_priority,
@@ -404,6 +425,7 @@ class InfluencerExportFilter(InfluencerFilter):
             missing_contact=self.missing_contact,
             high_credibility_contact=self.high_credibility_contact,
             email_status=self.email_status,
+            exclude_terminal_statuses=self.exclude_terminal_statuses,
             collection_task_id=self.collection_task_id,
             created_within_hours=self.created_within_hours,
             collected_within_days=self.collected_within_days,

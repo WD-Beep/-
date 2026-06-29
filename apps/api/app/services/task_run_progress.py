@@ -334,7 +334,11 @@ def clear_interrupted_checkpoint(checkpoint: dict[str, Any] | None) -> dict[str,
 def _force_persist_cleared_field(task: CollectionTask, field_name: str, value: Any) -> None:
     """Ensure NULL/error clears survive concurrent stale-reconcile writes."""
     setattr(task, field_name, value)
-    flag_modified(task, field_name)
+    try:
+        flag_modified(task, field_name)
+    except Exception:
+        # Unit tests often use lightweight task doubles instead of ORM instances.
+        pass
 
 
 def clear_task_error_fields(task: CollectionTask) -> None:
@@ -349,19 +353,32 @@ def apply_terminal_task_state(
     status: str | CollectionTaskStatus,
     errors: list[str] | None = None,
     prefix: str = "",
+    summary: str | None = None,
+    inserted_count: int | None = None,
 ) -> None:
     """Persist terminal status without stale interrupt noise on successful runs."""
     value = status.value if isinstance(status, CollectionTaskStatus) else str(status)
     task.status = value
+    terminal_stage = STAGE_FAILED if value == CollectionTaskStatus.FAILED.value else STAGE_COMPLETED
+    task.current_stage = terminal_stage
+    if inserted_count is not None:
+        task.inserted_count = inserted_count
+        task.result_count = inserted_count
+        task.success_count = inserted_count
+    if summary is not None:
+        task.status_summary = summary
 
     if is_terminal_success_status(value):
         clear_task_error_fields(task)
-        if is_stale_interrupt_message(task.status_summary):
-            _force_persist_cleared_field(task, "status_summary", None)
+        if is_stale_interrupt_message(task.status_summary) or task.current_stage == STAGE_AI_PROCESSING:
+            _force_persist_cleared_field(task, "status_summary", summary)
         task.run_checkpoint = clear_interrupted_checkpoint(
             task.run_checkpoint if isinstance(task.run_checkpoint, dict) else {}
         )
-        flag_modified(task, "run_checkpoint")
+        try:
+            flag_modified(task, "run_checkpoint")
+        except Exception:
+            pass
         return
 
     _force_persist_cleared_field(task, "last_error", None)

@@ -154,3 +154,66 @@ def test_platform_stats_include_link_import_platform_with_inserted_data():
 def test_influencer_filter_accepts_value_tier():
     filters = InfluencerFilter(value_tier="manual_research")
     assert filters.value_tier == "manual_research"
+
+
+def test_bulk_delete_product_influencers_scopes_to_current_product():
+    async def _run() -> None:
+        import uuid
+        from datetime import UTC, datetime
+
+        from app.collectors.base import CollectedInfluencer
+        from app.models.product_influencer import ProductInfluencer
+        from app.services.influencer_persistence import (
+            create_global_profile_from_collected,
+            create_product_influencer_from_collected,
+        )
+        from app.services.product_influencer_service import ProductInfluencerService
+
+        suffix = uuid.uuid4().hex[:8]
+        run_at = datetime.now(UTC)
+
+        async with async_session_factory() as db_session:
+            records: list[ProductInfluencer] = []
+            for product_id, username in (
+                (1, f"delete_a_{suffix}"),
+                (1, f"delete_b_{suffix}"),
+                (2, f"keep_other_{suffix}"),
+            ):
+                item = CollectedInfluencer(
+                    platform="tiktok",
+                    username=username,
+                    profile_url=f"https://www.tiktok.com/@{username}",
+                    platform_unique_id=f"tt_{username}",
+                    followers_count=1000,
+                    engagement_rate=1.0,
+                    bio="test creator",
+                )
+                global_profile = create_global_profile_from_collected(item, run_at=run_at)
+                db_session.add(global_profile)
+                await db_session.flush()
+                record = create_product_influencer_from_collected(
+                    product_id=product_id,
+                    global_profile=global_profile,
+                    data=item,
+                    task=None,
+                    run_at=run_at,
+                )
+                db_session.add(record)
+                await db_session.flush()
+                records.append(record)
+
+            result = await ProductInfluencerService.delete_influencers(
+                db_session,
+                product_id=1,
+                record_ids=[records[0].id, records[1].id, records[2].id],
+            )
+
+            assert result.deleted_count == 2
+            assert set(result.deleted_ids) == {records[0].id, records[1].id}
+            assert records[2].id in result.missing_ids
+            assert await db_session.get(ProductInfluencer, records[0].id) is None
+            assert await db_session.get(ProductInfluencer, records[1].id) is None
+            assert await db_session.get(ProductInfluencer, records[2].id) is not None
+            await db_session.rollback()
+
+    asyncio.run(_run())

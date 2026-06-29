@@ -1868,6 +1868,8 @@ class CollectionRunnerService:
                     discovery_api_failed=discovery_api_failed,
                     instagram_only=instagram_only,
                 ),
+                summary=task.status_summary,
+                inserted_count=inserted_count,
             )
 
             await TaskCandidateService.clear_for_task(db, task.id)
@@ -1898,8 +1900,7 @@ class CollectionRunnerService:
                     CollectionTaskStatus.PARTIAL_FAILED.value,
                     CollectionTaskStatus.COMPLETED.value,
                 }:
-                    task.status_summary = f"{task.status_summary or '采集完成'}；基础数据已入库，AI 评分处理中"
-                    task.current_stage = STAGE_AI_PROCESSING
+                    task.current_stage = STAGE_COMPLETED
                     await db.commit()
                 CollectionRunnerService.schedule_influencer_ai_analysis(task.id, ai_ids)
             else:

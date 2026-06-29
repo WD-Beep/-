@@ -219,9 +219,19 @@ class KnowledgeService:
         )
         items = []
         for row in result.scalars().all():
-            chunk = KnowledgeChunkRead.model_validate(row)
-            chunk.metadata = dict(row.chunk_metadata or {})
-            items.append(chunk)
+            items.append(
+                KnowledgeChunkRead(
+                    id=row.id,
+                    document_id=row.document_id,
+                    knowledge_base_id=row.knowledge_base_id,
+                    product_id=row.product_id,
+                    chunk_index=row.chunk_index,
+                    title=row.title,
+                    content=row.content,
+                    metadata=dict(row.chunk_metadata or {}),
+                    created_at=row.created_at,
+                )
+            )
         return PaginatedResponse(
             items=items,
             total=total,

@@ -4,7 +4,8 @@ from pydantic import BaseModel, Field
 
 from app.schemas.ai import AiStatusResponse
 
-from app.schemas.email import MailchimpStatus, SmtpStatus
+from app.schemas.email import KlaviyoStatus, MailchimpStatus, SmtpStatus
+from app.schemas.email_reply import InboundEmailStatus
 
 
 
@@ -63,6 +64,10 @@ class SettingsStatusResponse(BaseModel):
     smtp: SmtpStatus
 
     mailchimp: MailchimpStatus
+
+    klaviyo: KlaviyoStatus
+
+    inbound_email: InboundEmailStatus
 
     ai: AiStatusResponse
 

@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from app.models.enums import CollectionMode
 from app.schemas.collection_task import CollectionTaskCreate, CollectionTaskUpdate
+from app.services.collection_task import CollectionTaskService
 
 
 def _base_payload(**overrides):
@@ -251,3 +252,38 @@ def test_create_task_persists_quality_filter_fields():
     assert task.insert_qualified_only is True
     assert task.strict_quality_filter is False
     assert task.export_qualified_only is True
+
+
+def test_create_service_applies_high_value_first_defaults_for_keyword_collection():
+    task = CollectionTaskCreate(**_base_payload(platform="youtube", platforms=["youtube"]))
+    payload = CollectionTaskService._serialize_task_data(task.model_dump())
+    payload = CollectionTaskService._apply_high_value_first_defaults(payload, set(task.model_fields_set))
+
+    assert payload["min_followers_count"] == 10000
+    assert payload["min_engagement_rate"] is None
+    assert payload["require_email"] is False
+    assert payload["require_contact"] is False
+    assert payload["strict_quality_filter"] is False
+    assert payload["insert_qualified_only"] is True
+    assert payload["export_qualified_only"] is True
+    assert payload["run_checkpoint"]["quality_strategy"] == "high_value_first"
+
+
+def test_create_service_respects_explicit_quality_settings():
+    task = CollectionTaskCreate(
+        **_base_payload(
+            platform="youtube",
+            platforms=["youtube"],
+            min_followers_count=None,
+            min_engagement_rate=1.5,
+            insert_qualified_only=False,
+            export_qualified_only=False,
+        )
+    )
+    payload = CollectionTaskService._serialize_task_data(task.model_dump())
+    payload = CollectionTaskService._apply_high_value_first_defaults(payload, set(task.model_fields_set))
+
+    assert payload["min_followers_count"] is None
+    assert payload["min_engagement_rate"] == 1.5
+    assert payload["insert_qualified_only"] is False
+    assert payload["export_qualified_only"] is False

@@ -50,6 +50,6 @@ def test_collection_task_defaults_are_value_oriented():
         keywords=["travelgear"],
     )
 
-    assert task.min_followers_count == 50_000
-    assert task.min_engagement_rate == 2.0
+    assert task.min_followers_count == 10_000
+    assert task.min_engagement_rate is None
     assert task.comment_discovery_enabled is False

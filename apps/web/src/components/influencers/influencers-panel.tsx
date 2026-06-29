@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bot,
   ChevronLeft,
@@ -12,12 +12,14 @@ import {
   ExternalLink,
   Loader2,
   Mail,
+  Megaphone,
   RefreshCw,
   Search,
-  Sparkles,
+  Trash2,
+  UserCheck,
+  UserX,
 } from "lucide-react";
 
-import { BatchOutreachDialog } from "@/components/influencers/batch-outreach-dialog";
 import { OutreachEmailDialog } from "@/components/influencers/outreach-email-dialog";
 import { PlatformOrganizer } from "@/components/influencers/platform-organizer";
 import { ScriptRecommendDialog } from "@/components/influencers/script-recommend-dialog";
@@ -30,9 +32,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import {
   buildInfluencersPageUrl,
+  createOutreachCampaign,
+  deleteInfluencers,
   downloadInfluencerExport,
   fetchInfluencerPlatformStats,
   fetchInfluencers,
+  generateAndSendOutreachCampaign,
   updateInfluencerLead,
   type Influencer,
   type InfluencerListFilters,
@@ -47,6 +52,7 @@ import {
   platformLabel,
   followersAudienceLabel,
   SOURCE_DISCOVERY_LABELS,
+  translateErrorMessage,
 } from "@/lib/labels";
 import {
   buildPlatformCards,
@@ -57,6 +63,15 @@ import {
   type PlatformFilterKey,
 } from "@/lib/platform-organizer";
 import { cn } from "@/lib/utils";
+import {
+  INFLUENCER_ONE_CLICK_EMAIL_BUTTON_LABEL,
+  buildOutreachCampaignsUrl,
+  buildOneClickCampaignName,
+  buildOneClickCampaignPayload,
+  resolveBulkDeleteSelection,
+  resolveBulkOutreachSelection,
+  type InfluencerSelectionMode,
+} from "@/lib/influencer-selection-helpers";
 
 type QuickFilter =
   | "all"
@@ -69,7 +84,10 @@ type QuickFilter =
   | "has_email"
   | "missing_contact"
   | "email_sent"
-  | "email_unsent";
+  | "email_unsent"
+  | "travel_blogger"
+  | "amazon_influencer"
+  | "outreach_eligible";
 
 const FILTER_LABELS: Record<QuickFilter, string> = {
   all: "全部",
@@ -83,7 +101,18 @@ const FILTER_LABELS: Record<QuickFilter, string> = {
   missing_contact: "缺联系方式",
   email_sent: "已发送邮件",
   email_unsent: "未发送邮件",
+  travel_blogger: "旅游博主",
+  amazon_influencer: "亚马逊红人",
+  outreach_eligible: "可外联（排除已回复/无效）",
 };
+
+const FILTER_GROUPS: { label: string; items: QuickFilter[] }[] = [
+  { label: "时间", items: ["all", "recent_created_24h", "recent_collected_7d"] },
+  { label: "价值", items: ["high_value", "direct_contact", "manual_research", "skip"] },
+  { label: "联系", items: ["has_email", "missing_contact", "outreach_eligible"] },
+  { label: "外联", items: ["email_unsent", "email_sent"] },
+  { label: "来源", items: ["travel_blogger", "amazon_influencer"] },
+];
 
 const PAGE_SIZE = 20;
 const MS_24H = 24 * 60 * 60 * 1000;
@@ -120,6 +149,11 @@ function toApiFilters(
   if (filter === "missing_contact") return { ...base, missingContact: true };
   if (filter === "email_sent") return { ...base, emailStatus: "sent" };
   if (filter === "email_unsent") return { ...base, emailStatus: "unsent" };
+  if (filter === "travel_blogger") return { ...base, search: search.trim() || "travel", niche: "travel" };
+  if (filter === "amazon_influencer") {
+    return { ...base, search: search.trim() || "amazon", sourceDiscoveryType: "amazon_shop" };
+  }
+  if (filter === "outreach_eligible") return { ...base, excludeTerminalStatuses: true, hasEmail: true };
   return base;
 }
 
@@ -158,14 +192,6 @@ function getFreshnessBadges(item: Influencer, taskFilterActive: boolean) {
   }
 
   return badges;
-}
-
-function valueTierBadgeVariant(
-  tier: Influencer["value_tier"] | undefined,
-): "success" | "default" | "secondary" {
-  if (tier === "direct_contact") return "success";
-  if (tier === "manual_research") return "default";
-  return "secondary";
 }
 
 function priorityBadgeClass(priority: string | null | undefined): string {
@@ -232,27 +258,6 @@ function resolveContactSummary(item: Influencer): string {
   return item.contact_summary || "缺联系方式";
 }
 
-function hasExternalContactHub(item: Influencer): boolean {
-  if (item.linktree_url || item.website || item.contact_page) return true;
-  for (const link of item.other_social_links ?? []) {
-    const type = (link.type || "").toLowerCase();
-    const url = (link.url || "").toLowerCase();
-    if (["linktree", "shopmy", "ltk", "amazon_storefront", "instagram", "facebook", "twitter", "tiktok"].includes(type)) {
-      return true;
-    }
-    if (
-      url.includes("lnktr.ee") ||
-      url.includes("linktr.ee") ||
-      url.includes("amzn.to") ||
-      url.includes("shopmy.us") ||
-      url.includes("shopltk.com")
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function aiReasonPreview(item: Influencer): string {
   return item.score_reason || item.ai_summary || "-";
 }
@@ -296,7 +301,10 @@ export function InfluencersPanel() {
   const [scriptRecommendTarget, setScriptRecommendTarget] = useState<Influencer | null>(null);
   const [outreachEmailTarget, setOutreachEmailTarget] = useState<Influencer | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-  const [batchOutreachOpen, setBatchOutreachOpen] = useState(false);
+  const [selectionMode, setSelectionMode] = useState<InfluencerSelectionMode>("none");
+  const [undoLead, setUndoLead] = useState<{ id: number; status: string | null } | null>(null);
+  const [oneClickSending, setOneClickSending] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   const statsFilters = useMemo(
     () => toApiFilters(activeFilter, searchQuery, taskFilterActive ? taskId : undefined, "all"),
@@ -373,6 +381,13 @@ export function InfluencersPanel() {
     queueMicrotask(() => setPage(1));
   }, [activePlatform]);
 
+  useEffect(() => {
+    queueMicrotask(() => {
+      setSelectionMode("none");
+      setSelectedIds(new Set());
+    });
+  }, [activeFilter, searchQuery, activePlatform, taskId]);
+
   const handlePlatformChange = (platform: PlatformFilterKey) => {
     setPage(1);
     const params = new URLSearchParams(searchParams.toString());
@@ -412,7 +427,16 @@ export function InfluencersPanel() {
   const handleLeadAction = async (
     item: Influencer,
     payload: Parameters<typeof updateInfluencerLead>[1],
+    options?: { skipConfirm?: boolean; confirmMessage?: string },
   ) => {
+    if (
+      !options?.skipConfirm &&
+      options?.confirmMessage &&
+      !window.confirm(options.confirmMessage)
+    ) {
+      return;
+    }
+    const previousStatus = item.lead_status || item.follow_status || null;
     setActionId(item.id);
     setError(null);
     try {
@@ -420,6 +444,9 @@ export function InfluencersPanel() {
         ...payload,
         operator_name: operatorName.trim() || undefined,
       });
+      if (payload.lead_status && ["blacklisted", "invalid"].includes(payload.lead_status)) {
+        setUndoLead({ id: item.id, status: previousStatus });
+      }
       await Promise.all([load(apiFilters, page), loadStats(statsFilters)]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "操作失败");
@@ -427,6 +454,23 @@ export function InfluencersPanel() {
       setActionId(null);
     }
   };
+
+  async function handleUndoLead() {
+    if (!undoLead) return;
+    setActionId(undoLead.id);
+    try {
+      await updateInfluencerLead(undoLead.id, {
+        lead_status: undoLead.status || "new",
+        operator_name: operatorName.trim() || undefined,
+      });
+      setUndoLead(null);
+      await Promise.all([load(apiFilters, page), loadStats(statsFilters)]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "撤销失败");
+    } finally {
+      setActionId(null);
+    }
+  }
 
   const copyEmail = async (email: string | null) => {
     if (!email) return;
@@ -438,28 +482,130 @@ export function InfluencersPanel() {
   };
 
   const exportFilters = apiFilters;
-  const selectedInfluencers = items.filter((item) => selectedIds.has(item.id));
   const allPageSelected = items.length > 0 && items.every((item) => selectedIds.has(item.id));
+  const hasSelection = selectionMode === "filter_all" || selectedIds.size > 0;
+  const bulkOutreachSelection = hasSelection
+    ? resolveBulkOutreachSelection({
+        mode: selectionMode,
+        selectedIds: [...selectedIds],
+        total,
+        filters: apiFilters,
+      })
+    : null;
+  const selectedCount =
+    selectionMode === "filter_all"
+      ? total
+      : bulkOutreachSelection?.count ?? selectedIds.size;
+  const bulkDeleteIds = resolveBulkDeleteSelection([...selectedIds], selectionMode);
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+    setSelectionMode("none");
+  }
+
+  function selectAllFiltered() {
+    if (total <= 0) return;
+    setSelectionMode("filter_all");
+    setSelectedIds(new Set(items.map((item) => item.id)));
+  }
+
+  function cancelFilterAllSelection() {
+    setSelectionMode("none");
+    setSelectedIds(new Set());
+  }
 
   function toggleSelect(id: number) {
+    if (selectionMode === "filter_all") {
+      setSelectionMode("page");
+    }
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      if (next.size === 0) setSelectionMode("none");
+      else if (selectionMode === "none") setSelectionMode("page");
       return next;
     });
   }
 
   function toggleSelectAllPage() {
+    if (selectionMode === "filter_all") {
+      cancelFilterAllSelection();
+      return;
+    }
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (allPageSelected) {
         for (const item of items) next.delete(item.id);
+        setSelectionMode("none");
       } else {
         for (const item of items) next.add(item.id);
+        setSelectionMode("page");
       }
       return next;
     });
+  }
+
+  async function handleOneClickGenerateAndSend() {
+    if (!bulkOutreachSelection) return;
+    const label =
+      selectionMode === "filter_all"
+        ? `当前筛选全部 ${total} 个红人`
+        : `已选 ${selectedIds.size} 个红人`;
+    if (
+      !window.confirm(
+        `确认对${label}一键生成并发送邮件？系统会自动跳过无邮箱、已发送、已回复、黑名单和无效红人，并为每位可发送红人生成不同邮件。`,
+      )
+    ) {
+      return;
+    }
+    setOneClickSending(true);
+    setError(null);
+    try {
+      const campaign = await createOutreachCampaign(
+        buildOneClickCampaignPayload({
+          name: buildOneClickCampaignName(),
+          ids: bulkOutreachSelection.ids,
+          selectAll: bulkOutreachSelection.selectAll,
+          filters: bulkOutreachSelection.filters,
+        }),
+      );
+      const result = await generateAndSendOutreachCampaign(campaign.id);
+      clearSelection();
+      router.push(`/outreach-campaigns?highlight=${campaign.id}&message=${encodeURIComponent(result.message)}`);
+    } catch (err) {
+      setError(translateErrorMessage(err instanceof Error ? err.message : "一键生成并发送失败"));
+    } finally {
+      setOneClickSending(false);
+    }
+  }
+
+  async function handleBulkDelete() {
+    if (bulkDeleteIds.length === 0) {
+      setError("请先勾选要删除的红人");
+      return;
+    }
+    const note =
+      selectionMode === "filter_all"
+        ? "当前处于全筛选选择状态。为避免误删，本次只删除当前页已勾选的红人。"
+        : "删除后，这些红人不会再出现在当前产品的红人库。";
+    if (!window.confirm(`${note}\n\n确认删除 ${bulkDeleteIds.length} 个红人吗？`)) {
+      return;
+    }
+    setBulkDeleting(true);
+    setError(null);
+    try {
+      const result = await deleteInfluencers(bulkDeleteIds);
+      clearSelection();
+      await Promise.all([load(apiFilters, page), loadStats(statsFilters)]);
+      if (result.deleted_count === 0) {
+        setError("没有删除任何红人，可能这些数据已经被删除或不属于当前产品。");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除红人失败，请稍后再试");
+    } finally {
+      setBulkDeleting(false);
+    }
   }
 
   const hasActiveFilters =
@@ -468,16 +614,19 @@ export function InfluencersPanel() {
 
   return (
     <AdminShell title="红人库" description="多平台线索跟进工作台：筛选、联系、记录跟进状态">
+      <div className="ops-page influencer-workbench">
       {taskFilterActive ? (
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm">
-          <div>
-            正在查看采集任务入库红人
-            {taskNameParam ? ` · ${taskNameParam}` : ""}
-            {taskId ? `（任务 #${taskId}）` : ""}
+        <div className="influencer-task-alert shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm lg:px-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              正在查看采集任务入库红人
+              {taskNameParam ? ` · ${taskNameParam}` : ""}
+              {taskId ? `（任务 #${taskId}）` : ""}
+            </div>
+            <Button variant="outline" size="sm" asChild>
+              <Link href="/influencers">清除任务筛选</Link>
+            </Button>
           </div>
-          <Button variant="outline" size="sm" asChild>
-            <Link href="/influencers">清除任务筛选</Link>
-          </Button>
         </div>
       ) : null}
 
@@ -488,35 +637,46 @@ export function InfluencersPanel() {
         onSelect={handlePlatformChange}
       />
 
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <div className="flex flex-wrap gap-2">
-          {(Object.keys(FILTER_LABELS) as QuickFilter[]).map((key) => (
-            <Button
-              key={key}
-              size="sm"
-              variant={activeFilter === key ? "default" : "outline"}
-              onClick={() => handleFilterChange(key)}
-              disabled={loading}
-            >
-              {FILTER_LABELS[key]}
-            </Button>
+      <div className="ops-toolbar influencer-filter-panel shrink-0 !gap-2 !p-2">
+        <div className="flex w-full min-w-0 flex-nowrap items-center gap-2 overflow-x-auto [scrollbar-width:thin]">
+          {FILTER_GROUPS.map((group) => (
+            <div key={group.label} className="ops-filter-group">
+              <span className="text-xs font-medium text-slate-500">{group.label}</span>
+              <select
+                className="h-8 rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-800 outline-none transition-colors hover:border-slate-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                value={group.items.includes(activeFilter) ? activeFilter : ""}
+                onChange={(event) => {
+                  const value = event.target.value as QuickFilter;
+                  if (value) handleFilterChange(value);
+                }}
+                disabled={loading}
+                aria-label={`${group.label}筛选`}
+              >
+                <option value="">全部</option>
+                {group.items.map((key) => (
+                  <option key={key} value={key}>
+                    {FILTER_LABELS[key]}
+                  </option>
+                ))}
+              </select>
+            </div>
           ))}
         </div>
-        <div className="flex min-w-[160px] items-center gap-2 sm:max-w-[180px]">
+        <div className="flex min-w-[144px] items-center gap-2 sm:max-w-[160px]">
           <Input
             placeholder="操作人"
             value={operatorName}
             onChange={(e) => setOperatorName(e.target.value)}
           />
         </div>
-        <div className="flex min-w-[220px] flex-1 items-center gap-2 sm:max-w-xs">
+        <div className="flex min-w-[280px] flex-1 items-center gap-2 lg:max-w-md">
           <Input
             placeholder="搜索昵称 / 用户名"
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleSearch()}
           />
-          <Button variant="outline" size="sm" onClick={handleSearch} disabled={loading}>
+          <Button variant="outline" size="icon" onClick={handleSearch} disabled={loading} title="搜索">
             <Search className="h-4 w-4" />
           </Button>
         </div>
@@ -529,15 +689,7 @@ export function InfluencersPanel() {
           刷新列表
         </Button>
         <Button
-          variant="secondary"
-          disabled={selectedIds.size === 0}
-          onClick={() => setBatchOutreachOpen(true)}
-        >
-          <Sparkles className="h-4 w-4" />
-          AI 邮件预览{selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}
-        </Button>
-        <Button
-          variant="secondary"
+          variant="outline"
           onClick={() => {
             void downloadInfluencerExport(exportFilters).catch((err) =>
               setError(err instanceof Error ? err.message : "导出失败"),
@@ -547,26 +699,111 @@ export function InfluencersPanel() {
           <Download className="h-4 w-4" />
           导出 Excel
         </Button>
+        {hasActiveFilters ? (
+          <Button variant="ghost" size="sm" onClick={clearAllFilters}>
+            清除筛选
+          </Button>
+        ) : null}
       </div>
 
-      {error ? <ErrorAlert message={error} className="mb-4" /> : null}
+      <div className="min-h-0 flex-1 overflow-hidden">
+      {error ? <ErrorAlert message={error} className="influencer-inline-message mb-3" /> : null}
+      {undoLead ? (
+        <div className="influencer-inline-message mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/40 px-4 py-2 text-sm">
+          <span>状态已更新，可撤销最近一次黑名单/无效操作</span>
+          <Button size="sm" variant="outline" onClick={() => void handleUndoLead()}>
+            撤销
+          </Button>
+        </div>
+      ) : null}
+      {hasSelection ? (
+        <div className="influencer-selection-bar mb-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-primary/25 bg-primary/5 px-3 py-2 text-sm">
+          <div>
+            {selectionMode === "filter_all" ? (
+              <>已选择当前筛选全部 {total} 个红人</>
+            ) : (
+              <>已选择 {selectedIds.size} 个红人（当前页）</>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              disabled={oneClickSending}
+              onClick={() => void handleOneClickGenerateAndSend()}
+            >
+              {oneClickSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
+              一键生成并发送邮件 ({selectedCount})
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                if (bulkOutreachSelection?.selectAll) {
+                  router.push(
+                    buildOutreachCampaignsUrl({
+                      selectAll: true,
+                      filters: bulkOutreachSelection.filters,
+                      total: bulkOutreachSelection.count,
+                    }),
+                  );
+                } else {
+                  router.push(buildOutreachCampaignsUrl({ ids: bulkOutreachSelection?.ids ?? [...selectedIds] }));
+                }
+              }}
+            >
+              <Megaphone className="h-4 w-4" />
+              {INFLUENCER_ONE_CLICK_EMAIL_BUTTON_LABEL} ({selectedCount})
+            </Button>
+            {selectionMode === "filter_all" ? (
+              <Button size="sm" variant="outline" onClick={cancelFilterAllSelection}>
+                取消当前筛选全选
+              </Button>
+            ) : null}
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={bulkDeleting || bulkDeleteIds.length === 0}
+              onClick={() => void handleBulkDelete()}
+            >
+              {bulkDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+              删除已选 ({bulkDeleteIds.length})
+            </Button>
+            <Button size="sm" variant="ghost" onClick={clearSelection}>
+              清空选择
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>{listTitle}</CardTitle>
-          <CardDescription>
-            {taskFilterActive
-              ? `任务入库 ${total} 条 · 第 ${page}/${Math.max(pages, 1)} 页 · 按最近采集/入库时间排序`
-              : activeFilter === "all" && activePlatform === "all"
-                ? `共 ${total} 条 · 第 ${page}/${Math.max(pages, 1)} 页 · 按最近采集/入库时间排序`
-                : `筛选「${activePlatform !== "all" ? platformFilterLabel(activePlatform) : FILTER_LABELS[activeFilter]}」· 共 ${total} 条`}
-            {searchQuery ? ` · 搜索「${searchQuery}」` : ""}
-            {activePlatform !== "all" && activeFilter !== "all"
-              ? ` · ${FILTER_LABELS[activeFilter]}`
-              : ""}
-          </CardDescription>
+      <Card className="influencer-list-panel flex h-full min-h-0 flex-col overflow-hidden">
+        <CardHeader className="influencer-list-header flex shrink-0 flex-row items-center justify-between gap-3 border-b px-4 py-2">
+          <div className="min-w-0">
+            <CardTitle className="truncate text-base">{listTitle}</CardTitle>
+            <CardDescription className="truncate text-xs">
+              {taskFilterActive
+                ? `任务入库 ${total} 条 · 第 ${page}/${Math.max(pages, 1)} 页 · 按最近采集/入库时间排序`
+                : activeFilter === "all" && activePlatform === "all"
+                  ? `共 ${total} 条 · 第 ${page}/${Math.max(pages, 1)} 页 · 按最近采集/入库时间排序`
+                  : `筛选「${activePlatform !== "all" ? platformFilterLabel(activePlatform) : FILTER_LABELS[activeFilter]}」· 共 ${total} 条`}
+              {searchQuery ? ` · 搜索「${searchQuery}」` : ""}
+              {activePlatform !== "all" && activeFilter !== "all"
+                ? ` · ${FILTER_LABELS[activeFilter]}`
+                : ""}
+            </CardDescription>
+          </div>
+          {total > 0 ? (
+            <Button
+              size="sm"
+              variant={selectionMode === "filter_all" ? "default" : "outline"}
+              onClick={selectAllFiltered}
+              disabled={loading}
+              className="shrink-0"
+            >
+              全选 {total}
+            </Button>
+          ) : null}
         </CardHeader>
-        <CardContent>
+        <CardContent className="flex min-h-0 flex-1 flex-col p-0">
           {loading ? (
             <LoadingState label="加载红人数据..." />
           ) : items.length === 0 ? (
@@ -604,11 +841,11 @@ export function InfluencersPanel() {
             </div>
           ) : (
             <>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+              <div className="ops-table-wrap influencer-table-wrap">
+                <table className="ops-table influencer-workbench-table influencer-table min-w-[1120px] table-fixed">
                   <thead>
-                    <tr className="border-b text-left text-muted-foreground">
-                      <th className="pb-3 pr-2 font-medium w-8">
+                    <tr>
+                      <th className="w-9">
                         <input
                           type="checkbox"
                           checked={allPageSelected}
@@ -616,16 +853,16 @@ export function InfluencersPanel() {
                           aria-label="全选当前页"
                         />
                       </th>
-                      <th className="pb-3 pr-4 font-medium">账号</th>
-                      <th className="pb-3 pr-4 font-medium">体量 / 互动</th>
-                      <th className="pb-3 pr-4 font-medium">来源</th>
-                      <th className="pb-3 pr-4 font-medium">联系方式</th>
-                      <th className="pb-3 pr-4 font-medium">AI 推荐理由</th>
-                      <th className="pb-3 pr-4 font-medium">优先级</th>
-                      <th className="pb-3 pr-4 font-medium">跟进状态</th>
-                      <th className="pb-3 pr-4 font-medium">负责人</th>
-                      <th className="pb-3 pr-4 font-medium">下次跟进</th>
-                      <th className="pb-3 font-medium">操作</th>
+                      <th className="ops-sticky-left w-[160px]">账号</th>
+                      <th className="w-[70px]">平台</th>
+                      <th className="w-[92px]">粉丝 / 互动</th>
+                      <th className="w-[160px]">联系方式</th>
+                      <th className="w-[170px]">AI 推荐理由</th>
+                      <th className="w-[64px]">优先级</th>
+                      <th className="w-[96px]">跟进状态</th>
+                      <th className="w-[64px]">负责人</th>
+                      <th className="w-[80px]">下次跟进</th>
+                      <th className="ops-sticky-actions w-[106px] text-right">操作</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -640,11 +877,11 @@ export function InfluencersPanel() {
                       return (
                         <tr
                           key={item.id}
-                          className={`border-b last:border-0 align-top ${
+                          className={`influencer-data-row group align-top ${
                             taskFilterActive ? "bg-amber-500/5" : ""
                           }`}
                         >
-                          <td className="py-3 pr-2 align-top">
+                          <td className="align-top">
                             <input
                               type="checkbox"
                               checked={selectedIds.has(item.id)}
@@ -652,49 +889,40 @@ export function InfluencersPanel() {
                               aria-label={`选择 ${item.username}`}
                             />
                           </td>
-                          <td className="py-3 pr-4">
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <div className="font-medium">{item.display_name || item.username}</div>
+                          <td className="ops-sticky-left align-top">
+                            <div className="flex min-w-0 items-center gap-1.5">
+                              <div className="truncate font-medium">{item.display_name || item.username}</div>
                               {freshnessBadges.map((badge) => (
-                                <Badge key={badge.label} variant={badge.variant} className="text-[10px] px-1.5 py-0">
+                                <Badge key={badge.label} variant={badge.variant} className="shrink-0 px-1.5 py-0 text-[10px]">
                                   {badge.label}
                                 </Badge>
                               ))}
-                              {item.value_tier_label ? (
-                                <Badge
-                                  variant={valueTierBadgeVariant(item.value_tier)}
-                                  className="text-[10px] px-1.5 py-0"
-                                  title={item.value_tier_reason || undefined}
-                                >
-                                  {item.value_tier_label}
-                                </Badge>
-                              ) : null}
                             </div>
-                            <div className="text-xs text-muted-foreground">@{item.username}</div>
-                            <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-                              <span
-                                className={cn(
-                                  "inline-flex rounded px-1 py-0.5 text-[10px] font-medium",
-                                  item.platform === "tiktok" && "bg-slate-100 text-slate-700",
-                                  item.platform === "youtube" && "bg-red-50 text-red-700",
-                                  item.platform === "instagram" && "bg-pink-50 text-pink-700",
-                                  item.platform === "facebook" && "bg-blue-50 text-blue-700",
-                                  !["tiktok", "youtube", "instagram", "facebook"].includes(item.platform) &&
-                                    "bg-muted text-muted-foreground",
-                                )}
-                              >
-                                {platformLabel(item.platform)}
-                              </span>
-                            </div>
-                            <div className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                              入库 {formatDateTime(item.created_at)}
-                              {item.last_collected_at
-                                ? ` · 最近采集 ${formatDateTime(item.last_collected_at)}`
-                                : ""}
+                            <div className="truncate text-xs text-muted-foreground">@{item.username}</div>
+                            <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                              {item.source_discovery_type
+                                ? SOURCE_DISCOVERY_LABELS[item.source_discovery_type] ??
+                                  item.source_discovery_type
+                                : "来源 -"} · 入库 {formatDateTime(item.created_at)}
                             </div>
                           </td>
-                          <td className="py-3 pr-4">
-                            <div>
+                          <td className="align-top">
+                            <span
+                              className={cn(
+                                "inline-flex rounded px-1.5 py-0.5 text-[11px] font-medium",
+                                item.platform === "tiktok" && "bg-slate-100 text-slate-700",
+                                item.platform === "youtube" && "bg-red-50 text-red-700",
+                                item.platform === "instagram" && "bg-pink-50 text-pink-700",
+                                item.platform === "facebook" && "bg-blue-50 text-blue-700",
+                                !["tiktok", "youtube", "instagram", "facebook"].includes(item.platform) &&
+                                  "bg-muted text-muted-foreground",
+                              )}
+                            >
+                              {platformLabel(item.platform)}
+                            </span>
+                          </td>
+                          <td className="align-top tabular-nums">
+                            <div className="font-medium">
                               {item.followers_count?.toLocaleString("zh-CN") ?? "-"}
                               <span className="ml-1 text-xs text-muted-foreground">
                                 {followersAudienceLabel(item.platform)}
@@ -704,37 +932,28 @@ export function InfluencersPanel() {
                               互动 {formatPercent(item.engagement_rate)}
                             </div>
                           </td>
-                          <td className="py-3 pr-4 text-xs">
-                            {item.source_discovery_type
-                              ? SOURCE_DISCOVERY_LABELS[item.source_discovery_type] ??
-                                item.source_discovery_type
-                              : "-"}
-                          </td>
-                          <td className="py-3 pr-4 text-xs">
-                            <span className={email ? "" : "text-amber-700"}>
+                          <td className="align-top text-xs">
+                            <span className={cn("line-clamp-1", email ? "" : "text-amber-700")}>
                               {resolveContactSummary(item)}
                             </span>
-                            <div className="mt-1 text-muted-foreground">
+                            <div className="mt-1 truncate text-muted-foreground">
                               可信度 {resolveCredibility(item)}
                               {item.email_source ? ` · ${resolveEmailSource(item)}` : ""}
                             </div>
-                            {hasExternalContactHub(item) ? (
-                              <div className="mt-0.5 text-muted-foreground">含 Linktree/官网</div>
-                            ) : null}
                           </td>
-                          <td className="py-3 pr-4 max-w-[180px]">
+                          <td className="max-w-[220px] align-top">
                             <p className="line-clamp-2 text-xs text-muted-foreground">
                               {aiReasonPreview(item)}
                             </p>
                           </td>
-                          <td className="py-3 pr-4">
+                          <td className="align-top">
                             <span
                               className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${priorityBadgeClass(item.lead_priority || item.final_priority)}`}
                             >
                               {item.lead_priority || item.final_priority || "-"}
                             </span>
                           </td>
-                          <td className="py-3 pr-4">
+                          <td className="align-top">
                             <Badge variant={leadStatusVariant(status)}>
                               {leadStatusLabel(status)}
                             </Badge>
@@ -754,66 +973,91 @@ export function InfluencersPanel() {
                               <div className="mt-1 text-xs text-muted-foreground">已联系</div>
                             ) : null}
                           </td>
-                          <td className="py-3 pr-4 text-xs">
+                          <td className="align-top text-xs">
                             {item.owner_name || item.owner || "-"}
                           </td>
-                          <td className="py-3 pr-4 text-xs">{formatDate(item.next_follow_up_at)}</td>
-                          <td className="py-3">
-                            <div className="flex min-w-[220px] flex-wrap gap-1">
+                          <td className="align-top text-xs">{formatDate(item.next_follow_up_at)}</td>
+                          <td className="ops-sticky-actions align-top">
+                            <div className="influencer-row-actions flex justify-end gap-1">
                               <Button
-                                size="sm"
-                                variant="outline"
+                                size="icon"
+                                variant="ghost"
+                                className="ops-icon-button"
                                 disabled={busy}
                                 onClick={() => handleLeadAction(item, { lead_status: "to_contact" })}
+                                title="待联系"
                               >
-                                待联系
+                                <UserCheck className="h-4 w-4" />
                               </Button>
                               <Button
-                                size="sm"
-                                variant="outline"
+                                size="icon"
+                                variant="ghost"
+                                className="ops-icon-button"
                                 disabled={busy}
                                 onClick={() => handleLeadAction(item, { lead_status: "contacted" })}
+                                title="已联系"
                               >
-                                已联系
+                                <Mail className="h-4 w-4" />
                               </Button>
                               <Button
-                                size="sm"
-                                variant="outline"
+                                size="icon"
+                                variant="ghost"
+                                className="ops-icon-button"
                                 disabled={busy}
                                 onClick={() => handleLeadAction(item, { lead_status: "replied" })}
+                                title="已回复"
                               >
-                                已回复
+                                <Megaphone className="h-4 w-4" />
                               </Button>
                               <Button
-                                size="sm"
-                                variant="outline"
+                                size="icon"
+                                variant="ghost"
+                                className="ops-icon-button"
+                                disabled={busy}
+                                onClick={() => handleLeadAction(item, { lead_status: "interested" })}
+                                title="感兴趣"
+                              >
+                                <Bot className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                className="ops-icon-button text-red-600 hover:bg-red-50 hover:text-red-700"
                                 disabled={busy}
                                 onClick={() =>
                                   handleLeadAction(item, {
                                     lead_status: "invalid",
                                     invalid_reason: "业务标记无效",
+                                  }, {
+                                    confirmMessage: "确认将该红人标记为无效？后续邮件活动将跳过。",
                                   })
                                 }
+                                title="标记无效"
                               >
-                                无效
+                                <UserX className="h-4 w-4" />
                               </Button>
                               <Button
-                                size="sm"
-                                variant="outline"
+                                size="icon"
+                                variant="ghost"
+                                className="ops-icon-button text-red-600 hover:bg-red-50 hover:text-red-700"
                                 disabled={busy}
                                 onClick={() =>
                                   handleLeadAction(item, {
                                     lead_status: "blacklisted",
                                     blacklist_reason: "业务标记黑名单",
+                                  }, {
+                                    confirmMessage: "确认将该红人加入黑名单？后续邮件活动将跳过。",
                                   })
                                 }
+                                title="加入黑名单"
                               >
-                                黑名单
+                                <UserX className="h-4 w-4" />
                               </Button>
                               {email ? (
                                 <Button
-                                  size="sm"
+                                  size="icon"
                                   variant="ghost"
+                                  className="ops-icon-button"
                                   onClick={() => copyEmail(email)}
                                   title="复制邮箱"
                                 >
@@ -821,8 +1065,9 @@ export function InfluencersPanel() {
                                 </Button>
                               ) : null}
                               <Button
-                                size="sm"
+                                size="icon"
                                 variant="ghost"
+                                className="ops-icon-button"
                                 asChild={profileLink.ok}
                                 disabled={!profileLink.ok}
                                 title={profileLink.ok ? "打开主页" : profileLink.reason ?? "链接异常"}
@@ -839,25 +1084,27 @@ export function InfluencersPanel() {
                               </Button>
                               {email ? (
                                 <Button
-                                  size="sm"
-                                  variant="secondary"
+                                  size="icon"
+                                  variant="ghost"
+                                  className="ops-icon-button"
                                   disabled={busy}
                                   onClick={() => setOutreachEmailTarget(item)}
+                                  title="AI 定制邮件"
                                 >
-                                  <Mail className="mr-1 h-3.5 w-3.5" />
-                                  AI 定制邮件
+                                  <Mail className="h-4 w-4" />
                                 </Button>
                               ) : null}
                               <Button
-                                size="sm"
-                                variant="secondary"
+                                size="icon"
+                                variant="ghost"
+                                className="ops-icon-button"
                                 disabled={busy}
                                 onClick={() => setScriptRecommendTarget(item)}
+                                title="AI 推荐话术"
                               >
-                                <Bot className="mr-1 h-3.5 w-3.5" />
-                                AI 推荐话术
+                                <Bot className="h-4 w-4" />
                               </Button>
-                              <Button variant="link" className="h-auto px-1 py-0" asChild>
+                              <Button variant="ghost" size="icon" className="ops-icon-button text-xs" asChild title="详情">
                                 <Link href={`/influencers/${item.id}`}>详情</Link>
                               </Button>
                             </div>
@@ -869,7 +1116,7 @@ export function InfluencersPanel() {
                 </table>
               </div>
               {pages > 1 ? (
-                <div className="mt-4 flex items-center justify-between gap-3">
+                <div className="flex shrink-0 items-center justify-between gap-3 border-t px-4 py-2">
                   <p className="text-xs text-muted-foreground">
                     显示 {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} / {total}
                   </p>
@@ -899,6 +1146,7 @@ export function InfluencersPanel() {
           )}
         </CardContent>
       </Card>
+      </div>
 
       {scriptRecommendTarget ? (
         <ScriptRecommendDialog
@@ -918,17 +1166,7 @@ export function InfluencersPanel() {
           }}
         />
       ) : null}
-
-      {batchOutreachOpen && selectedInfluencers.length > 0 ? (
-        <BatchOutreachDialog
-          influencers={selectedInfluencers}
-          open
-          onClose={() => setBatchOutreachOpen(false)}
-          onComplete={() => {
-            void load(apiFilters, page);
-          }}
-        />
-      ) : null}
+      </div>
     </AdminShell>
   );
 }

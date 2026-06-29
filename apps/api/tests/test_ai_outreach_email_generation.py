@@ -202,6 +202,59 @@ def test_generate_outreach_email_uses_knowledge_and_script():
     asyncio.run(_run())
 
 
+def test_generate_outreach_email_replaces_brand_placeholder_before_queueing():
+    async def _run() -> None:
+        suffix = _suffix()
+        async with async_session_factory() as db:
+            await _seed_knowledge(db)
+            record = await _create_influencer(
+                db,
+                suffix=suffix,
+                email=f"brand_{suffix}@example.com",
+            )
+            global_row = await db.get(GlobalInfluencerProfile, record.global_influencer_id)
+            assert global_row is not None
+            await db.commit()
+
+            ai_payload = {
+                "subject": "Collaboration with {brand}",
+                "body": "Hi creator, we would love to explore a collaboration with {brand}.",
+                "recommended_script_id": None,
+                "recommended_script_title": "",
+                "reason": "Creator has relevant audience",
+                "matched_knowledge": [],
+                "tone": "professional",
+                "risk_notes": [],
+            }
+
+            with patch(
+                "app.services.speech_recommendation_service.chat_completion_json",
+                new_callable=AsyncMock,
+                return_value=ai_payload,
+            ):
+                with patch("app.services.speech_recommendation_service.settings") as mock_settings:
+                    mock_settings.is_openai_configured = True
+                    mock_settings.active_ai_provider = "openai"
+                    result = await SpeechRecommendationService.generate_outreach_email(
+                        db,
+                        product_id=1,
+                        global_row=global_row,
+                        product_row=record,
+                    )
+
+            assert result.error_message is None
+            assert "{brand}" not in result.subject
+            assert "{brand}" not in result.body
+            assert "ScandiHome" in result.subject
+            assert "ScandiHome" in result.body
+
+            await db.execute(delete(ProductInfluencer).where(ProductInfluencer.id == record.id))
+            await db.execute(delete(GlobalInfluencerProfile).where(GlobalInfluencerProfile.id == global_row.id))
+            await db.commit()
+
+    asyncio.run(_run())
+
+
 def test_preview_batch_generates_distinct_emails_and_skips_missing_email():
     async def _run() -> None:
         suffix = _suffix()

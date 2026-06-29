@@ -5,6 +5,7 @@ import test from "node:test";
 import { influencerFilterQueryParams } from "../src/lib/api.ts";
 import {
   canSendOutreachEmail,
+  outreachRecipientIssue,
   outreachSendConfirmMessage,
   resolveInfluencerEmail,
 } from "../src/lib/outreach-email-helpers.ts";
@@ -61,6 +62,25 @@ test("canSendOutreachEmail requires recipient subject and body", () => {
   assert.equal(canSendOutreachEmail({ recipient: "", subject: "Hi", body: "Hello" }), false);
   assert.equal(canSendOutreachEmail({ recipient: "a@b.com", subject: "", body: "Hello" }), false);
   assert.equal(canSendOutreachEmail({ recipient: "a@b.com", subject: "Hi", body: "  " }), false);
+});
+
+test("canSendOutreachEmail rejects recipient same as sender", () => {
+  assert.equal(
+    canSendOutreachEmail({
+      recipient: "sender@company.com",
+      subject: "Hi",
+      body: "Hello",
+      senderEmail: "sender@company.com",
+    }),
+    false,
+  );
+});
+
+test("outreachRecipientIssue flags sender recipient", () => {
+  assert.match(
+    outreachRecipientIssue("sender@company.com", "sender@company.com") || "",
+    /发件邮箱相同/,
+  );
 });
 
 test("outreachSendConfirmMessage includes recipient", () => {

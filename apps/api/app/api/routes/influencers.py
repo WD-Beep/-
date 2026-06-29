@@ -9,6 +9,8 @@ from app.services.product_influencer_service import ProductInfluencerService
 from app.schemas.common import PaginatedResponse
 from app.schemas.contact import ContactRefreshResult
 from app.schemas.influencer import (
+    InfluencerBulkDeleteRequest,
+    InfluencerBulkDeleteResponse,
     InfluencerCreate,
     InfluencerExportFilter,
     InfluencerFilter,
@@ -17,7 +19,9 @@ from app.schemas.influencer import (
     PlatformStatsResponse,
 )
 from app.schemas.influencer_lead import FollowupCreate, FollowupRead, InfluencerLeadUpdate
+from app.schemas.email_reply import EmailReplyRead, EmailReplySummary
 from app.services.contact_discovery import ContactDiscoveryService
+from app.services.email_reply_service import EmailReplyService
 from app.services.export import build_influencer_library_excel
 from app.services.influencer_lead import InfluencerLeadService
 from app.services.influencer_source import InfluencerSourceService
@@ -46,6 +50,8 @@ async def list_influencers(
     platform: str | None = None,
     country: str | None = None,
     category: str | None = None,
+    niche: str | None = None,
+    tag: str | None = None,
     follow_status: str | None = None,
     lead_status: str | None = None,
     lead_priority: str | None = None,
@@ -66,6 +72,7 @@ async def list_influencers(
     missing_contact: bool | None = None,
     high_credibility_contact: bool | None = None,
     email_status: str | None = Query(default=None, pattern="^(sent|unsent)$"),
+    exclude_terminal_statuses: bool | None = None,
     collection_task_id: int | None = Query(default=None, ge=1),
     created_within_hours: int | None = Query(default=None, ge=1, le=720),
     collected_within_days: int | None = Query(default=None, ge=1, le=365),
@@ -78,6 +85,8 @@ async def list_influencers(
         platform=platform,
         country=country,
         category=category,
+        niche=niche,
+        tag=tag,
         follow_status=follow_status,
         lead_status=lead_status,
         lead_priority=lead_priority,
@@ -98,6 +107,7 @@ async def list_influencers(
         missing_contact=missing_contact,
         high_credibility_contact=high_credibility_contact,
         email_status=email_status,
+        exclude_terminal_statuses=exclude_terminal_statuses,
         collection_task_id=collection_task_id,
         created_within_hours=created_within_hours,
         collected_within_days=collected_within_days,
@@ -258,6 +268,19 @@ async def create_influencer(
     return await ProductInfluencerService.influencer_read_with_sources(db, product_row, global_row)
 
 
+@router.post("/bulk-delete", response_model=InfluencerBulkDeleteResponse)
+async def bulk_delete_influencers(
+    payload: InfluencerBulkDeleteRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> InfluencerBulkDeleteResponse:
+    return await ProductInfluencerService.delete_influencers(
+        db,
+        product_id=ctx.product_id,
+        record_ids=payload.ids,
+    )
+
+
 @router.get("/{influencer_id}", response_model=InfluencerRead)
 async def get_influencer(
     influencer_id: int,
@@ -317,6 +340,38 @@ async def list_influencer_followups(
         db, product_row.id, limit=limit
     )
     return [FollowupRead.model_validate(item) for item in followups]
+
+
+@router.get("/{influencer_id}/email-replies", response_model=list[EmailReplyRead])
+async def list_influencer_email_replies(
+    influencer_id: int,
+    limit: int = Query(default=20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> list[EmailReplyRead]:
+    product_row, _ = await _require_product_influencer(db, ctx, influencer_id)
+    items, _total = await EmailReplyService.list_replies(
+        db,
+        product_id=product_row.product_id,
+        product_influencer_id=product_row.id,
+        page=1,
+        page_size=limit,
+    )
+    return items
+
+
+@router.get("/{influencer_id}/email-reply-summary", response_model=EmailReplySummary)
+async def get_influencer_email_reply_summary(
+    influencer_id: int,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> EmailReplySummary:
+    product_row, _ = await _require_product_influencer(db, ctx, influencer_id)
+    return await EmailReplyService.reply_summary_for_influencer(
+        db,
+        product_id=product_row.product_id,
+        product_influencer_id=product_row.id,
+    )
 
 
 @router.post("/{influencer_id}/followups", response_model=FollowupRead, status_code=status.HTTP_201_CREATED)

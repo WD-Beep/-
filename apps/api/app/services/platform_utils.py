@@ -230,6 +230,7 @@ def profile_to_collected(profile: PlatformCandidateProfile) -> CollectedInfluenc
         ),
         display_name=profile.display_name,
         avatar_url=profile.avatar_url,
+        country=profile.source_meta.get("country") if profile.source_meta else None,
         bio=profile.bio,
         followers_count=profile.followers_count,
         avg_views=profile.avg_views,

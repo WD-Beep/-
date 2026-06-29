@@ -14,6 +14,8 @@ from app.schemas.collection_task import (
     CollectionTaskFilter,
     CollectionTaskRead,
     CollectionTaskUpdate,
+    HIGH_VALUE_FIRST_MIN_FOLLOWERS,
+    HIGH_VALUE_FIRST_MODES,
     build_link_import_task_fields,
     validate_seed_only_discovery_mode,
     validate_url_only_platforms_for_mode,
@@ -226,6 +228,68 @@ class CollectionTaskService:
         return data
 
     @staticmethod
+    def _apply_high_value_first_defaults(payload: dict, fields_set: set[str]) -> dict:
+        mode = payload.get("collection_mode")
+        mode_value = mode.value if isinstance(mode, CollectionMode) else mode
+        high_value_modes = {item.value for item in HIGH_VALUE_FIRST_MODES}
+        if mode_value not in high_value_modes:
+            return payload
+        if "min_followers_count" not in fields_set:
+            payload["min_followers_count"] = HIGH_VALUE_FIRST_MIN_FOLLOWERS
+        if "min_engagement_rate" not in fields_set:
+            payload["min_engagement_rate"] = None
+        if "require_email" not in fields_set:
+            payload["require_email"] = False
+        if "require_contact" not in fields_set:
+            payload["require_contact"] = False
+        if "strict_quality_filter" not in fields_set:
+            payload["strict_quality_filter"] = False
+        if "insert_qualified_only" not in fields_set:
+            payload["insert_qualified_only"] = True
+        if "export_qualified_only" not in fields_set:
+            payload["export_qualified_only"] = True
+        checkpoint = dict(payload.get("run_checkpoint") or {})
+        checkpoint.setdefault("quality_strategy", "high_value_first")
+        payload["run_checkpoint"] = checkpoint
+        return payload
+
+    @staticmethod
+    def _apply_stable_collection_defaults(payload: dict) -> dict:
+        stable = bool(payload.pop("stable_collection_mode", False))
+        if not stable:
+            return payload
+        platforms = [
+            str(item).strip().lower()
+            for item in (payload.get("platforms") or [])
+            if str(item).strip()
+        ]
+        keyword_platforms = {"youtube", "facebook", "tiktok", "instagram"}
+        primary = next((platform for platform in platforms if platform in keyword_platforms), None)
+        if primary is None:
+            platform = str(payload.get("platform") or "").strip().lower()
+            primary = platform if platform in keyword_platforms else "youtube"
+        payload["platform"] = primary
+        payload["platforms"] = [primary]
+        payload["discovery_limit"] = 20
+        payload["require_email"] = False
+        payload["require_contact"] = False
+        payload["strict_quality_filter"] = False
+        payload["insert_qualified_only"] = False
+        payload["export_qualified_only"] = False
+        checkpoint = dict(payload.get("run_checkpoint") or {})
+        checkpoint["stable_collection_mode"] = True
+        checkpoint["stable_collection_strategy"] = {
+            "target": 20,
+            "single_platform": primary,
+            "require_email": False,
+            "require_contact": False,
+            "strict_quality_filter": False,
+            "insert_qualified_only": False,
+        }
+        payload["run_checkpoint"] = checkpoint
+        return payload
+
+    @staticmethod
     def _validate_task_inputs(
         collection_mode: str,
         keywords: list[str],
@@ -401,6 +465,11 @@ class CollectionTaskService:
         product_id: int | None = None,
     ) -> CollectionTask:
         payload = CollectionTaskService._serialize_task_data(data.model_dump())
+        payload = CollectionTaskService._apply_high_value_first_defaults(
+            payload,
+            set(data.model_fields_set),
+        )
+        payload = CollectionTaskService._apply_stable_collection_defaults(payload)
         if user_id is not None:
             payload["user_id"] = user_id
         if workspace_id is not None:

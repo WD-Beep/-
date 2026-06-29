@@ -25,9 +25,7 @@ async def get_smtp_status() -> SmtpStatus:
 @router.post("/test", response_model=EmailTestResponse)
 async def send_test_email(payload: EmailTestRequest) -> EmailTestResponse:
     try:
-        return await EmailService.send_test_email(
-            recipient=str(payload.recipient) if payload.recipient else None,
-        )
+        return await EmailService.send_test_email(recipient=str(payload.recipient))
     except EmailNotConfiguredError:
         return EmailTestResponse(success=False, message=SMTP_NOT_CONFIGURED_MSG)
 

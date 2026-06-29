@@ -12,11 +12,21 @@ type ProductContextValue = {
 const ProductContext = createContext<ProductContextValue | null>(null);
 
 export function ProductProvider({ children }: { children: React.ReactNode }) {
-  const [productId, setProductIdState] = useState<number>(readStoredProductIdFromStorage);
+  const [productId, setProductIdState] = useState<number>(ALL_PRODUCTS_ID);
+  const [hydrated, setHydrated] = useState(false);
 
   useLayoutEffect(() => {
+    queueMicrotask(() => {
+      const storedProductId = readStoredProductIdFromStorage();
+      setProductIdState(storedProductId);
+      setHydrated(true);
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!hydrated) return;
     setStoredProductId(productId);
-  }, [productId]);
+  }, [hydrated, productId]);
 
   const value = useMemo<ProductContextValue>(
     () => ({

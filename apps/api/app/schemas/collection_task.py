@@ -157,6 +157,15 @@ ACTIVE_DISCOVERY_MODE_BLOCK = frozenset(
         CollectionMode.COMPETITOR_PRODUCT,
     }
 )
+HIGH_VALUE_FIRST_MODES = frozenset(
+    {
+        CollectionMode.KEYWORD,
+        CollectionMode.DISCOVERY,
+        CollectionMode.CATEGORY_DISCOVERY,
+        CollectionMode.MIXED,
+    }
+)
+HIGH_VALUE_FIRST_MIN_FOLLOWERS = 10_000
 
 
 def _resolved_task_platforms(platform: str, platforms: list[str]) -> list[str]:
@@ -269,8 +278,8 @@ class CollectionTaskBase(BaseModel):
     country: str | None = Field(default=None, max_length=100)
     category: str | None = Field(default=None, max_length=100)
     discovery_limit: int | None = Field(default=100, ge=1, le=500)
-    min_engagement_rate: float | None = Field(default=2.0, ge=0, le=100)
-    min_followers_count: int | None = Field(default=50000, ge=0)
+    min_engagement_rate: float | None = Field(default=None, ge=0, le=100)
+    min_followers_count: int | None = Field(default=HIGH_VALUE_FIRST_MIN_FOLLOWERS, ge=0)
     max_followers_count: int | None = Field(default=None, ge=0)
     filter_include_keywords: list[str] = Field(default_factory=list)
     filter_exclude_keywords: list[str] = Field(default_factory=list)
@@ -336,6 +345,7 @@ class CollectionTaskBase(BaseModel):
 
 
 class CollectionTaskCreate(BaseModel):
+    stable_collection_mode: bool = False
     name: str = Field(..., max_length=255)
     collection_mode: CollectionMode = CollectionMode.KEYWORD
     platform: str = Field(default="instagram", max_length=50)
@@ -345,8 +355,8 @@ class CollectionTaskCreate(BaseModel):
     country: str | None = Field(default=None, max_length=100)
     category: str | None = Field(default=None, max_length=100)
     discovery_limit: int | None = Field(default=100, ge=1, le=500)
-    min_engagement_rate: float | None = Field(default=2.0, ge=0, le=100)
-    min_followers_count: int | None = Field(default=50000, ge=0)
+    min_engagement_rate: float | None = Field(default=None, ge=0, le=100)
+    min_followers_count: int | None = Field(default=HIGH_VALUE_FIRST_MIN_FOLLOWERS, ge=0)
     max_followers_count: int | None = Field(default=None, ge=0)
     filter_include_keywords: list[str] = Field(default_factory=list)
     filter_exclude_keywords: list[str] = Field(default_factory=list)

@@ -10,7 +10,7 @@ def _settings(**overrides) -> Settings:
         "smtp_port": 465,
         "smtp_user": "amazon03@ptraveldesign.com",
         "smtp_password": "secret",
-        "smtp_from": "amazon03@ptraveldesign.com",
+        "SMTP_FROM": "amazon03@ptraveldesign.com",
     }
     base.update(overrides)
     return Settings(**base)
@@ -39,3 +39,17 @@ def test_smtp_status_includes_user_address():
     status = settings.get_smtp_status()
     assert status["user_address"] == "amazon03@ptraveldesign.com"
     assert status["from_address"] == "amazon03@ptraveldesign.com"
+
+
+def test_klaviyo_status_requires_api_key_and_list_id():
+    empty = _settings(klaviyo_api_key="", klaviyo_list_id="")
+    assert empty.get_klaviyo_status()["configured"] is False
+
+    configured = _settings(
+        klaviyo_api_key="pk_test",
+        klaviyo_list_id="YwwBQq",
+    )
+
+    status = configured.get_klaviyo_status()
+    assert status["configured"] is True
+    assert status["list_id"] == "YwwBQq"

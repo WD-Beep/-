@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Any
 
-from openai import APIConnectionError, APIStatusError, AsyncOpenAI, AuthenticationError, NotFoundError
+import httpx
 
 from app.core.config import settings
 
@@ -29,34 +29,64 @@ def _parse_json_content(content: str) -> dict[str, Any]:
     return parsed
 
 
-def _build_client() -> AsyncOpenAI:
+def _openai_base_url() -> str:
     if not settings.is_openai_configured:
         raise ValueError(OPENAI_NOT_CONFIGURED_MSG)
-    return AsyncOpenAI(
-        api_key=settings.openai_api_key.strip(),
-        base_url=settings.openai_api_base.rstrip("/"),
-    )
+    return settings.openai_api_base.rstrip("/")
 
 
-def _format_openai_error(exc: Exception) -> str:
-    if isinstance(exc, NotFoundError):
+def _chat_temperature(model: str, requested: float) -> float:
+    model_name = model.strip().lower()
+    base_url = settings.openai_api_base.strip().lower()
+    if model_name.startswith("kimi-k2.6") or "moonshot.cn" in base_url:
+        return 1.0
+    return requested
+
+
+def _format_openai_error(exc: Exception, *, status_code: int | None = None, body: str = "") -> str:
+    text = body or str(exc)
+    if status_code == 404:
         model = settings.openai_model.strip() or "(empty)"
         return (
             f"OpenAI 模型不可用：{model}。"
             f"请检查 OPENAI_MODEL 环境变量是否与当前 API 账户支持的模型一致。"
         )
-    if isinstance(exc, AuthenticationError):
+    if status_code in {401, 403}:
+        if "blocked" in text.lower():
+            return f"OpenAI API 错误 HTTP {status_code}: {text[:300]}"
         return "OpenAI API Key 无效或已过期，请检查 OPENAI_API_KEY。"
-    if isinstance(exc, APIStatusError):
-        body = ""
-        try:
-            body = exc.response.text[:300]
-        except Exception:
-            body = str(exc)
-        return f"OpenAI API 错误 HTTP {exc.status_code}: {body or exc.message}"
-    if isinstance(exc, APIConnectionError):
+    if status_code is not None:
+        return f"OpenAI API 错误 HTTP {status_code}: {text[:300]}"
+    if isinstance(exc, httpx.HTTPError):
         return f"无法连接 OpenAI API（{settings.openai_api_base}），请检查网络与 OPENAI_API_BASE。"
     return str(exc).strip() or exc.__class__.__name__
+
+
+async def _post_chat_completion(payload: dict[str, Any]) -> dict[str, Any]:
+    url = f"{_openai_base_url()}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {settings.openai_api_key.strip()}",
+        "Content-Type": "application/json",
+    }
+    timeout = httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, headers=headers, json=payload)
+    except httpx.HTTPError as exc:
+        raise RuntimeError(_format_openai_error(exc)) from exc
+
+    if response.status_code >= 400:
+        raise RuntimeError(
+            _format_openai_error(
+                RuntimeError(response.text),
+                status_code=response.status_code,
+                body=response.text,
+            )
+        )
+    data = response.json()
+    if not isinstance(data, dict):
+        raise ValueError("OpenAI 返回的响应不是 JSON 对象")
+    return data
 
 
 async def chat_completion_json(
@@ -71,25 +101,40 @@ async def chat_completion_json(
     if not model:
         raise ValueError("未配置 OPENAI_MODEL 环境变量")
 
-    client = _build_client()
+    json_system_prompt = f"{system_prompt}\n\nReturn valid json only."
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": json_system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": _chat_temperature(model, temperature),
+        "max_tokens": max_tokens,
+    }
     try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-        )
+        response = await _post_chat_completion(payload)
     except Exception as exc:
-        message = _format_openai_error(exc)
-        logger.warning("OpenAI chat completion failed (model=%s): %s", model, message)
-        raise RuntimeError(message) from exc
+        message = str(exc)
+        if "response_format" not in message and "json_object" not in message and "text.format" not in message:
+            logger.warning("OpenAI chat completion failed (model=%s): %s", model, message)
+            raise RuntimeError(message) from exc
+        logger.warning(
+            "OpenAI json_object mode failed (model=%s), retrying plain JSON prompt: %s",
+            model,
+            message,
+        )
+        try:
+            payload.pop("response_format", None)
+            response = await _post_chat_completion(payload)
+        except Exception as retry_exc:
+            retry_message = str(retry_exc)
+            logger.warning("OpenAI chat completion failed (model=%s): %s", model, retry_message)
+            raise RuntimeError(retry_message) from retry_exc
 
-    choice = response.choices[0] if response.choices else None
-    content = (choice.message.content if choice and choice.message else "") or ""
+    choices = response.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else {}
+    message = choice.get("message") if isinstance(choice, dict) else {}
+    content = (message.get("content") if isinstance(message, dict) else "") or ""
     if not content.strip():
         raise ValueError("OpenAI 返回空内容")
     return _parse_json_content(content)
@@ -107,24 +152,26 @@ async def chat_completion_text(
     if not model:
         raise ValueError("未配置 OPENAI_MODEL 环境变量")
 
-    client = _build_client()
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": _chat_temperature(model, temperature),
+        "max_tokens": max_tokens,
+    }
     try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        response = await _post_chat_completion(payload)
     except Exception as exc:
-        message = _format_openai_error(exc)
+        message = str(exc)
         logger.warning("OpenAI chat completion failed (model=%s): %s", model, message)
         raise RuntimeError(message) from exc
 
-    choice = response.choices[0] if response.choices else None
-    content = (choice.message.content if choice and choice.message else "") or ""
+    choices = response.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else {}
+    message = choice.get("message") if isinstance(choice, dict) else {}
+    content = (message.get("content") if isinstance(message, dict) else "") or ""
     if not content.strip():
         raise ValueError("OpenAI 返回空内容")
     return content.strip()

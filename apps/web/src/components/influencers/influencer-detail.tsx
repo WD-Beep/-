@@ -22,8 +22,12 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
   analyzeInfluencer,
+  fetchInfluencerEmailReplies,
+  fetchInfluencerEmailReplySummary,
   fetchInfluencerFollowups,
   refreshInfluencerContact,
+  type EmailReply,
+  type EmailReplySummary,
   type Influencer,
   type InfluencerFollowup,
   type InfluencerLeadUpdatePayload,
@@ -254,6 +258,9 @@ export function InfluencerDetail({ initial }: InfluencerDetailProps) {
   const [operatorName, setOperatorName] = useState("");
   const [followups, setFollowups] = useState<InfluencerFollowup[]>([]);
   const [followupsLoading, setFollowupsLoading] = useState(true);
+  const [emailReplies, setEmailReplies] = useState<EmailReply[]>([]);
+  const [replySummary, setReplySummary] = useState<EmailReplySummary | null>(null);
+  const [repliesLoading, setRepliesLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [refreshingContact, setRefreshingContact] = useState(false);
@@ -271,13 +278,29 @@ export function InfluencerDetail({ initial }: InfluencerDetailProps) {
     let cancelled = false;
     queueMicrotask(async () => {
       setFollowupsLoading(true);
+      setRepliesLoading(true);
       try {
-        const data = await fetchInfluencerFollowups(influencer.id);
-        if (!cancelled) setFollowups(data);
+        const [followupData, repliesData, summaryData] = await Promise.all([
+          fetchInfluencerFollowups(influencer.id),
+          fetchInfluencerEmailReplies(influencer.id),
+          fetchInfluencerEmailReplySummary(influencer.id),
+        ]);
+        if (!cancelled) {
+          setFollowups(followupData);
+          setEmailReplies(repliesData);
+          setReplySummary(summaryData);
+        }
       } catch {
-        if (!cancelled) setFollowups([]);
+        if (!cancelled) {
+          setFollowups([]);
+          setEmailReplies([]);
+          setReplySummary(null);
+        }
       } finally {
-        if (!cancelled) setFollowupsLoading(false);
+        if (!cancelled) {
+          setFollowupsLoading(false);
+          setRepliesLoading(false);
+        }
       }
     });
     return () => {
@@ -766,6 +789,14 @@ export function InfluencerDetail({ initial }: InfluencerDetailProps) {
             <InfoItem label="负责人" value={influencer.owner} />
             <InfoItem label="最后联系" value={formatDate(influencer.last_contacted_at)} />
             <InfoItem label="最后回复" value={formatDate(influencer.last_reply_at)} />
+            <InfoItem
+              label="邮件回复"
+              value={
+                replySummary && replySummary.reply_count > 0
+                  ? `${replySummary.reply_count} 封 · ${replySummary.latest_snippet ?? ""}`
+                  : "暂无"
+              }
+            />
             <InfoItem label="下次跟进" value={formatDate(influencer.next_follow_up_at)} />
             <InfoItem label="最后采集" value={formatDate(influencer.last_collected_at)} />
           </div>
@@ -901,6 +932,36 @@ export function InfluencerDetail({ initial }: InfluencerDetailProps) {
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
               保存备注
             </Button>
+          </div>
+
+          <div className="mt-6 space-y-3">
+            <h3 className="text-sm font-medium">邮件回复</h3>
+            {repliesLoading ? (
+              <p className="text-sm text-muted-foreground">加载回复记录...</p>
+            ) : emailReplies.length === 0 ? (
+              <p className="text-sm text-muted-foreground">暂无收到的邮件回复</p>
+            ) : (
+              <ul className="space-y-2">
+                {emailReplies.map((reply) => (
+                  <li key={reply.id} className="rounded-md border px-3 py-2 text-sm">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline">{reply.source === "imap" ? "IMAP" : "Webhook"}</Badge>
+                      <span className="text-xs text-muted-foreground">{formatDate(reply.received_at)}</span>
+                      {reply.match_method ? (
+                        <span className="text-xs text-muted-foreground">· {reply.match_method}</span>
+                      ) : null}
+                    </div>
+                    <p className="mt-1 font-medium break-all">{reply.subject || "(无标题)"}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {reply.from_address} → {reply.to_address}
+                    </p>
+                    {reply.snippet ? (
+                      <p className="mt-1 whitespace-pre-wrap text-muted-foreground">{reply.snippet}</p>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
 
           <div className="mt-6 space-y-3">

@@ -13,7 +13,11 @@ import {
   type Influencer,
   type SingleOutreachEmailPreview,
 } from "@/lib/api";
-import { canSendOutreachEmail, outreachSendConfirmMessage } from "@/lib/outreach-email-helpers";
+import {
+  canSendOutreachEmail,
+  outreachRecipientIssue,
+  outreachSendConfirmMessage,
+} from "@/lib/outreach-email-helpers";
 import { EmailAddressCell } from "@/lib/email-address-cell";
 import { translateErrorMessage } from "@/lib/labels";
 
@@ -130,7 +134,9 @@ export function OutreachEmailDialog({
     recipient: preview?.recipient ?? "",
     subject,
     body,
+    senderEmail: preview?.sender_email,
   });
+  const recipientIssue = outreachRecipientIssue(preview?.recipient, preview?.sender_email);
 
   if (!open) return null;
 
@@ -219,6 +225,9 @@ export function OutreachEmailDialog({
                 </div>
               ) : null}
 
+              {recipientIssue ? (
+                <p className="text-sm text-amber-700">{recipientIssue}</p>
+              ) : null}
               {confirmQueue ? (
                 <p className="text-sm text-amber-700">
                   确认将当前预览邮件加入发送队列？不会立即发送，需在邮件日志页手动触发「发送今日队列」。

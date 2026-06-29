@@ -178,6 +178,19 @@ def test_facebook_provider_routes_to_apify_when_configured():
             assert _provider_cls("facebook").__name__ == "FacebookApifyProvider"
 
 
+def test_youtube_provider_routes_to_official_in_auto_and_never_api_direct():
+    from app.services.api_direct_provider import _provider_cls
+
+    with patch.object(settings, "youtube_data_provider", "auto"):
+        assert _provider_cls("youtube").__name__ == "YouTubeAutoProvider"
+
+    with patch.object(settings, "youtube_data_provider", "official"):
+        assert _provider_cls("youtube").__name__ == "YouTubeOfficialProvider"
+
+    with patch.object(settings, "youtube_data_provider", "api_direct"):
+        assert _provider_cls("youtube").__name__ == "YouTubeAutoProvider"
+
+
 def test_facebook_provider_falls_back_to_apify_when_api_direct_unconfigured():
     from app.services.api_direct_provider import _provider_cls
 

@@ -2,7 +2,8 @@ from fastapi import APIRouter
 
 from app.core.config import settings
 from app.schemas.ai import AiStatusResponse
-from app.schemas.email import MailchimpStatus
+from app.schemas.email import KlaviyoStatus, MailchimpStatus
+from app.schemas.email_reply import InboundEmailStatus
 from app.schemas.settings import (
     CollectionConfigStatus,
     CollectorStatus,
@@ -54,7 +55,7 @@ async def get_settings_status() -> SettingsStatusResponse:
         else "未配置 APIFY_TOKEN，Instagram / YouTube / TikTok / Facebook（Apify 模式）将不可用。"
     )
     api_direct_message = (
-        "API Direct 密钥已配置，可用于 YouTube / Instagram / TikTok / Facebook 的 API Direct 模式。"
+        "API Direct 密钥已配置，可用于 Instagram / TikTok / Facebook 的 API Direct 模式；YouTube 不使用 API Direct。"
         if settings.is_api_direct_configured
         else "未配置 API_DIRECT_API_KEY；Facebook 默认走 Apify（FACEBOOK_DATA_PROVIDER=apify + APIFY_TOKEN），无需 API Direct。"
     )
@@ -64,6 +65,8 @@ async def get_settings_status() -> SettingsStatusResponse:
     return SettingsStatusResponse(
         smtp=EmailService.get_smtp_status(),
         mailchimp=MailchimpStatus(**settings.get_mailchimp_status()),
+        klaviyo=KlaviyoStatus(**settings.get_klaviyo_status()),
+        inbound_email=InboundEmailStatus(**settings.get_inbound_email_status()),
         ai=AiStatusResponse(
             provider=settings.active_ai_provider,
             model=settings.active_ai_model,

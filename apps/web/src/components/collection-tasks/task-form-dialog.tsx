@@ -13,6 +13,8 @@ import { formatLinkImportPlatformHints, parseLinkImportPreview } from "@/lib/col
 import { COLLECTION_MODE_OPTIONS, KEYWORD_DISCOVERY_PLATFORMS, KEYWORD_SEED_DISCOVERY_PLATFORMS, LINK_IMPORT_URL_EXAMPLES, LINK_IMPORT_USAGE_LINES, LINK_ONLY_PENDING_KEYWORD_HINT, LINK_ONLY_PLATFORM_CARD_LINES, PLATFORM_LABELS, SEED_DISCOVERY_PLATFORMS, URL_ONLY_PLATFORMS, VERIFIED_KEYWORD_PLATFORM_HINT } from "@/lib/labels";
 import {
   advancedFilterSummary,
+  applyStableCollectionMode,
+  clearStableCollectionMode,
   applyDiscoverySource,
   createEmptyTaskForm,
   discoverySourceFromForm,
@@ -425,6 +427,27 @@ export function TaskFormDialog({
                   })}
                 </div>
               </div>
+
+              {!isLinkImport ? (
+                <label className="flex items-start gap-3 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="mt-1"
+                    checked={form.stable_collection_mode}
+                    onChange={(e) =>
+                      setForm((prev) =>
+                        e.target.checked ? applyStableCollectionMode(prev) : clearStableCollectionMode(prev),
+                      )
+                    }
+                  />
+                  <span>
+                    <span className="font-medium">稳定采集模式</span>
+                    <span className="mt-0.5 block text-xs text-muted-foreground">
+                      稳定模式会慢一点，但结果更稳定；默认采集 20 个候选，放宽联系方式要求，并优先单平台运行。
+                    </span>
+                  </span>
+                </label>
+              ) : null}
 
               {!isLinkImport ? (
                 <div className="space-y-4">

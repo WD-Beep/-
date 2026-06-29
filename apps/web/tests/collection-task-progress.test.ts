@@ -185,7 +185,7 @@ test("stale recoverable running task is flagged", () => {
   assert.equal(isCollectionTaskRunningStale(staleTask), true);
   const hint = collectionTaskRunningHint(staleTask);
   assert.ok(hint);
-  assert.match(hint!, /重新运行继续/);
+  assert.match(hint!, /继续运行/);
 });
 
 test("running task shows current keyword from checkpoint", () => {
@@ -316,6 +316,36 @@ test("task result breakdown exposes structured funnel metrics", () => {
   assert.deepEqual(lines.contacts, ["邮箱 3", "缺联系方式 18", "失败 12"]);
   assert.equal(lines.reason, "主要原因：Instagram API 失败");
   assert.equal(lines.highValue, true);
+});
+
+test("zero-result diagnostics explain strict contact and quality filters", () => {
+  const lines = formatCollectionResultLines(
+    task({
+      status: "completed_no_results",
+      discovered_count: 29,
+      deduped_count: 26,
+      profile_fetched_count: 22,
+      filtered_out_count: 22,
+      inserted_count: 0,
+      require_email: true,
+      require_contact: true,
+      run_checkpoint: {
+        filtered_by_contact_count: 14,
+        filtered_by_product_match_count: 5,
+      },
+      filtered_below_min_followers_count: 6,
+      filtered_excluded_keyword_count: 2,
+    }),
+  );
+
+  assert.ok(lines.hint);
+  assert.match(lines.hint!, /发现 29 个候选/);
+  assert.match(lines.hint!, /补全主页 22 个/);
+  assert.match(lines.hint!, /最终入库 0/);
+  assert.match(lines.hint!, /必须有邮箱\/联系方式/);
+  assert.match(lines.hint!, /粉丝或互动条件/);
+  assert.match(lines.hint!, /同款商品证据/);
+  assert.match(lines.hint!, /关闭必须邮箱\/联系方式/);
 });
 
 test("table layout classes keep status and actions readable", () => {

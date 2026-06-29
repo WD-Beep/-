@@ -34,6 +34,7 @@ from app.services.email import (
 )
 from app.services.influencer_lead import InfluencerLeadService
 from app.services.influencer_projection import merged_influencer_for_ai
+from app.services.outreach_recipient import outreach_recipient_skip_reason
 from app.services.product_influencer_service import ProductInfluencerService
 from app.services.speech_recommendation_service import SpeechRecommendationService
 
@@ -114,15 +115,17 @@ class OutreachEmailService:
             product_row, global_row = pair
             merged = merged_influencer_for_ai(product_row, global_row)
             recipient = resolve_influencer_email(merged)
-            if not recipient:
+            recipient_issue = outreach_recipient_skip_reason(recipient)
+            if recipient_issue:
                 missing_email += 1
                 items.append(
                     OutreachPreviewItem(
                         influencer_id=influencer_id,
                         username=global_row.username or "",
                         display_name=global_row.display_name,
+                        recipient=recipient,
                         can_send=False,
-                        error_message="缺少邮箱，无法发送",
+                        error_message=recipient_issue,
                     )
                 )
                 continue
@@ -272,14 +275,16 @@ class OutreachEmailService:
             recipient = resolve_influencer_email(merged)
             username = global_row.username or ""
 
-            if not recipient:
+            recipient_issue = outreach_recipient_skip_reason(recipient)
+            if recipient_issue:
                 skipped += 1
                 results.append(
                     OutreachSendItemResult(
                         influencer_id=influencer_id,
                         username=username,
+                        recipient=recipient,
                         status="skipped",
-                        error_message="缺少邮箱，已跳过",
+                        error_message=recipient_issue,
                     )
                 )
                 continue

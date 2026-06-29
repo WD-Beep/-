@@ -4,18 +4,26 @@ import { collectionTaskSeedDiscoveryDiagnosticHint } from "./shopping-seed-diagn
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api-proxy";
 const SERVER_API_URL =
   process.env.INTERNAL_API_URL?.replace(/\/$/, "") ?? "http://127.0.0.1:8000";
+const LONG_RUNNING_API_URL =
+  process.env.NEXT_PUBLIC_LONG_RUNNING_API_URL?.replace(/\/$/, "") ?? "http://127.0.0.1:8000";
 
 const API_FETCH_TIMEOUT_MS = 30_000;
+const PREVIEW_FETCH_TIMEOUT_MS = 600_000;
 
-async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+async function apiFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  options?: { timeoutMs?: number },
+): Promise<Response> {
   await ensureTenantProductId();
   const headers = new Headers(init.headers ?? {});
   for (const [key, value] of Object.entries(tenantHeaders())) {
     headers.set(key, value);
   }
+  const timeoutMs = options?.timeoutMs ?? API_FETCH_TIMEOUT_MS;
   const timeoutSignal =
     typeof AbortSignal !== "undefined" && "timeout" in AbortSignal
-      ? AbortSignal.timeout(API_FETCH_TIMEOUT_MS)
+      ? AbortSignal.timeout(timeoutMs)
       : undefined;
   const signal = init.signal
     ? timeoutSignal
@@ -188,6 +196,12 @@ export type InfluencerLeadUpdatePayload = {
   invalid_reason?: string | null;
   blacklist_reason?: string | null;
   operator_name?: string | null;
+};
+
+export type InfluencerBulkDeleteResult = {
+  deleted_count: number;
+  deleted_ids: number[];
+  missing_ids: number[];
 };
 
 export type InfluencerFollowup = {
@@ -396,6 +410,7 @@ export type CollectionTaskPayload = {
   outreach_dry_run?: boolean;
   outreach_templates?: Record<string, string>;
   comment_discovery_enabled?: boolean;
+  stable_collection_mode?: boolean;
 };
 
 export type LinkImportBatchStatus = "pending" | "running" | "completed" | "failed";
@@ -668,6 +683,84 @@ export type EmailLog = {
   matched_knowledge: MatchedKnowledgeItem[] | null;
   risk_notes: string[] | null;
   sent_at: string | null;
+  message_id?: string | null;
+  has_replied: boolean;
+  replied_at: string | null;
+  reply_email_log_id: number | null;
+  reply_summary: string | null;
+  last_outbound_at: string | null;
+  follow_up_status: string | null;
+  follow_up_count: number;
+  max_followups: number;
+  next_follow_up_at: string | null;
+  stop_follow_up: boolean;
+  stop_reason: string | null;
+};
+
+export type ScheduleOutreachRecordFollowUpPayload = {
+  after_days?: number;
+  max_followups?: number;
+};
+
+export type StopOutreachRecordFollowUpPayload = {
+  reason?: string;
+};
+
+export type EmailLogBulkDeleteResult = {
+  deleted_count: number;
+  deleted_ids: number[];
+  missing_ids: number[];
+};
+
+export type InboundEmailStatus = {
+  configured: boolean;
+  imap_configured: boolean;
+  webhook_configured: boolean;
+  inbound_address: string | null;
+  imap_host: string | null;
+  imap_port: number | null;
+  imap_folder: string | null;
+  imap_poll_enabled: boolean;
+  message: string;
+};
+
+export type EmailReply = {
+  id: number;
+  product_id: number;
+  email_log_id: number | null;
+  product_influencer_id: number | null;
+  campaign_id: number | null;
+  message_id: string | null;
+  in_reply_to: string | null;
+  match_method: string | null;
+  processing_status: "unprocessed" | "processed" | string;
+  intent_status: "unprocessed" | "interested" | "follow_up" | "not_interested" | "processed" | "unmatched" | string;
+  source: string;
+  from_address: string;
+  to_address: string;
+  subject: string;
+  body: string | null;
+  snippet: string | null;
+  received_at: string;
+  handled_at: string | null;
+  manual_note: string | null;
+};
+
+export type EmailReplySummary = {
+  reply_count: number;
+  latest_reply_at: string | null;
+  latest_snippet: string | null;
+};
+
+export type EmailReplyWorkCount = {
+  unprocessed_count: number;
+  unmatched_count: number;
+};
+
+export type EmailReplyBulkDeleteResult = {
+  deleted_count: number;
+  deleted_ids: number[];
+  missing_ids: number[];
 };
 
 export type SmtpStatus = {
@@ -682,6 +775,9 @@ export type SmtpStatus = {
   use_tls: boolean;
   message: string;
   outreach_daily_send_limit?: number;
+  test_recipient?: string | null;
+  test_schedule_enabled?: boolean;
+  test_interval_minutes?: number | null;
 };
 
 export type AiStatus = {
@@ -708,6 +804,12 @@ export type MailchimpStatus = {
   message: string;
 };
 
+export type KlaviyoStatus = {
+  configured: boolean;
+  list_id: string | null;
+  message: string;
+};
+
 export type CollectionConfigStatus = {
   collector_mode: string;
   instagram_data_provider: string;
@@ -725,6 +827,8 @@ export type CollectionConfigStatus = {
 export type SettingsStatus = {
   smtp: SmtpStatus;
   mailchimp: MailchimpStatus;
+  klaviyo: KlaviyoStatus;
+  inbound_email: InboundEmailStatus;
   ai: AiStatus;
   apify: IntegrationStatus;
   api_direct: IntegrationStatus;
@@ -772,7 +876,7 @@ async function parseError(response: Response): Promise<string> {
       }
     } catch {
       if (response.status >= 500 && /Internal Server Error/i.test(text)) {
-        return "后端 API 当前不可用，请确认本地 8000 端口服务已启动。";
+        return "后端处理失败，请稍后重试，或查看后端日志里的具体接口错误。";
       }
       return text;
     }
@@ -829,6 +933,11 @@ export type InfluencerListFilters = {
   collectedWithinDays?: number;
   search?: string;
   platform?: string;
+  category?: string;
+  niche?: string;
+  tag?: string;
+  sourceDiscoveryType?: string;
+  excludeTerminalStatuses?: boolean;
 };
 
 export function buildInfluencersPageUrl(options: {
@@ -894,6 +1003,11 @@ export function influencerFilterQueryParams(
     created_within_hours: filters.createdWithinHours,
     collected_within_days: filters.collectedWithinDays,
     platform: filters.platform,
+    category: filters.category,
+    niche: filters.niche,
+    tag: filters.tag,
+    source_discovery_type: filters.sourceDiscoveryType,
+    exclude_terminal_statuses: filters.excludeTerminalStatuses,
     search: filters.search,
   };
 }
@@ -989,6 +1103,18 @@ export async function updateInfluencerLead(
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function deleteInfluencers(ids: number[]): Promise<InfluencerBulkDeleteResult> {
+  const response = await apiFetch(`${API_URL}/api/influencers/bulk-delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
   });
   if (!response.ok) {
     throw new Error(await parseError(response));
@@ -1422,6 +1548,210 @@ export async function fetchEmailLogs(
   return response.json();
 }
 
+export async function deleteEmailLogs(ids: number[]): Promise<EmailLogBulkDeleteResult> {
+  const response = await apiFetch(`${API_URL}/api/email-logs/bulk-delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function deleteEmailLogsByStatus(status: EmailLogStatus): Promise<EmailLogBulkDeleteResult> {
+  const response = await apiFetch(`${API_URL}/api/email-logs/bulk-delete-by-status`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function scheduleOutreachRecordFollowUp(
+  recordId: number,
+  payload: ScheduleOutreachRecordFollowUpPayload = {},
+): Promise<EmailLog> {
+  const response = await apiFetch(`${API_URL}/api/outreach-records/${recordId}/schedule-follow-up`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function stopOutreachRecordFollowUp(
+  recordId: number,
+  payload: StopOutreachRecordFollowUpPayload = {},
+): Promise<EmailLog> {
+  const response = await apiFetch(`${API_URL}/api/outreach-records/${recordId}/stop-follow-up`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function markOutreachRecordReplied(recordId: number): Promise<EmailLog> {
+  const response = await apiFetch(`${API_URL}/api/outreach-records/${recordId}/mark-replied`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function markOutreachRecordUnreplied(recordId: number): Promise<EmailLog> {
+  const response = await apiFetch(`${API_URL}/api/outreach-records/${recordId}/mark-unreplied`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchDueFollowUpOutreachRecords(limit = 50): Promise<EmailLog[]> {
+  const response = await apiFetch(`${API_URL}/api/outreach-records/follow-up-due?limit=${limit}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchEmailReplies(params?: {
+  productInfluencerId?: number;
+  emailLogId?: number;
+  campaignId?: number;
+  processingStatus?: string;
+  intentStatus?: string;
+  unmatched?: boolean;
+  page?: number;
+  pageSize?: number;
+}): Promise<PaginatedResponse<EmailReply>> {
+  const search = new URLSearchParams();
+  if (params?.productInfluencerId) search.set("product_influencer_id", String(params.productInfluencerId));
+  if (params?.emailLogId) search.set("email_log_id", String(params.emailLogId));
+  if (params?.campaignId) search.set("campaign_id", String(params.campaignId));
+  if (params?.processingStatus) search.set("processing_status", params.processingStatus);
+  if (params?.intentStatus) search.set("intent_status", params.intentStatus);
+  if (typeof params?.unmatched === "boolean") search.set("unmatched", params.unmatched ? "true" : "false");
+  search.set("page", String(params?.page ?? 1));
+  search.set("page_size", String(params?.pageSize ?? 50));
+  const response = await apiFetch(`${API_URL}/api/email-inbound/replies?${search.toString()}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchEmailReplyWorkCount(): Promise<EmailReplyWorkCount> {
+  const response = await apiFetch(`${API_URL}/api/email-inbound/replies/work-count`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function updateEmailReply(
+  replyId: number,
+  payload: {
+    product_influencer_id?: number | null;
+    campaign_id?: number | null;
+    intent_status?: string | null;
+    processing_status?: string | null;
+    manual_note?: string | null;
+  },
+): Promise<EmailReply> {
+  const response = await apiFetch(`${API_URL}/api/email-inbound/replies/${replyId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function deleteEmailReplies(ids: number[]): Promise<EmailReplyBulkDeleteResult> {
+  const response = await apiFetch(`${API_URL}/api/email-inbound/replies/bulk-delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchInfluencerEmailReplies(influencerId: number): Promise<EmailReply[]> {
+  const response = await apiFetch(`${API_URL}/api/influencers/${influencerId}/email-replies`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchInfluencerEmailReplySummary(
+  influencerId: number,
+): Promise<EmailReplySummary> {
+  const response = await apiFetch(`${API_URL}/api/influencers/${influencerId}/email-reply-summary`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchCampaignReplySummary(campaignId: number): Promise<EmailReplySummary> {
+  const response = await apiFetch(
+    `${API_URL}/api/email-inbound/campaigns/${campaignId}/reply-summary`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function pollImapInbox(markSeen = false): Promise<{
+  processed: number;
+  ingested: number;
+  skipped: number;
+  failed: number;
+}> {
+  const response = await apiFetch(
+    `${API_URL}/api/email-inbound/poll-imap?mark_seen=${markSeen ? "true" : "false"}`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
 export async function fetchSettingsStatus(): Promise<SettingsStatus> {
   const response = await apiFetch(`${API_URL}/api/settings/status`, { cache: "no-store" });
   if (!response.ok) {
@@ -1674,6 +2004,122 @@ export type KnowledgeBase = {
   updated_at: string;
 };
 
+export type LinkKnowledgeChunk = {
+  id: number;
+  link_knowledge_base_id: number;
+  workspace_id: number;
+  chunk_index: number;
+  chunk_type: string;
+  title: string | null;
+  content: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type LinkKnowledgeBase = {
+  id: number;
+  workspace_id: number;
+  user_id: number | null;
+  product_id: number | null;
+  name: string;
+  url: string;
+  domain: string | null;
+  source_type: string;
+  status: string;
+  fetch_status: string | null;
+  parse_status: string | null;
+  summary: string | null;
+  extracted_knowledge: Record<string, unknown> | null;
+  tags: string[] | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  last_fetched_at: string | null;
+  error_message: string | null;
+  chunks: LinkKnowledgeChunk[];
+};
+
+export type CreateLinkKnowledgeBasePayload = {
+  name?: string | null;
+  url: string;
+  product_id?: number | null;
+  tags?: string[] | null;
+  parse_immediately?: boolean;
+};
+
+export type UpdateLinkKnowledgeBasePayload = {
+  name?: string | null;
+  summary?: string | null;
+  extracted_knowledge?: Record<string, unknown> | null;
+  tags?: string[] | null;
+  is_active?: boolean;
+};
+
+export type GenerateLinkScriptsPayload = {
+  name?: string | null;
+  influencer_ids: number[];
+  language?: string;
+  tone?: string;
+  collaboration_type?: string;
+  script_types?: string[];
+  extra_instruction?: string | null;
+};
+
+export type LinkScriptJob = {
+  id: number;
+  workspace_id: number;
+  link_knowledge_base_id: number;
+  product_id: number | null;
+  name: string;
+  status: string;
+  total_count: number;
+  success_count: number;
+  failed_count: number;
+  language: string;
+  tone: string;
+  collaboration_type: string;
+  script_types: string[] | null;
+  ai_model: string | null;
+  extra_instruction: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  error_message: string | null;
+};
+
+export type LinkScriptResult = {
+  id: number;
+  workspace_id: number;
+  job_id: number;
+  link_knowledge_base_id: number;
+  influencer_id: number;
+  platform: string | null;
+  profile_url: string | null;
+  influencer_name: string | null;
+  influencer_handle: string | null;
+  status: string;
+  input_snapshot: Record<string, unknown> | null;
+  generated_content: Record<string, unknown> | null;
+  edited_content: Record<string, unknown> | null;
+  used_content: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  error_message: string | null;
+};
+
+export type UpdateLinkScriptResultPayload = {
+  edited_content?: Record<string, unknown> | null;
+  used_content?: Record<string, unknown> | null;
+};
+
+export type RegenerateLinkScriptPayload = {
+  tone?: string | null;
+  language?: string | null;
+  collaboration_type?: string | null;
+  extra_instruction?: string | null;
+};
+
 export type KnowledgeDocument = {
   id: number;
   knowledge_base_id: number;
@@ -1915,12 +2361,63 @@ export type OutreachSendQueueItem = {
   status: string;
   scheduled_at: string | null;
   sent_at: string | null;
+  failed_at: string | null;
+  next_retry_at: string | null;
+  retry_count: number;
+  max_retries: number;
+  priority: number;
   error_message: string | null;
+  dedupe_key: string | null;
+  locked_at: string | null;
   generated_by_ai: boolean;
   ai_reason: string | null;
+  campaign_id: number | null;
   email_log_id: number | null;
+  smtp_account_id: number | null;
+  queue_type: string;
+  follow_up_step: number | null;
+  parent_queue_id: number | null;
+  outreach_record_id: number | null;
+  should_skip_if_replied: boolean;
   created_at: string;
   updated_at: string;
+};
+
+export type OutreachScheduleConfig = {
+  start_at: string;
+  timezone?: string;
+  send_window_start?: string;
+  send_window_end?: string;
+  interval_minutes?: number;
+  daily_limit?: number;
+  hourly_limit?: number;
+  weekdays_only?: boolean;
+};
+
+export type OutreachScheduleItem = {
+  product_influencer_id: number;
+  recipient: string;
+  subject: string;
+  body: string;
+  matched_knowledge?: MatchedKnowledgeItem[];
+  ai_reason?: string;
+  allow_resend?: boolean;
+  priority?: number;
+  dedupe_key?: string;
+  max_retries?: number;
+};
+
+export type OutreachScheduleRequest = {
+  campaign_id?: number | null;
+  items: OutreachScheduleItem[];
+  schedule_config: OutreachScheduleConfig;
+};
+
+export type OutreachScheduleResult = {
+  created_count: number;
+  skipped_count: number;
+  first_scheduled_at: string | null;
+  last_scheduled_at: string | null;
 };
 
 export type OutreachSendQueueProcessResult = {
@@ -1930,6 +2427,11 @@ export type OutreachSendQueueProcessResult = {
   skipped: number;
   daily_limit: number;
   sent_today: number;
+  message: string;
+};
+
+export type OutreachSendQueueClearFailedResult = {
+  deleted_count: number;
   message: string;
 };
 
@@ -1962,12 +2464,44 @@ export async function fetchOutreachSendQueue(params: {
   page?: number;
   pageSize?: number;
   status?: string;
+  campaignId?: number;
+  recipientEmail?: string;
+  scheduledFrom?: string;
+  scheduledTo?: string;
 } = {}): Promise<PaginatedResponse<OutreachSendQueueItem>> {
   const query = new URLSearchParams();
   query.set("page", String(params.page ?? 1));
   query.set("page_size", String(params.pageSize ?? 50));
   if (params.status) query.set("status", params.status);
+  if (params.campaignId) query.set("campaign_id", String(params.campaignId));
+  if (params.recipientEmail) query.set("recipient_email", params.recipientEmail);
+  if (params.scheduledFrom) query.set("scheduled_from", params.scheduledFrom);
+  if (params.scheduledTo) query.set("scheduled_to", params.scheduledTo);
   const response = await apiFetch(`${API_URL}/api/outreach-send-queue?${query.toString()}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function scheduleOutreachSendQueue(
+  payload: OutreachScheduleRequest,
+): Promise<OutreachScheduleResult> {
+  const response = await apiFetch(`${API_URL}/api/outreach-send-queue/schedule`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchOutreachSendQueueItem(itemId: number): Promise<OutreachSendQueueItem> {
+  const response = await apiFetch(`${API_URL}/api/outreach-send-queue/${itemId}`, {
     cache: "no-store",
   });
   if (!response.ok) {
@@ -1996,12 +2530,706 @@ export async function cancelOutreachQueueItem(itemId: number): Promise<OutreachS
   return response.json();
 }
 
+export async function pauseOutreachQueueItem(itemId: number): Promise<OutreachSendQueueItem> {
+  const response = await apiFetch(`${API_URL}/api/outreach-send-queue/${itemId}/pause`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function resumeOutreachQueueItem(itemId: number): Promise<OutreachSendQueueItem> {
+  const response = await apiFetch(`${API_URL}/api/outreach-send-queue/${itemId}/resume`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function cancelScheduledOutreachQueueItem(itemId: number): Promise<OutreachSendQueueItem> {
+  const response = await apiFetch(`${API_URL}/api/outreach-send-queue/${itemId}/cancel`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function sendOutreachQueueItemNow(itemId: number): Promise<OutreachSendQueueItem> {
+  const response = await apiFetch(`${API_URL}/api/outreach-send-queue/${itemId}/send-now`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function rescheduleOutreachQueueItem(
+  itemId: number,
+  scheduledAt: string,
+): Promise<OutreachSendQueueItem> {
+  const response = await apiFetch(`${API_URL}/api/outreach-send-queue/${itemId}/reschedule`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scheduled_at: scheduledAt }),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function bulkPauseOutreachQueue(ids: number[]): Promise<{ updated_count: number }> {
+  const response = await apiFetch(`${API_URL}/api/outreach-send-queue/bulk-pause`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function bulkCancelOutreachQueue(ids: number[]): Promise<{ updated_count: number }> {
+  const response = await apiFetch(`${API_URL}/api/outreach-send-queue/bulk-cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function clearFailedOutreachQueue(): Promise<OutreachSendQueueClearFailedResult> {
+  const response = await apiFetch(`${API_URL}/api/outreach-send-queue/failed`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export type OutreachCampaign = {
+  id: number;
+  product_id: number;
+  user_id: number;
+  name: string;
+  status: string;
+  knowledge_base_id: number | null;
+  message_template_id: number | null;
+  daily_limit: number;
+  send_window_start: string | null;
+  send_window_end: string | null;
+  timezone: string;
+  skip_sent: boolean;
+  skip_replied: boolean;
+  skip_blacklisted: boolean;
+  skip_invalid: boolean;
+  allow_resend: boolean;
+  auto_send_enabled: boolean;
+  auto_send_time: string | null;
+  auto_send_timezone: string;
+  total_count: number;
+  draft_count: number;
+  can_queue_count: number;
+  queued_count: number;
+  sent_count: number;
+  failed_count: number;
+  skipped_count: number;
+  reply_count: number;
+  interested_count: number;
+  unreplied_count: number;
+  latest_reply_at: string | null;
+  previewed_at: string | null;
+  last_processed_at: string | null;
+  last_auto_processed_at: string | null;
+  next_auto_process_at: string | null;
+  influencer_filters_snapshot: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OutreachCampaignCreatePayload = {
+  name: string;
+  influencer_ids?: number[];
+  select_all_by_filters?: boolean;
+  influencer_filters?: Record<string, string | number | boolean>;
+  knowledge_base_id?: number | null;
+  message_template_id?: number | null;
+  daily_limit?: number;
+  send_window_start?: string | null;
+  send_window_end?: string | null;
+  timezone?: string;
+  skip_sent?: boolean;
+  skip_replied?: boolean;
+  skip_blacklisted?: boolean;
+  skip_invalid?: boolean;
+  allow_resend?: boolean;
+  auto_send_enabled?: boolean;
+  auto_send_time?: string | null;
+  auto_send_timezone?: string;
+};
+
+export type OutreachCampaignUpdatePayload = {
+  name?: string;
+  daily_limit?: number;
+  send_window_start?: string | null;
+  send_window_end?: string | null;
+  skip_sent?: boolean;
+  skip_replied?: boolean;
+  skip_blacklisted?: boolean;
+  skip_invalid?: boolean;
+  allow_resend?: boolean;
+  auto_send_enabled?: boolean;
+  auto_send_time?: string | null;
+  auto_send_timezone?: string;
+};
+
+export type OutreachCampaignPreviewItem = {
+  influencer_id: number;
+  username: string;
+  display_name: string | null;
+  recipient: string | null;
+  subject: string;
+  body: string;
+  reason: string;
+  matched_knowledge: MatchedKnowledgeItem[];
+  template_title: string;
+  can_queue: boolean;
+  skip_reason: string | null;
+};
+
+export type OutreachCampaignPreviewResponse = {
+  campaign_id: number;
+  items: OutreachCampaignPreviewItem[];
+  total: number;
+  can_queue_count: number;
+  skip_count: number;
+};
+
+export type OutreachCampaignPreviewPayload = {
+  content_source?: "ai" | "manual" | "template";
+  subject?: string;
+  body?: string;
+};
+
+export type OutreachCampaignRecipientListResponse = OutreachCampaignPreviewResponse;
+
+export type OutreachCampaignGenerateAndSendResponse = {
+  campaign_id: number;
+  preview: OutreachCampaignPreviewResponse;
+  queued: number;
+  queue_skipped: number;
+  processed: number;
+  sent: number;
+  failed: number;
+  skipped: number;
+  daily_limit: number;
+  sent_today: number;
+  message: string;
+};
+
+export type OutreachCampaignReplyBoardItem = {
+  influencer_id: number;
+  username: string;
+  display_name: string | null;
+  platform: string | null;
+  recipient: string | null;
+  subject: string | null;
+  send_status: string;
+  reply_status: string;
+  reply_time: string | null;
+  reply_snippet: string | null;
+  reply_body?: string | null;
+  match_method: string | null;
+  skip_reason: string | null;
+};
+
+export type OutreachCampaignReplyBoard = {
+  campaign_id: number;
+  total: number;
+  reply_count: number;
+  interested_count: number;
+  unreplied_count: number;
+  latest_reply_at: string | null;
+  items: OutreachCampaignReplyBoardItem[];
+};
+
+export type OutreachWorkbenchStatusItem = {
+  status: "normal" | "not_configured" | "error" | string;
+  message: string;
+};
+
+export type OutreachWorkbenchResultItem = {
+  influencer_id: number;
+  username: string;
+  display_name: string | null;
+  recipient: string | null;
+  status: "sent" | "pending" | "skipped" | "failed" | string;
+  subject: string | null;
+  body: string | null;
+  reason: string | null;
+  sent_at: string | null;
+};
+
+export type OutreachWorkbenchResultSection = {
+  campaign_id: number | null;
+  total: number;
+  sent: number;
+  skipped: number;
+  failed: number;
+  pending: number;
+  items: OutreachWorkbenchResultItem[];
+};
+
+export type OutreachOneClickWorkbench = {
+  ai_generation: OutreachWorkbenchStatusItem;
+  smtp: OutreachWorkbenchStatusItem;
+  available_recipient_count: number;
+  latest_campaign: OutreachCampaign | null;
+  latest_results: OutreachWorkbenchResultSection;
+  reply_followup: OutreachCampaignReplyBoard;
+};
+
+export async function fetchOutreachCampaigns(): Promise<OutreachCampaign[]> {
+  const response = await apiFetch(`${API_URL}/api/outreach-campaigns`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchOutreachWorkbench(): Promise<OutreachOneClickWorkbench> {
+  const response = await apiFetch(`${API_URL}/api/outreach-campaigns/workbench`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    if (response.status === 404 || response.status === 405) {
+      return fetchOutreachWorkbenchFallback();
+    }
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+async function fetchOutreachWorkbenchFallback(): Promise<OutreachOneClickWorkbench> {
+  const settings = await fetchSettingsStatus();
+  const campaigns = await fetchOutreachCampaigns().catch(() => []);
+  const latest = campaigns[0] ?? null;
+  const recipients = latest
+    ? await fetchOutreachCampaignRecipients(latest.id).catch(() => null)
+    : null;
+  const replies = latest
+    ? await fetchOutreachCampaignReplyBoard(latest.id).catch(() => null)
+    : null;
+  const replyBoard =
+    replies ??
+    ({
+      campaign_id: latest?.id ?? 0,
+      total: 0,
+      reply_count: 0,
+      interested_count: 0,
+      unreplied_count: 0,
+      latest_reply_at: null,
+      items: [],
+    } satisfies OutreachCampaignReplyBoard);
+  const replyByInfluencer = new Map(
+    replyBoard.items.map((item) => [item.influencer_id, item]),
+  );
+  const items: OutreachWorkbenchResultItem[] = (recipients?.items ?? []).map((item) => {
+    const reply = replyByInfluencer.get(item.influencer_id);
+    const sendStatus = reply?.send_status;
+    const status =
+      sendStatus === "sent"
+        ? "sent"
+        : sendStatus === "failed"
+          ? "failed"
+          : item.skip_reason || sendStatus === "skipped"
+            ? "skipped"
+            : "pending";
+    return {
+      influencer_id: item.influencer_id,
+      username: item.username,
+      display_name: item.display_name,
+      recipient: item.recipient,
+      status,
+      subject: item.subject || reply?.subject || null,
+      body: item.body || null,
+      reason: item.skip_reason || reply?.skip_reason || null,
+      sent_at: null,
+    };
+  });
+
+  return {
+    ai_generation: {
+      status: settings.ai.configured ? "normal" : "not_configured",
+      message: settings.ai.configured
+        ? `${settings.ai.provider} 已配置，可生成个性化邮件`
+        : "未配置 GPT，无法生成个性化邮件",
+    },
+    smtp: {
+      status: settings.smtp.configured && !settings.smtp.from_user_mismatch ? "normal" : "not_configured",
+      message: settings.smtp.message,
+    },
+    available_recipient_count: latest?.can_queue_count ?? 0,
+    latest_campaign: latest,
+    latest_results: {
+      campaign_id: latest?.id ?? null,
+      total: items.length,
+      sent: items.filter((item) => item.status === "sent").length,
+      skipped: items.filter((item) => item.status === "skipped").length,
+      failed: items.filter((item) => item.status === "failed").length,
+      pending: items.filter((item) => item.status === "pending").length,
+      items,
+    },
+    reply_followup: replyBoard,
+  };
+}
+
+export async function createOutreachCampaign(
+  payload: OutreachCampaignCreatePayload,
+): Promise<OutreachCampaign> {
+  const response = await apiFetch(`${API_URL}/api/outreach-campaigns`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function previewOutreachCampaign(
+  campaignId: number,
+  payload?: OutreachCampaignPreviewPayload,
+): Promise<OutreachCampaignPreviewResponse> {
+  const response = await apiFetch(
+    `${LONG_RUNNING_API_URL}/api/outreach-campaigns/${campaignId}/preview`,
+    {
+      method: "POST",
+      headers: payload ? { "Content-Type": "application/json" } : undefined,
+      body: payload ? JSON.stringify(payload) : undefined,
+    },
+    { timeoutMs: PREVIEW_FETCH_TIMEOUT_MS },
+  );
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchOutreachCampaignRecipients(
+  campaignId: number,
+): Promise<OutreachCampaignRecipientListResponse> {
+  const response = await apiFetch(`${API_URL}/api/outreach-campaigns/${campaignId}/recipients`, {
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function queueOutreachCampaign(
+  campaignId: number,
+  payload: { confirm: boolean; influencer_ids?: number[] },
+): Promise<{ queued: number; skipped: number; message: string }> {
+  const response = await apiFetch(`${API_URL}/api/outreach-campaigns/${campaignId}/queue`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchOutreachCampaignReplyBoard(
+  campaignId: number,
+): Promise<OutreachCampaignReplyBoard> {
+  const response = await apiFetch(`${API_URL}/api/outreach-campaigns/${campaignId}/replies`, {
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function processOutreachCampaign(
+  campaignId: number,
+): Promise<OutreachSendQueueProcessResult> {
+  const response = await apiFetch(`${API_URL}/api/outreach-campaigns/${campaignId}/process`, {
+    method: "POST",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function generateAndSendOutreachCampaign(
+  campaignId: number,
+): Promise<OutreachCampaignGenerateAndSendResponse> {
+  const response = await apiFetch(
+    `${LONG_RUNNING_API_URL}/api/outreach-campaigns/${campaignId}/generate-and-send`,
+    { method: "POST" },
+    { timeoutMs: PREVIEW_FETCH_TIMEOUT_MS },
+  );
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function pauseOutreachCampaign(campaignId: number): Promise<OutreachCampaign> {
+  const response = await apiFetch(`${API_URL}/api/outreach-campaigns/${campaignId}/pause`, {
+    method: "POST",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function resumeOutreachCampaign(campaignId: number): Promise<OutreachCampaign> {
+  const response = await apiFetch(`${API_URL}/api/outreach-campaigns/${campaignId}/resume`, {
+    method: "POST",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function cancelOutreachCampaign(campaignId: number): Promise<OutreachCampaign> {
+  const response = await apiFetch(`${API_URL}/api/outreach-campaigns/${campaignId}/cancel`, {
+    method: "POST",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function updateOutreachCampaign(
+  campaignId: number,
+  payload: OutreachCampaignUpdatePayload,
+): Promise<OutreachCampaign> {
+  const response = await apiFetch(`${API_URL}/api/outreach-campaigns/${campaignId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
 export async function fetchKnowledgeBases(): Promise<KnowledgeBase[]> {
   const response = await apiFetch(`${API_URL}/api/knowledge-bases`, { cache: "no-store" });
   if (!response.ok) {
     throw new Error(await parseError(response));
   }
   return response.json();
+}
+
+export async function fetchLinkKnowledgeBases(params: {
+  page?: number;
+  pageSize?: number;
+  status?: string;
+  domain?: string;
+  keyword?: string;
+  tag?: string;
+} = {}): Promise<PaginatedResponse<LinkKnowledgeBase>> {
+  const query = new URLSearchParams();
+  query.set("page", String(params.page ?? 1));
+  query.set("page_size", String(params.pageSize ?? 20));
+  if (params.status) query.set("status", params.status);
+  if (params.domain) query.set("domain", params.domain);
+  if (params.keyword) query.set("keyword", params.keyword);
+  if (params.tag) query.set("tag", params.tag);
+  const response = await apiFetch(`${API_URL}/api/link-knowledge-bases?${query.toString()}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function createLinkKnowledgeBase(
+  payload: CreateLinkKnowledgeBasePayload,
+): Promise<LinkKnowledgeBase> {
+  const response = await apiFetch(
+    `${API_URL}/api/link-knowledge-bases`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: PREVIEW_FETCH_TIMEOUT_MS },
+  );
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchLinkKnowledgeBase(id: number): Promise<LinkKnowledgeBase> {
+  const response = await apiFetch(`${API_URL}/api/link-knowledge-bases/${id}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function updateLinkKnowledgeBase(
+  id: number,
+  payload: UpdateLinkKnowledgeBasePayload,
+): Promise<LinkKnowledgeBase> {
+  const response = await apiFetch(`${API_URL}/api/link-knowledge-bases/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function refreshLinkKnowledgeBase(id: number): Promise<LinkKnowledgeBase> {
+  const response = await apiFetch(
+    `${API_URL}/api/link-knowledge-bases/${id}/refresh`,
+    { method: "POST" },
+    { timeoutMs: PREVIEW_FETCH_TIMEOUT_MS },
+  );
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function archiveLinkKnowledgeBase(id: number): Promise<LinkKnowledgeBase> {
+  const response = await apiFetch(`${API_URL}/api/link-knowledge-bases/${id}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export const deleteLinkKnowledgeBase = archiveLinkKnowledgeBase;
+
+export async function generateLinkScripts(
+  id: number,
+  payload: GenerateLinkScriptsPayload,
+): Promise<LinkScriptJob> {
+  const response = await apiFetch(
+    `${API_URL}/api/link-knowledge-bases/${id}/generate-scripts`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: PREVIEW_FETCH_TIMEOUT_MS },
+  );
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchLinkScriptJobs(params: {
+  page?: number;
+  pageSize?: number;
+  linkKnowledgeBaseId?: number;
+  status?: string;
+} = {}): Promise<PaginatedResponse<LinkScriptJob>> {
+  const query = new URLSearchParams();
+  query.set("page", String(params.page ?? 1));
+  query.set("page_size", String(params.pageSize ?? 20));
+  if (params.linkKnowledgeBaseId) {
+    query.set("link_knowledge_base_id", String(params.linkKnowledgeBaseId));
+  }
+  if (params.status) query.set("status", params.status);
+  const response = await apiFetch(`${API_URL}/api/link-script-jobs?${query.toString()}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchLinkScriptJob(id: number): Promise<LinkScriptJob> {
+  const response = await apiFetch(`${API_URL}/api/link-script-jobs/${id}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchLinkScriptResults(
+  jobId: number,
+  params: {
+    page?: number;
+    pageSize?: number;
+    status?: string;
+    platform?: string;
+    keyword?: string;
+  } = {},
+): Promise<PaginatedResponse<LinkScriptResult>> {
+  const query = new URLSearchParams();
+  query.set("page", String(params.page ?? 1));
+  query.set("page_size", String(params.pageSize ?? 100));
+  if (params.status) query.set("status", params.status);
+  if (params.platform) query.set("platform", params.platform);
+  if (params.keyword) query.set("keyword", params.keyword);
+  const response = await apiFetch(`${API_URL}/api/link-script-jobs/${jobId}/results?${query.toString()}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchLinkScriptResult(id: number): Promise<LinkScriptResult> {
+  const response = await apiFetch(`${API_URL}/api/link-script-results/${id}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function updateLinkScriptResult(
+  id: number,
+  payload: UpdateLinkScriptResultPayload,
+): Promise<LinkScriptResult> {
+  const response = await apiFetch(`${API_URL}/api/link-script-results/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function regenerateLinkScript(
+  id: number,
+  payload: RegenerateLinkScriptPayload = {},
+): Promise<LinkScriptResult> {
+  const response = await apiFetch(
+    `${API_URL}/api/link-script-results/${id}/regenerate`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: PREVIEW_FETCH_TIMEOUT_MS },
+  );
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function exportLinkScriptJob(id: number): Promise<void> {
+  await downloadWithTenantHeaders(`${API_URL}/api/link-script-jobs/${id}/export`, `link-script-job-${id}.xlsx`);
 }
 
 export async function createKnowledgeBase(payload: {

@@ -37,5 +37,19 @@ class EmailLog(Base):
     matched_knowledge: Mapped[list | None] = mapped_column(JSONB)
     risk_notes: Mapped[list | None] = mapped_column(JSONB)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    message_id: Mapped[str | None] = mapped_column(String(512), index=True)
+    has_replied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false", index=True)
+    replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    reply_email_log_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("email_replies.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    reply_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_outbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    follow_up_status: Mapped[str | None] = mapped_column(String(32), nullable=True, default="none", server_default="none", index=True)
+    follow_up_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    max_followups: Mapped[int] = mapped_column(Integer, nullable=False, default=2, server_default="2")
+    next_follow_up_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    stop_follow_up: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false", index=True)
+    stop_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     task: Mapped["CollectionTask | None"] = relationship(back_populates="email_logs")

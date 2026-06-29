@@ -20,6 +20,7 @@ from app.schemas.email import EmailSendResult, EmailTestResponse, MailchimpStatu
 from app.schemas.email_log import EmailLogRead
 from app.services.export import build_influencer_excel
 from app.services.influencer_lead import InfluencerLeadService
+from app.services.outreach_recipient import normalize_email_address, outreach_recipient_skip_reason
 from app.services.task_influencer import TaskInfluencerService
 
 logger = logging.getLogger(__name__)
@@ -94,12 +95,15 @@ def select_outreach_template(influencer: Influencer, templates: dict | None) -> 
     return subject, body
 
 
+from app.services.outreach_recipient import normalize_email_address
+
+
 def resolve_influencer_email(influencer: Influencer) -> str | None:
     """收件邮箱优先级：final_email > business_email > public_email > email。"""
     for field in ("final_email", "business_email", "public_email", "email"):
         value = getattr(influencer, field, None)
         if value and str(value).strip():
-            return str(value).strip().lower()
+            return normalize_email_address(str(value))
     return None
 
 
@@ -296,6 +300,7 @@ class EmailService:
         ai_reason: str | None = None,
         matched_knowledge: list | None = None,
         risk_notes: list | None = None,
+        message_id: str | None = None,
     ) -> EmailLog:
         log = EmailLog(
             task_id=task_id,
@@ -316,6 +321,7 @@ class EmailService:
             matched_knowledge=matched_knowledge,
             risk_notes=risk_notes,
             sent_at=datetime.now(UTC) if status == EmailLogStatus.SENT else None,
+            message_id=message_id,
         )
         db.add(log)
         await db.commit()
@@ -343,6 +349,7 @@ class EmailService:
         ai_reason: str | None = None,
         matched_knowledge: list | None = None,
         risk_notes: list | None = None,
+        message_id: str | None = None,
     ) -> EmailLog:
         return await EmailService.create_outreach_email_log(
             db,
@@ -363,15 +370,34 @@ class EmailService:
             ai_reason=ai_reason,
             matched_knowledge=matched_knowledge,
             risk_notes=risk_notes,
+            message_id=message_id,
         )
 
     @staticmethod
     async def send_test_email(recipient: str | None = None) -> EmailTestResponse:
         EmailService.ensure_smtp_configured()
 
-        to_address = recipient or settings.smtp_from
+        if not recipient or not str(recipient).strip():
+            return EmailTestResponse(
+                success=False,
+                message="请填写测试收件人邮箱。SMTP 测试邮件仅用于验证配置，不会发送红人外联邮件。",
+                recipient=None,
+            )
+
+        to_address = normalize_email_address(recipient)
+        if not to_address:
+            return EmailTestResponse(
+                success=False,
+                message="测试收件人邮箱无效，请重新填写。",
+                recipient=None,
+            )
+
         subject = f"Influencer Intel SMTP 测试 - {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')}"
-        body = "这是一封来自 Influencer Intel 的 SMTP 测试邮件。如果您收到此邮件，说明邮件服务配置正确。"
+        body = (
+            "这是一封来自 Influencer Intel 的 SMTP 测试邮件。"
+            "如果您收到此邮件，说明邮件服务配置正确。"
+            "此邮件不是红人外联邮件。"
+        )
 
         message = MIMEMultipart()
         message["From"] = settings.smtp_from
@@ -395,7 +421,7 @@ class EmailService:
 
         return EmailTestResponse(
             success=True,
-            message="测试邮件发送成功。",
+            message=f"SMTP 测试邮件已发送至 {to_address}（仅用于验证 SMTP 配置，不是红人外联邮件）。",
             recipient=to_address,
         )
 
@@ -547,9 +573,10 @@ class EmailService:
 
         for influencer in influencers:
             recipient = resolve_influencer_email(influencer)
-            if not recipient:
+            if outreach_recipient_skip_reason(recipient):
                 skipped += 1
                 continue
+            recipient = normalize_email_address(recipient) or recipient
 
             from app.models.global_influencer_profile import GlobalInfluencerProfile
             from app.models.product_influencer import ProductInfluencer

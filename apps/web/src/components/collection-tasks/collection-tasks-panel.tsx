@@ -137,7 +137,7 @@ function formatCollectionResultCell(
       <>
         <span className="inline-flex items-center gap-1.5 text-amber-700 dark:text-amber-400">
           <RefreshCw className="h-3.5 w-3.5 shrink-0" />
-          任务可能中断，可重新运行继续
+          任务可能中断，可继续运行
         </span>
         <span className="mt-0.5 block text-xs text-muted-foreground">{collectionTaskInterruptedHint(task)}</span>
         <span className="mt-0.5 block text-xs text-muted-foreground">{lines.primary}</span>
@@ -246,6 +246,19 @@ type TaskListRow =
   | { kind: "legacy_batch"; batch: LinkImportBatch; sortAt: number };
 
 const TASK_PAGE_SIZE_OPTIONS = [10, 20, 50] as const;
+
+const PRIMARY_TASK_TABS: { value: TaskEffectivenessFilter; label: string }[] = [
+  { value: "all", label: "全部" },
+  { value: "effective", label: "有结果" },
+  { value: "no_result", label: "无结果" },
+  { value: "archived", label: "已归档" },
+];
+
+const SECONDARY_TASK_FILTERS: { value: TaskEffectivenessFilter; label: string }[] = [
+  { value: "high_value", label: "高价值" },
+  { value: "low_value_result", label: "低价值结果" },
+  { value: "test_history", label: "测试/历史" },
+];
 
 function buildBulkManageResultMessage(result: CollectionTaskBulkManageResult): string {
   const parts: string[] = [];
@@ -834,30 +847,24 @@ export function CollectionTasksPanel() {
 
   return (
     <AdminShell title="采集任务" description="在同一处创建关键词发现或链接导入任务，运行后写入红人库">
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <Button onClick={() => openCreateDialog("keyword_discovery")}>
-          <Plus className="h-4 w-4" />
-          创建任务
-        </Button>
-        <Button variant="outline" onClick={() => openCreateDialog("link_import")}>
-          链接导入
-        </Button>
-        <Button variant="outline" onClick={() => void loadTasks()} disabled={loading}>
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-          刷新
-        </Button>
-        <div className="flex flex-wrap items-center gap-1 rounded-md border p-1">
-          {(
-            [
-              ["all", "全部任务"],
-              ["high_value", "高价值任务"],
-              ["effective", "有效任务"],
-              ["low_value_result", "低价值结果"],
-              ["no_result", "无结果任务"],
-              ["test_history", "测试/历史任务"],
-              ["archived", "已归档任务"],
-            ] as const
-          ).map(([value, label]) => (
+      <div className="ops-page">
+      <div className="ops-toolbar shrink-0">
+        <div className="flex items-center gap-2">
+          <Button onClick={() => openCreateDialog("keyword_discovery")}>
+            <Plus className="h-4 w-4" />
+            创建任务
+          </Button>
+          <Button variant="outline" onClick={() => openCreateDialog("link_import")}>
+            链接导入
+          </Button>
+          <Button variant="outline" onClick={() => void loadTasks()} disabled={loading}>
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            刷新
+          </Button>
+        </div>
+        <div className="flex flex-1 flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-1 rounded-md border border-slate-200 bg-slate-50 p-1">
+          {PRIMARY_TASK_TABS.map(({ value, label }) => (
             <Button
               key={value}
               size="sm"
@@ -867,7 +874,25 @@ export function CollectionTasksPanel() {
               {label}
             </Button>
           ))}
+          </div>
+          <select
+            className="h-8 rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-800 outline-none transition-colors hover:border-slate-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+            value={SECONDARY_TASK_FILTERS.some((item) => item.value === effectivenessFilter) ? effectivenessFilter : ""}
+            onChange={(event) => {
+              const value = event.target.value as TaskEffectivenessFilter;
+              if (value) changeTaskView(value);
+            }}
+            aria-label="高级任务筛选"
+          >
+            <option value="">高级筛选</option>
+            {SECONDARY_TASK_FILTERS.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
+          </select>
         </div>
+        <div className="flex flex-wrap items-center justify-end gap-2">
         {effectivenessFilter !== "high_value" ? (
           <Button variant="outline" size="sm" disabled={deleteSubmitting} onClick={handleArchiveTestHistory}>
             批量归档测试/历史任务
@@ -909,6 +934,7 @@ export function CollectionTasksPanel() {
             删除本页可清理任务 ({ineffectiveTaskIds.length})
           </Button>
         ) : null}
+      </div>
       </div>
 
       {activeRunningTasks.length > 0 ? (
@@ -955,8 +981,8 @@ export function CollectionTasksPanel() {
         </div>
       ) : null}
 
-      <Card>
-        <CardHeader>
+      <Card className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <CardHeader className="shrink-0 border-b px-4 py-3">
           <CardTitle>任务列表</CardTitle>
           <CardDescription>
             共 {total} 个任务，当前第 {page} / {totalPages} 页
@@ -975,7 +1001,7 @@ export function CollectionTasksPanel() {
                   : ""}
           </CardDescription>
         </CardHeader>
-        <CardContent className="pt-0">
+        <CardContent className="flex min-h-0 flex-1 flex-col p-0">
           {(effectivenessFilter === "low_value_result" ||
             effectivenessFilter === "no_result") &&
           selectedTaskIds.length > 0 ? (
@@ -1003,8 +1029,8 @@ export function CollectionTasksPanel() {
               description="点击「创建任务」配置关键词发现，或使用「链接导入」批量粘贴主页链接。"
             />
           ) : (
-            <div className="overflow-x-auto rounded-md border">
-              <table className="w-full table-fixed text-sm">
+            <div className="ops-table-wrap">
+              <table className="ops-table min-w-[1180px] table-fixed">
             <colgroup>
               <col className="w-10" />
               <col className="w-[22%]" />
@@ -1015,9 +1041,9 @@ export function CollectionTasksPanel() {
               <col className="w-[96px]" />
               <col className="w-[176px]" />
                 </colgroup>
-                <thead className="bg-muted/40">
-                  <tr className="border-b text-left text-muted-foreground">
-                    <th className="w-10 px-2 py-2.5">
+                <thead>
+                  <tr>
+                    <th className="w-10">
                       <input
                         type="checkbox"
                         aria-label="全选当前页无效果任务"
@@ -1031,12 +1057,12 @@ export function CollectionTasksPanel() {
                         }}
                       />
                     </th>
-                    <th className="px-4 py-2.5 font-medium">任务</th>
-                    <th className="px-4 py-2.5 font-medium">来源/模式</th>
-                    <th className="px-4 py-2.5 font-medium">关键词/链接</th>
-                    <th className="px-4 py-2.5 font-medium">状态</th>
-                    <th className="px-4 py-2.5 font-medium">采集结果</th>
-                    <th className="whitespace-nowrap px-4 py-2.5 font-medium">最近运行</th>
+                    <th>任务</th>
+                    <th>来源/模式</th>
+                    <th>关键词/链接</th>
+                    <th>状态</th>
+                    <th>采集结果</th>
+                    <th>最近运行</th>
                     <th className={COLLECTION_TASK_TABLE_LAYOUT.actionsHead}>操作</th>
                   </tr>
                 </thead>
@@ -1389,6 +1415,7 @@ export function CollectionTasksPanel() {
           )}
         </CardContent>
       </Card>
+      </div>
 
       <TaskFormDialog
         open={dialogOpen}

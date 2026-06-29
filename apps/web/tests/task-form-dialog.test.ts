@@ -4,6 +4,7 @@ import test from "node:test";
 import type { CollectionTask, PlatformCapability } from "../src/lib/api.ts";
 import { formatLinkImportPlatformHints, parseLinkImportPreview } from "../src/lib/collection-sources.ts";
 import {
+  applyStableCollectionMode,
   applyDiscoverySource,
   applyFormTemplate,
   createEmptyTaskForm,
@@ -353,6 +354,67 @@ test("default keyword mode selects at least one verified platform", () => {
   const initial = createEmptyTaskForm();
   assert.ok(initial.platforms.length >= 1);
   assert.ok(initial.platforms.every((platform) => ["instagram", "youtube", "tiktok", "facebook"].includes(platform)));
+});
+
+test("default keyword collection uses high-value-first quality settings", () => {
+  const initial = getInitialForm(true, null, "keyword_discovery");
+  const payload = formValuesToPayload(
+    {
+      ...initial,
+      name: "high value default",
+      keywordsText: "amazon finds creator",
+    },
+    noopCaps,
+  );
+
+  assert.equal(payload.min_followers_count, 10000);
+  assert.equal(payload.min_engagement_rate, null);
+  assert.equal(payload.require_email, false);
+  assert.equal(payload.require_contact, false);
+  assert.equal(payload.strict_quality_filter, false);
+  assert.equal(payload.insert_qualified_only, true);
+  assert.equal(payload.export_qualified_only, true);
+});
+
+test("stable collection mode relaxes filters and submits one conservative platform", () => {
+  const stable = applyStableCollectionMode({
+    ...keywordForm({
+      platforms: ["youtube", "tiktok", "facebook"],
+      platform: "multi",
+      discovery_limit: "100",
+      require_email: true,
+      require_contact: true,
+      strict_quality_filter: true,
+      insert_qualified_only: true,
+    }),
+  });
+  const payload = formValuesToPayload(stable, noopCaps);
+
+  assert.equal(stable.stable_collection_mode, true);
+  assert.equal(payload.stable_collection_mode, true);
+  assert.equal(payload.discovery_limit, 20);
+  assert.equal(payload.require_email, false);
+  assert.equal(payload.require_contact, false);
+  assert.equal(payload.strict_quality_filter, false);
+  assert.equal(payload.insert_qualified_only, false);
+  assert.equal(payload.platform, "youtube");
+  assert.deepEqual(payload.platforms, ["youtube"]);
+});
+
+test("switching back to keyword collection restores high-value-first defaults", () => {
+  const relaxedLinkImport = {
+    ...createEmptyTaskForm(),
+    sourceMethod: "link_import" as const,
+    collection_mode: "link_import" as const,
+    min_followers_count: "",
+    insert_qualified_only: false,
+    export_qualified_only: false,
+  };
+  const form = applyDiscoverySource("keyword_hashtag", relaxedLinkImport, noopCaps);
+
+  assert.equal(form.min_followers_count, "10000");
+  assert.equal(form.insert_qualified_only, true);
+  assert.equal(form.export_qualified_only, true);
 });
 
 test("selecting only YouTube maps to single-platform payload", () => {

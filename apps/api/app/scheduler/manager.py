@@ -1,10 +1,13 @@
 import logging
+import asyncio
 from dataclasses import dataclass, field
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.db.session import async_session_factory
 from app.models.collection_task import CollectionTask
 from app.models.enums import CollectionTaskStatus
@@ -14,6 +17,11 @@ from app.services.collection_task import CollectionTaskService
 logger = logging.getLogger(__name__)
 
 JOB_ID_PREFIX = "collection_task_"
+AUTO_CAMPAIGN_JOB_ID = "outreach_auto_campaigns"
+IMAP_POLL_JOB_ID = "imap_reply_poll"
+OUTREACH_SEND_QUEUE_JOB_ID = "outreach_send_queue_due_processor"
+FOLLOW_UP_JOB_ID = "process_due_follow_ups"
+SCHEDULED_TEST_EMAIL_JOB_ID = "scheduled_test_email"
 
 
 @dataclass
@@ -36,6 +44,99 @@ def parse_cron_expression(cron: str) -> CronTrigger:
             f"Cron 表达式需为 5 段格式（分 时 日 月 周），当前为 {len(parts)} 段：{expression}"
         )
     return CronTrigger.from_crontab(expression, timezone="UTC")
+
+
+async def run_auto_outreach_campaigns() -> None:
+    """APScheduler 回调：处理到点的邮件活动自动发送。"""
+    from app.services.outreach_campaign_service import OutreachCampaignService
+
+    logger.info("Starting auto outreach campaign processing")
+    async with async_session_factory() as db:
+        try:
+            result = await OutreachCampaignService.process_due_auto_campaigns(db)
+            logger.info(
+                "Auto outreach campaigns: checked=%s processed=%s",
+                result.checked,
+                result.processed,
+            )
+        except Exception as exc:
+            logger.exception("Auto outreach campaign processing failed: %s", exc)
+
+
+async def run_imap_reply_poll() -> None:
+    """APScheduler 回调：轮询 IMAP 收件箱并入库红人回复。"""
+    from app.services.email_reply_service import EmailReplyService
+
+    if not settings.is_imap_configured or not settings.imap_poll_enabled:
+        return
+
+    logger.info("Starting scheduled IMAP reply poll")
+    async with async_session_factory() as db:
+        try:
+            result = await EmailReplyService.poll_imap(db, mark_seen=True)
+            logger.info(
+                "IMAP reply poll: processed=%s ingested=%s skipped=%s failed=%s",
+                result.processed,
+                result.ingested,
+                result.skipped,
+                result.failed,
+            )
+        except Exception as exc:
+            logger.exception("Scheduled IMAP reply poll failed: %s", exc)
+
+
+async def run_outreach_send_queue_due_processor() -> None:
+    """APScheduler callback: process scheduled outreach emails that are due."""
+    from app.services.outreach_send_scheduler import process_due_email_queue
+
+    try:
+        result = await process_due_email_queue(limit=20)
+        if result.processed:
+            logger.info(
+                "Outreach send queue processed=%s sent=%s failed=%s skipped=%s",
+                result.processed,
+                result.sent,
+                result.failed,
+                result.skipped,
+            )
+    except Exception as exc:
+        logger.exception("Scheduled outreach send queue processing failed: %s", exc)
+
+
+async def run_due_follow_up_processor() -> None:
+    """APScheduler callback: create due outreach follow-up queue items."""
+    from app.services.follow_up_scheduler import process_due_follow_ups
+
+    try:
+        result = await process_due_follow_ups(limit=50)
+        if result.checked:
+            logger.info(
+                "Follow-up processor checked=%s created=%s stopped=%s skipped=%s",
+                result.checked,
+                result.created,
+                result.stopped,
+                result.skipped,
+            )
+    except Exception as exc:
+        logger.exception("Scheduled follow-up processing failed: %s", exc)
+
+
+async def run_scheduled_test_email() -> None:
+    """APScheduler callback: send a configured SMTP test email outside business logs."""
+    from app.services.email import EmailService
+
+    recipient = settings.smtp_test_recipient.strip()
+    if not settings.is_smtp_configured or not recipient:
+        return
+
+    try:
+        result = await EmailService.send_test_email(recipient=recipient)
+        if result.success:
+            logger.info("Scheduled SMTP test email sent to %s", result.recipient)
+        else:
+            logger.warning("Scheduled SMTP test email failed: %s", result.message)
+    except Exception as exc:
+        logger.exception("Scheduled SMTP test email failed: %s", exc)
 
 
 async def run_scheduled_collection(task_id: int) -> None:
@@ -102,9 +203,91 @@ class SchedulerManager:
     def start(self) -> None:
         if self.scheduler and self.scheduler.running:
             return
-        self.scheduler = AsyncIOScheduler(timezone="UTC")
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        self.scheduler = AsyncIOScheduler(timezone="UTC", event_loop=loop)
         self.scheduler.start()
-        logger.info("APScheduler started")
+        self.scheduler.add_job(
+            run_auto_outreach_campaigns,
+            trigger=CronTrigger(minute="*", timezone="UTC"),
+            id=AUTO_CAMPAIGN_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=120,
+        )
+        self.scheduler.add_job(
+            run_outreach_send_queue_due_processor,
+            trigger=CronTrigger(minute="*", timezone="UTC"),
+            id=OUTREACH_SEND_QUEUE_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=120,
+        )
+        self.scheduler.add_job(
+            run_due_follow_up_processor,
+            trigger=IntervalTrigger(minutes=5, timezone="UTC"),
+            id=FOLLOW_UP_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=120,
+        )
+        self._sync_imap_poll_job()
+        self._sync_scheduled_test_email_job()
+        logger.info("APScheduler started (includes outreach auto-send and send queue checkers)")
+
+    def _sync_imap_poll_job(self) -> None:
+        if not self.scheduler:
+            return
+
+        should_run = settings.is_imap_configured and settings.imap_poll_enabled
+        existing = self.scheduler.get_job(IMAP_POLL_JOB_ID)
+
+        if not should_run:
+            if existing:
+                self.scheduler.remove_job(IMAP_POLL_JOB_ID)
+                logger.info("IMAP reply poll job removed (disabled or not configured)")
+            return
+
+        interval_minutes = max(1, int(settings.imap_poll_interval_minutes or 5))
+        self.scheduler.add_job(
+            run_imap_reply_poll,
+            trigger=IntervalTrigger(minutes=interval_minutes, timezone="UTC"),
+            id=IMAP_POLL_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=120,
+        )
+        logger.info("IMAP reply poll job registered (interval=%s min)", interval_minutes)
+
+    def _sync_scheduled_test_email_job(self) -> None:
+        if not self.scheduler:
+            return
+
+        should_run = (
+            settings.is_smtp_configured
+            and settings.smtp_test_schedule_enabled
+            and bool(settings.smtp_test_recipient.strip())
+        )
+        existing = self.scheduler.get_job(SCHEDULED_TEST_EMAIL_JOB_ID)
+
+        if not should_run:
+            if existing:
+                self.scheduler.remove_job(SCHEDULED_TEST_EMAIL_JOB_ID)
+                logger.info("Scheduled SMTP test email job removed")
+            return
+
+        interval_minutes = max(1, int(settings.smtp_test_interval_minutes or 1440))
+        self.scheduler.add_job(
+            run_scheduled_test_email,
+            trigger=IntervalTrigger(minutes=interval_minutes, timezone="UTC"),
+            id=SCHEDULED_TEST_EMAIL_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=120,
+        )
+        logger.info(
+            "Scheduled SMTP test email job registered (recipient=%s interval=%s min)",
+            settings.smtp_test_recipient.strip(),
+            interval_minutes,
+        )
 
     def shutdown(self) -> None:
         if self.scheduler and self.scheduler.running:

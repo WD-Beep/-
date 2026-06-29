@@ -22,8 +22,10 @@ export function shouldProceedRealSend(confirmSend: boolean): boolean {
   return confirmSend;
 }
 
-export function buildDryRunSuccessMessage(summary: OutreachBatchPreviewResponse["summary"] & { pending?: number }): string {
-  const pending = "pending" in summary ? summary.pending : summary.generated;
+export function buildDryRunSuccessMessage(
+  summary: (OutreachBatchPreviewResponse["summary"] & { pending?: number }) | { generated: number; pending?: number },
+): string {
+  const pending = typeof summary.pending === "number" ? summary.pending : summary.generated;
   return `测试生成完成：${pending} 条待发送记录已写入邮件日志（未真实 SMTP 发送）。`;
 }
 

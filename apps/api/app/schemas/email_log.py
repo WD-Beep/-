@@ -26,12 +26,38 @@ class EmailLogRead(ORMModel):
     matched_knowledge: list[MatchedKnowledgeItem] | None = None
     risk_notes: list[str] | None = None
     sent_at: datetime | None
+    message_id: str | None = None
+    has_replied: bool = False
+    replied_at: datetime | None = None
+    reply_email_log_id: int | None = None
+    reply_summary: str | None = None
+    last_outbound_at: datetime | None = None
+    follow_up_status: str | None = "none"
+    follow_up_count: int = 0
+    max_followups: int = 2
+    next_follow_up_at: datetime | None = None
+    stop_follow_up: bool = False
+    stop_reason: str | None = None
 
 
 class EmailLogFilter(BaseModel):
     product_id: int | None = None
     task_id: int | None = None
     status: EmailLogStatus | None = None
+
+
+class EmailLogBulkDeleteRequest(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=500)
+
+
+class EmailLogBulkDeleteResponse(BaseModel):
+    deleted_count: int
+    deleted_ids: list[int]
+    missing_ids: list[int]
+
+
+class EmailLogBulkDeleteByStatusRequest(BaseModel):
+    status: EmailLogStatus
 
 
 class SaveEmailLogAsTemplateRequest(BaseModel):
@@ -50,3 +76,12 @@ class SaveEmailLogAsTemplateResponse(BaseModel):
     duplicate: bool = False
     message: str
     template: MessageTemplateRead | None = None
+
+
+class ScheduleFollowUpRequest(BaseModel):
+    after_days: int = Field(default=3, ge=0, le=365)
+    max_followups: int = Field(default=2, ge=1, le=5)
+
+
+class StopFollowUpRequest(BaseModel):
+    reason: str = Field(default="manually_stopped", max_length=64)

@@ -6,8 +6,18 @@ export const TEMPLATE_STORAGE_KEY = "influencer-intel:collection-task-template";
 export type DiscoverySource = "keyword_hashtag" | "link_import" | "shopping_seed_auto" | "multi_platform_auto";
 
 const DEFAULT_PLATFORMS = ["youtube"];
+export const KEYWORD_HIGH_VALUE_DEFAULTS = {
+  min_followers_count: "10000",
+  min_engagement_rate: "",
+  require_email: false,
+  require_contact: false,
+  strict_quality_filter: false,
+  insert_qualified_only: true,
+  export_qualified_only: true,
+} as const;
 
 export type TaskFormValues = {
+  stable_collection_mode: boolean;
   sourceMethod: TaskSourceMethod;
   name: string;
   collection_mode: CollectionMode;
@@ -48,6 +58,7 @@ export type TaskFormValues = {
 };
 
 const emptyForm: TaskFormValues = {
+  stable_collection_mode: false,
   sourceMethod: "keyword_discovery",
   name: "",
   collection_mode: "discovery",
@@ -58,16 +69,16 @@ const emptyForm: TaskFormValues = {
   country: "",
   category: "",
   discovery_limit: "50",
-  min_engagement_rate: "",
-  min_followers_count: "",
+  min_engagement_rate: KEYWORD_HIGH_VALUE_DEFAULTS.min_engagement_rate,
+  min_followers_count: KEYWORD_HIGH_VALUE_DEFAULTS.min_followers_count,
   max_followers_count: "",
   filterIncludeKeywordsText: "",
   filterExcludeKeywordsText: "",
-  require_email: false,
-  require_contact: false,
-  strict_quality_filter: false,
-  insert_qualified_only: false,
-  export_qualified_only: false,
+  require_email: KEYWORD_HIGH_VALUE_DEFAULTS.require_email,
+  require_contact: KEYWORD_HIGH_VALUE_DEFAULTS.require_contact,
+  strict_quality_filter: KEYWORD_HIGH_VALUE_DEFAULTS.strict_quality_filter,
+  insert_qualified_only: KEYWORD_HIGH_VALUE_DEFAULTS.insert_qualified_only,
+  export_qualified_only: KEYWORD_HIGH_VALUE_DEFAULTS.export_qualified_only,
   schedule_enabled: false,
   schedule_cron: "",
   email_enabled: false,
@@ -89,6 +100,52 @@ const emptyForm: TaskFormValues = {
 
 export function createEmptyTaskForm(): TaskFormValues {
   return { ...emptyForm, platforms: [...DEFAULT_PLATFORMS] };
+}
+
+const STABLE_COLLECTION_DEFAULT_TARGET = "20";
+
+function stablePrimaryPlatform(platforms: string[]): string {
+  const preferred = platforms.find((platform) =>
+    (KEYWORD_DISCOVERY_PLATFORMS as readonly string[]).includes(platform),
+  );
+  return preferred ?? "youtube";
+}
+
+export function applyStableCollectionMode(values: TaskFormValues): TaskFormValues {
+  const platform = stablePrimaryPlatform(values.platforms);
+  return {
+    ...values,
+    stable_collection_mode: true,
+    discovery_limit: STABLE_COLLECTION_DEFAULT_TARGET,
+    require_email: false,
+    require_contact: false,
+    strict_quality_filter: false,
+    insert_qualified_only: false,
+    export_qualified_only: false,
+    platform,
+    platforms: [platform],
+  };
+}
+
+export function clearStableCollectionMode(values: TaskFormValues): TaskFormValues {
+  return { ...values, stable_collection_mode: false };
+}
+
+function withKeywordHighValueDefaults(values: TaskFormValues): TaskFormValues {
+  return {
+    ...values,
+    min_followers_count: values.min_followers_count.trim()
+      ? values.min_followers_count
+      : KEYWORD_HIGH_VALUE_DEFAULTS.min_followers_count,
+    min_engagement_rate: values.min_engagement_rate.trim()
+      ? values.min_engagement_rate
+      : KEYWORD_HIGH_VALUE_DEFAULTS.min_engagement_rate,
+    require_email: values.require_email || KEYWORD_HIGH_VALUE_DEFAULTS.require_email,
+    require_contact: values.require_contact || KEYWORD_HIGH_VALUE_DEFAULTS.require_contact,
+    strict_quality_filter: values.strict_quality_filter || KEYWORD_HIGH_VALUE_DEFAULTS.strict_quality_filter,
+    insert_qualified_only: values.insert_qualified_only || KEYWORD_HIGH_VALUE_DEFAULTS.insert_qualified_only,
+    export_qualified_only: values.export_qualified_only || KEYWORD_HIGH_VALUE_DEFAULTS.export_qualified_only,
+  };
 }
 
 type TaskFormTemplate = Omit<
@@ -557,13 +614,33 @@ function buildQualityFilterPayload(values: TaskFormValues) {
 
 export { buildQualityFilterPayload };
 
+function withStablePayloadDefaults(
+  payload: CollectionTaskPayload,
+  values: TaskFormValues,
+): CollectionTaskPayload {
+  if (!values.stable_collection_mode) return payload;
+  const platform = stablePrimaryPlatform(payload.platforms.length ? payload.platforms : values.platforms);
+  return {
+    ...payload,
+    stable_collection_mode: true,
+    discovery_limit: 20,
+    require_email: false,
+    require_contact: false,
+    strict_quality_filter: false,
+    insert_qualified_only: false,
+    export_qualified_only: false,
+    platform,
+    platforms: [platform],
+  };
+}
+
 export function formValuesToPayload(
   values: TaskFormValues,
   platformCapabilities: PlatformCapability[] = [],
 ): CollectionTaskPayload {
   const taskName = values.name.trim() || suggestTaskName(values);
   if (isLinkImportTaskForm(values)) {
-    return {
+    return withStablePayloadDefaults({
       name: taskName,
       collection_mode: "link_import",
       platform: "instagram",
@@ -583,7 +660,7 @@ export function formValuesToPayload(
       outreach_dry_run: values.outreach_dry_run,
       outreach_templates: formToTemplates(values),
       comment_discovery_enabled: false,
-    };
+    }, values);
   }
 
   if (values.collection_mode === "competitor_product") {
@@ -596,7 +673,7 @@ export function formValuesToPayload(
     if (website) input_urls.push(website);
     const platforms = filterKeywordSubmissionPlatforms(values.platforms, platformCapabilities);
     const { platform, platforms: selectedPlatforms } = resolvePlatformFields(platforms);
-    return {
+    return withStablePayloadDefaults({
       name: taskName,
       collection_mode: values.collection_mode,
       platform,
@@ -616,7 +693,7 @@ export function formValuesToPayload(
       outreach_dry_run: values.outreach_dry_run,
       outreach_templates: formToTemplates(values),
       comment_discovery_enabled: false,
-    };
+    }, values);
   }
 
   if (values.collection_mode === "link_seed_discovery") {
@@ -627,7 +704,7 @@ export function formValuesToPayload(
     const resolvedSeedPlatforms =
       seedPlatforms.length > 0 ? seedPlatforms : [...SEED_DISCOVERY_PLATFORMS];
     const { platform, platforms: selectedPlatforms } = resolvePlatformFields(resolvedSeedPlatforms);
-    return {
+    return withStablePayloadDefaults({
       name: taskName,
       collection_mode: "link_seed_discovery",
       platform,
@@ -647,13 +724,13 @@ export function formValuesToPayload(
       outreach_dry_run: values.outreach_dry_run,
       outreach_templates: formToTemplates(values),
       comment_discovery_enabled: false,
-    };
+    }, values);
   }
 
   const platforms = filterKeywordSubmissionPlatforms(values.platforms, platformCapabilities);
   if (isSeedOnlyDiscoverySelection(platforms)) {
     const { platform, platforms: selectedPlatforms } = resolvePlatformFields(platforms);
-    return {
+    return withStablePayloadDefaults({
       name: taskName,
       collection_mode: "link_seed_discovery",
       platform,
@@ -673,11 +750,11 @@ export function formValuesToPayload(
       outreach_dry_run: values.outreach_dry_run,
       outreach_templates: formToTemplates(values),
       comment_discovery_enabled: false,
-    };
+    }, values);
   }
   const { platform, platforms: selectedPlatforms } = resolvePlatformFields(platforms);
 
-  return {
+  return withStablePayloadDefaults({
     name: taskName,
     collection_mode: values.collection_mode,
     platform,
@@ -697,7 +774,7 @@ export function formValuesToPayload(
     outreach_dry_run: values.outreach_dry_run,
     outreach_templates: formToTemplates(values),
     comment_discovery_enabled: values.comment_discovery_enabled,
-  };
+  }, values);
 }
 
 export function taskToFormValues(task: CollectionTask): TaskFormValues {
@@ -735,6 +812,7 @@ export function taskToFormValues(task: CollectionTask): TaskFormValues {
   const seedOnly = isSeedOnlyDiscoverySelection(platforms);
 
   return {
+    stable_collection_mode: Boolean(task.run_checkpoint?.stable_collection_mode),
     sourceMethod: seedOnly ? "shopping_seed_auto" : sourceMethod,
     name: task.name,
     collection_mode:
@@ -793,7 +871,8 @@ export function getInitialForm(
           : "discovery",
   };
   const template = loadSavedFormTemplate();
-  return template ? applyFormTemplate(base, template) : base;
+  const initial = template ? applyFormTemplate(base, template) : base;
+  return defaultSourceMethod === "link_import" ? initial : withKeywordHighValueDefaults(initial);
 }
 
 export function discoverySourceFromForm(form: TaskFormValues): DiscoverySource {
@@ -814,6 +893,7 @@ export function applyDiscoverySource(
   if (source === "link_import") {
     return {
       ...prev,
+      stable_collection_mode: false,
       ...clearKeywordDiscoveryFields(),
       sourceMethod: "link_import",
       collection_mode: "link_import",
@@ -824,6 +904,8 @@ export function applyDiscoverySource(
   if (source === "shopping_seed_auto") {
     return {
       ...prev,
+      stable_collection_mode: false,
+      ...KEYWORD_HIGH_VALUE_DEFAULTS,
       ...clearLinkImportFields(),
       sourceMethod: "shopping_seed_auto",
       collection_mode: "link_seed_discovery",
@@ -833,19 +915,21 @@ export function applyDiscoverySource(
   }
   const configured = getMultiPlatformAutoPlatforms(platformCapabilities);
   if (source === "multi_platform_auto") {
-    return {
+    return withKeywordHighValueDefaults({
       ...prev,
+      stable_collection_mode: false,
       ...clearLinkImportFields(),
       sourceMethod: "keyword_discovery",
       collection_mode: "discovery",
       ...resolvePlatformFields([...configured]),
-    };
+    });
   }
   const platforms = prev.platforms.length
     ? filterKeywordSubmissionPlatforms(prev.platforms, platformCapabilities)
     : getKeywordDiscoveryDefaultPlatforms(platformCapabilities);
-  return {
+  return withKeywordHighValueDefaults({
     ...prev,
+    stable_collection_mode: false,
     ...clearLinkImportFields(),
     sourceMethod: "keyword_discovery",
     collection_mode:
@@ -855,7 +939,7 @@ export function applyDiscoverySource(
         ? "discovery"
         : prev.collection_mode,
     ...resolvePlatformFields(platforms),
-  };
+  });
 }
 
 export function suggestTaskName(form: TaskFormValues): string {
@@ -909,6 +993,7 @@ export function advancedFilterSummary(form: TaskFormValues): string {
   if (form.strict_quality_filter) parts.push("严格过滤");
   if (form.export_qualified_only) parts.push("仅导出达标");
   if (form.comment_discovery_enabled) parts.push("评论区发现");
+  if (form.stable_collection_mode) parts.push("稳定采集模式");
   if (form.collection_mode !== "discovery" && !isLinkImportTaskForm(form)) {
     parts.push(COLLECTION_MODE_LABELS[form.collection_mode] ?? form.collection_mode);
   }
@@ -929,6 +1014,7 @@ export function hasAdvancedSettings(form: TaskFormValues): boolean {
     form.insert_qualified_only ||
     form.export_qualified_only ||
     form.comment_discovery_enabled ||
+    form.stable_collection_mode ||
     form.collection_mode !== "discovery" ||
     form.schedule_enabled ||
     form.email_enabled ||

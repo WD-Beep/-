@@ -29,8 +29,10 @@ from app.services.email import (
     format_smtp_send_error,
     resolve_influencer_email,
 )
+from app.services.email_reply_utils import build_outbound_message_id
 from app.services.influencer_lead import InfluencerLeadService
 from app.services.influencer_projection import merged_influencer_for_ai
+from app.services.outreach_recipient import validate_real_outreach_recipient
 from app.services.product_influencer_service import ProductInfluencerService
 from app.services.speech_recommendation_service import SpeechRecommendationService
 
@@ -76,7 +78,7 @@ class SingleOutreachEmailService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="缺少邮箱，无法发送",
             )
-        return recipient
+        return validate_real_outreach_recipient(recipient)
 
     @staticmethod
     async def preview(
@@ -182,10 +184,12 @@ class SingleOutreachEmailService:
                 email_log=EmailLogRead.model_validate(log),
             )
 
+        message_id = build_outbound_message_id(product_id=product_id)
         message = MIMEMultipart()
         message["From"] = settings.smtp_from
         message["To"] = recipient
         message["Subject"] = subject
+        message["Message-ID"] = message_id
         message.attach(MIMEText(body, "plain", "utf-8"))
 
         try:
@@ -203,6 +207,7 @@ class SingleOutreachEmailService:
                 influencer_username=global_row.username,
                 generated_by_ai=True,
                 ai_provider="openai",
+                message_id=message_id,
             )
             await InfluencerLeadService.mark_product_email_sent(
                 db,

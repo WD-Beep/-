@@ -7,6 +7,9 @@ from app.services.tenant_scope import ALL_PRODUCTS_ID, scoped_product_id
 from app.models.enums import EmailLogStatus
 from app.schemas.common import PaginatedResponse
 from app.schemas.email_log import (
+    EmailLogBulkDeleteByStatusRequest,
+    EmailLogBulkDeleteRequest,
+    EmailLogBulkDeleteResponse,
     EmailLogFilter,
     EmailLogRead,
     SaveEmailLogAsTemplateRequest,
@@ -37,6 +40,44 @@ async def list_email_logs(
 ) -> PaginatedResponse[EmailLogRead]:
     filters = EmailLogFilter(product_id=scoped_product_id(ctx.product_id), task_id=task_id, status=status)
     return await EmailLogService.list_logs(db, filters, page, page_size)
+
+
+@router.post("/bulk-delete", response_model=EmailLogBulkDeleteResponse)
+async def bulk_delete_email_logs(
+    payload: EmailLogBulkDeleteRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> EmailLogBulkDeleteResponse:
+    product_id = _require_product_scope(ctx)
+    deleted_ids, missing_ids = await EmailLogService.bulk_delete_logs(
+        db,
+        log_ids=payload.ids,
+        product_id=product_id,
+    )
+    return EmailLogBulkDeleteResponse(
+        deleted_count=len(deleted_ids),
+        deleted_ids=deleted_ids,
+        missing_ids=missing_ids,
+    )
+
+
+@router.post("/bulk-delete-by-status", response_model=EmailLogBulkDeleteResponse)
+async def bulk_delete_email_logs_by_status(
+    payload: EmailLogBulkDeleteByStatusRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> EmailLogBulkDeleteResponse:
+    product_id = _require_product_scope(ctx)
+    deleted_ids = await EmailLogService.bulk_delete_logs_by_status(
+        db,
+        status=payload.status,
+        product_id=product_id,
+    )
+    return EmailLogBulkDeleteResponse(
+        deleted_count=len(deleted_ids),
+        deleted_ids=deleted_ids,
+        missing_ids=[],
+    )
 
 
 @router.post(

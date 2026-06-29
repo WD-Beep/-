@@ -14,6 +14,9 @@ class SmtpStatus(BaseModel):
     warning: str | None = None
     use_tls: bool = True
     message: str
+    test_recipient: str | None = None
+    test_schedule_enabled: bool = False
+    test_interval_minutes: int | None = None
 
 
 class MailchimpStatus(BaseModel):
@@ -23,10 +26,15 @@ class MailchimpStatus(BaseModel):
     message: str
 
 
+class KlaviyoStatus(BaseModel):
+    configured: bool
+    list_id: str | None = None
+    message: str
+
+
 class EmailTestRequest(BaseModel):
-    recipient: EmailStr | None = Field(
-        default=None,
-        description="测试收件人，不传则使用 SMTP_FROM",
+    recipient: EmailStr = Field(
+        description="测试收件人（必填）。仅用于验证 SMTP 配置，不是红人外联邮件。",
     )
 
 

@@ -20,8 +20,8 @@ from app.services.platform_providers.url_only import (
     PinterestUrlOnlyProvider,
     ShopMyUrlOnlyProvider,
 )
-from app.services.platform_providers.youtube_api_direct import YouTubeApiDirectProvider
 from app.services.platform_providers.youtube_apify import YouTubeApifyProvider
+from app.services.platform_providers.youtube_official import YouTubeAutoProvider, YouTubeOfficialProvider
 from app.services.collection_sources import enrich_platform_capability
 from app.services.platform_types import (
     LINK_IMPORT_HINTS,
@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 _PROVIDER_REGISTRY = {
     "instagram": InstagramApiDirectProvider,
     "tiktok": TikTokApiDirectProvider,
-    "youtube": YouTubeApiDirectProvider,
     "facebook": FacebookApiDirectProvider,
     "pinterest": PinterestUrlOnlyProvider,
     "ltk": LtkUrlOnlyProvider,
@@ -69,8 +68,13 @@ def task_platforms(task: CollectionTask) -> list[str]:
 
 
 def _provider_cls(platform: str):
-    if platform == "youtube" and settings.active_youtube_provider == "apify":
-        return YouTubeApifyProvider
+    if platform == "youtube":
+        provider = settings.active_youtube_provider
+        if provider == "official":
+            return YouTubeOfficialProvider
+        if provider == "apify":
+            return YouTubeApifyProvider
+        return YouTubeAutoProvider
     if platform == "tiktok" and settings.active_tiktok_provider == "apify":
         return TikTokApifyProvider
     if platform == "facebook" and settings.active_facebook_provider == "apify":
@@ -131,6 +135,10 @@ def _provider_state_from_result(result: PlatformDiscoveryResult) -> dict | None:
     reason = ""
     message = result.skip_reason or "; ".join(result.errors[:2])
     lowered = message.lower()
+    if result.rate_limited or "429" in lowered or "rate limit" in lowered:
+        reason = "rate_limit"
+    elif "timeout" in lowered:
+        reason = "timeout"
     if result.skipped:
         if "未配置" in message or "not configured" in lowered or "缺少" in message:
             reason = "provider_not_configured"
@@ -149,6 +157,18 @@ def _provider_state_from_result(result: PlatformDiscoveryResult) -> dict | None:
         "message": message,
         "api_calls": result.api_requests,
     }
+
+
+def _platform_timeout_seconds(platform: str, *, competitor_mode: bool) -> int | None:
+    if competitor_mode:
+        return max(30, settings.competitor_product_platform_timeout_seconds)
+    if platform == "youtube":
+        return max(30, settings.youtube_discovery_max_duration_seconds)
+    if platform == "facebook":
+        return max(30, settings.facebook_discovery_max_duration_seconds)
+    if platform == "tiktok":
+        return max(30, settings.apify_tiktok_timeout_seconds)
+    return None
 
 
 async def discover_platform(
@@ -237,10 +257,14 @@ async def discover_non_instagram_platforms(
             )
         await _set_platform_status(platform, "searching")
         try:
-            if platform_timeout:
+            effective_timeout = platform_timeout or _platform_timeout_seconds(
+                platform,
+                competitor_mode=competitor_mode,
+            )
+            if effective_timeout:
                 result = await asyncio.wait_for(
                     discover_platform(discovery_task, platform, checkpoint=checkpoint),
-                    timeout=platform_timeout,
+                    timeout=effective_timeout,
                 )
             else:
                 result = await discover_platform(discovery_task, platform, checkpoint=checkpoint)
@@ -257,6 +281,11 @@ async def discover_non_instagram_platforms(
             return result
         except asyncio.TimeoutError:
             msg = f"{platform} 平台发现超时（{platform_timeout}s），已跳过该平台继续其他平台"
+            timeout_seconds = platform_timeout or _platform_timeout_seconds(
+                platform,
+                competitor_mode=competitor_mode,
+            )
+            msg = f"{platform} platform discovery timeout ({timeout_seconds}s); skipped this platform and continued others"
             logger.warning("[CompetitorProduct] platform timeout platform=%s", platform)
             await _set_platform_status(platform, "timeout_skipped", note=msg)
             return PlatformDiscoveryResult(
@@ -299,7 +328,9 @@ async def discover_non_instagram_platforms(
             partial_skip_note=f"多平台并发搜索（{len(targets)} 个平台，每平台最多 {platform_timeout}s）",
         )
 
-    outcomes = await asyncio.gather(*(_safe_discover(p) for p in targets), return_exceptions=True)
+    outcomes = []
+    for platform in targets:
+        outcomes.append(await _safe_discover(platform))
     results: list[PlatformDiscoveryResult] = []
     for platform, outcome in zip(targets, outcomes, strict=True):
         if isinstance(outcome, BaseException):

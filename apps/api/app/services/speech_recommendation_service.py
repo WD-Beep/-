@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.global_influencer_profile import GlobalInfluencerProfile
+from app.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from app.models.message_template import MessageTemplate
 from app.models.product_influencer import ProductInfluencer
 from app.schemas.knowledge import (
@@ -22,6 +24,16 @@ from app.services.ai.openai_client import OPENAI_NOT_CONFIGURED_MSG, chat_comple
 from app.services.knowledge.search_service import KnowledgeSearchService
 
 logger = logging.getLogger(__name__)
+
+UNRESOLVED_PLACEHOLDER_RE = re.compile(r"\{[a-zA-Z_][a-zA-Z0-9_ -]{0,40}\}")
+
+
+def _coerce_knowledge_section(value: object | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
 
 SYSTEM_PROMPT = """你是海外红人营销客服话术助手。
 你必须基于提供的品牌知识库片段和话术库候选生成推荐，不得编造知识库没有的品牌信息。
@@ -99,11 +111,55 @@ class SpeechRecommendationService:
             matched.append(
                 MatchedKnowledgeItem(
                     document=hit.document_name,
-                    section=hit.section,
+                    section=_coerce_knowledge_section(hit.section),
                     summary=summary or hit.document_name,
                 )
             )
         return matched
+
+    @staticmethod
+    async def _load_general_knowledge_hits(
+        db: AsyncSession,
+        *,
+        product_id: int,
+        knowledge_base_id: int | None = None,
+        limit: int = 6,
+    ) -> list[KnowledgeSearchResult]:
+        stmt = (
+            select(KnowledgeChunk, KnowledgeDocument)
+            .join(KnowledgeDocument, KnowledgeDocument.id == KnowledgeChunk.document_id)
+            .where(
+                KnowledgeChunk.product_id == product_id,
+                KnowledgeDocument.status == "ready",
+            )
+            .order_by(KnowledgeDocument.updated_at.desc(), KnowledgeChunk.chunk_index.asc())
+            .limit(limit)
+        )
+        if knowledge_base_id:
+            stmt = stmt.where(KnowledgeChunk.knowledge_base_id == knowledge_base_id)
+
+        rows = (await db.execute(stmt)).all()
+        output: list[KnowledgeSearchResult] = []
+        for chunk, document in rows:
+            metadata = dict(chunk.chunk_metadata or {})
+            section = None
+            if "page" in metadata:
+                section = f"第 {metadata['page']} 页"
+            elif "slide" in metadata:
+                section = f"幻灯片 {metadata['slide']}"
+            output.append(
+                KnowledgeSearchResult(
+                    chunk_id=chunk.id,
+                    document_id=document.id,
+                    document_name=document.file_name,
+                    title=chunk.title,
+                    section=section,
+                    content=chunk.content,
+                    score=0.1,
+                    metadata=metadata,
+                )
+            )
+        return output
 
     @staticmethod
     def _fallback_response(
@@ -232,6 +288,11 @@ class SpeechRecommendationService:
 用户意图：{payload.user_intent}
 平台风格提示：{PLATFORM_STYLE.get(platform, "友好专业")}
 
+个性化要求：
+- 每个红人必须生成不同 subject/body，不要复用同一套标题。
+- subject 要结合红人的平台、内容方向、bio、类别或受众特征，避免通用标题。
+- 不要保留 {{brand}}、{{name}}、{{product}} 等模板占位符。
+
 红人信息：
 {json.dumps(influencer_payload, ensure_ascii=False, indent=2)}
 
@@ -274,7 +335,7 @@ class SpeechRecommendationService:
         matched = [
             MatchedKnowledgeItem(
                 document=str(item.get("document", "")),
-                section=item.get("section"),
+                section=_coerce_knowledge_section(item.get("section")),
                 summary=str(item.get("summary", "")),
             )
             for item in parsed.get("matched_knowledge", [])
@@ -299,7 +360,12 @@ class SpeechRecommendationService:
         )
 
     @staticmethod
-    def _apply_template_tokens(text: str, *, global_row: GlobalInfluencerProfile) -> str:
+    def _apply_template_tokens(
+        text: str,
+        *,
+        global_row: GlobalInfluencerProfile,
+        extra_tokens: dict[str, str] | None = None,
+    ) -> str:
         values = {
             "name": global_row.display_name or global_row.username or "",
             "username": global_row.username or "",
@@ -307,10 +373,39 @@ class SpeechRecommendationService:
             "followers": str(global_row.followers_count or 0),
             "category": global_row.category or "",
         }
+        values.update({key: value for key, value in (extra_tokens or {}).items() if value})
         result = text
         for key, value in values.items():
             result = result.replace("{" + key + "}", value)
         return result
+
+    @staticmethod
+    def _brand_template_tokens(brand_profile: object | None) -> dict[str, str]:
+        brand_name = str(getattr(brand_profile, "brand_name", "") or "Brand").strip() or "Brand"
+        signature = str(getattr(brand_profile, "signature", "") or f"{brand_name} Team").strip()
+        product_summary = str(getattr(brand_profile, "product_summary", "") or "").strip()
+        product_name = product_summary or brand_name
+        return {
+            "brand": brand_name,
+            "brand_name": brand_name,
+            "company": brand_name,
+            "product": product_name,
+            "product_name": product_name,
+            "signature": signature,
+        }
+
+    @staticmethod
+    def _fill_outreach_placeholders(
+        text: str,
+        *,
+        global_row: GlobalInfluencerProfile,
+        brand_profile: object | None,
+    ) -> str:
+        return SpeechRecommendationService._apply_template_tokens(
+            text,
+            global_row=global_row,
+            extra_tokens=SpeechRecommendationService._brand_template_tokens(brand_profile),
+        )
 
     @staticmethod
     def _fallback_outreach_email(
@@ -322,6 +417,7 @@ class SpeechRecommendationService:
         knowledge_hits: list[KnowledgeSearchResult] | None = None,
         error_message: str | None = None,
         tone: str = "professional",
+        brand_profile: object | None = None,
     ) -> "OutreachEmailGenerationResult":
         from app.schemas.outreach_email import OutreachEmailGenerationResult
 
@@ -332,16 +428,18 @@ class SpeechRecommendationService:
             subject = f"{script.title} — {display}"
 
         if script and script.content.strip():
-            body = SpeechRecommendationService._apply_template_tokens(
+            body = SpeechRecommendationService._fill_outreach_placeholders(
                 script.content[:4000],
                 global_row=global_row,
+                brand_profile=brand_profile,
             )
         else:
+            signature = SpeechRecommendationService._brand_template_tokens(brand_profile)["signature"]
             body = (
                 f"Hi {display},\n\n"
                 f"We've been following your {global_row.platform or 'social'} content"
                 f" and would love to explore a collaboration.\n\n"
-                f"Best regards"
+                f"Best regards,\n{signature}"
             )
 
         matched = SpeechRecommendationService._hits_to_matched_knowledge(knowledge_hits or [])
@@ -374,9 +472,11 @@ class SpeechRecommendationService:
         product_row: ProductInfluencer,
         user_intent: str = "首次合作邀约",
         selected_script_ids: list[int] | None = None,
+        knowledge_base_id: int | None = None,
         language: str | None = None,
         tone: str | None = None,
     ) -> "OutreachEmailGenerationResult":
+        """为单个红人生成独立邮件草稿；话术库与知识库仅作 GPT 参考，不得原样群发。"""
         from app.schemas.outreach_email import OutreachEmailGenerationResult
         from app.services.influencer_projection import merged_influencer_for_ai
         from app.services.value_tier import classify_value_tier
@@ -399,6 +499,7 @@ class SpeechRecommendationService:
             db,
             product_id=product_id,
             query=search_query,
+            knowledge_base_id=knowledge_base_id,
             limit=6,
         )
         if not knowledge_hits:
@@ -417,8 +518,21 @@ class SpeechRecommendationService:
                     db,
                     product_id=product_id,
                     query=fallback_query,
+                    knowledge_base_id=knowledge_base_id,
                     limit=6,
                 )
+        if not knowledge_hits:
+            knowledge_hits = await SpeechRecommendationService._load_general_knowledge_hits(
+                db,
+                product_id=product_id,
+                knowledge_base_id=knowledge_base_id,
+                limit=6,
+            )
+
+        from app.services.brand_profile import load_brand_profile
+
+        brand_profile = await load_brand_profile(db, product_id=product_id)
+        brand_context = brand_profile.to_prompt_block()
 
         merged = merged_influencer_for_ai(product_row, global_row)
         value_tier, value_tier_label, value_tier_reason = classify_value_tier(merged)
@@ -438,6 +552,7 @@ class SpeechRecommendationService:
                 knowledge_hits=knowledge_hits,
                 error_message=OPENAI_NOT_CONFIGURED_MSG,
                 tone=preferred_tone,
+                brand_profile=brand_profile,
             )
 
         script_payload = [
@@ -494,6 +609,9 @@ class SpeechRecommendationService:
 红人信息：
 {json.dumps(influencer_payload, ensure_ascii=False, indent=2)}
 
+品牌资料（只能引用以下内容，不得编造未提供的承诺）：
+{brand_context}
+
 候选话术库（可从中选择或融合改写，每个红人应个性化）：
 {json.dumps(script_payload, ensure_ascii=False, indent=2)}
 
@@ -532,23 +650,34 @@ class SpeechRecommendationService:
                 knowledge_hits=knowledge_hits,
                 error_message=err,
                 tone=preferred_tone,
+                brand_profile=brand_profile,
             )
 
         matched = [
             MatchedKnowledgeItem(
                 document=str(item.get("document", "")),
-                section=item.get("section"),
+                section=_coerce_knowledge_section(item.get("section")),
                 summary=str(item.get("summary", "")),
             )
             for item in parsed.get("matched_knowledge", [])
             if isinstance(item, dict)
         ]
+        if not matched and knowledge_hits:
+            matched = SpeechRecommendationService._hits_to_matched_knowledge(knowledge_hits)
         script_id = parsed.get("recommended_script_id")
         if script_id is not None:
             script_id = str(script_id)
 
-        subject = str(parsed.get("subject", "")).strip()
-        body = str(parsed.get("body", "")).strip()
+        subject = SpeechRecommendationService._fill_outreach_placeholders(
+            str(parsed.get("subject", "")).strip(),
+            global_row=global_row,
+            brand_profile=brand_profile,
+        )
+        body = SpeechRecommendationService._fill_outreach_placeholders(
+            str(parsed.get("body", "")).strip(),
+            global_row=global_row,
+            brand_profile=brand_profile,
+        )
         if not subject or not body:
             return SpeechRecommendationService._fallback_outreach_email(
                 reason="AI 返回缺少 subject/body，已降级为话术库模板",
@@ -557,6 +686,17 @@ class SpeechRecommendationService:
                 scripts=scripts,
                 knowledge_hits=knowledge_hits,
                 error_message="empty subject or body from AI",
+                tone=str(parsed.get("tone", preferred_tone)),
+                brand_profile=brand_profile,
+            )
+        if UNRESOLVED_PLACEHOLDER_RE.search(subject) or UNRESOLVED_PLACEHOLDER_RE.search(body):
+            return SpeechRecommendationService._fallback_outreach_email(
+                reason="AI 返回了未替换的模板占位符，已阻止发送",
+                global_row=global_row,
+                product_row=product_row,
+                scripts=scripts,
+                knowledge_hits=knowledge_hits,
+                error_message="AI 返回了未替换的模板占位符",
                 tone=str(parsed.get("tone", preferred_tone)),
             )
 
@@ -769,7 +909,7 @@ class SpeechRecommendationService:
         matched = [
             MatchedKnowledgeItem(
                 document=str(item.get("document", "")),
-                section=item.get("section"),
+                section=_coerce_knowledge_section(item.get("section")),
                 summary=str(item.get("summary", "")),
             )
             for item in parsed.get("matched_knowledge", [])

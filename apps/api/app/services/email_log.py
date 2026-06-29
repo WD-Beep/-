@@ -1,6 +1,6 @@
 import math
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps.tenant import TenantContext
@@ -8,6 +8,7 @@ from app.models.email_log import EmailLog
 from app.models.enums import EmailLogStatus
 from app.models.global_influencer_profile import GlobalInfluencerProfile
 from app.models.message_template import MessageTemplate
+from app.models.outreach_send_queue import OutreachSendQueueItem
 from app.models.product_influencer import ProductInfluencer
 from app.schemas.common import PaginatedResponse
 from app.schemas.email_log import (
@@ -18,9 +19,14 @@ from app.schemas.email_log import (
 )
 from app.schemas.message_template import MessageTemplateCreate
 from app.services.message_template import MessageTemplateService
+from app.services.test_data_visibility import business_email_log_filter
 
 
 class EmailLogService:
+    @staticmethod
+    def _business_base_query():
+        return select(EmailLog).where(business_email_log_filter())
+
     @staticmethod
     def _apply_filters(query, filters: EmailLogFilter):
         if filters.product_id is not None:
@@ -38,7 +44,7 @@ class EmailLogService:
         page: int,
         page_size: int,
     ) -> PaginatedResponse[EmailLogRead]:
-        base_query = select(EmailLog)
+        base_query = EmailLogService._business_base_query()
         base_query = EmailLogService._apply_filters(base_query, filters)
 
         total = await db.scalar(select(func.count()).select_from(base_query.subquery()))
@@ -62,7 +68,7 @@ class EmailLogService:
 
     @staticmethod
     async def count_all(db: AsyncSession, *, product_id: int | None = None) -> int:
-        query = select(func.count()).select_from(EmailLog)
+        query = select(func.count()).select_from(EmailLog).where(business_email_log_filter())
         if product_id is not None:
             query = query.where(EmailLog.product_id == product_id)
         count = await db.scalar(query)
@@ -75,7 +81,12 @@ class EmailLogService:
         *,
         product_id: int | None = None,
     ) -> int:
-        query = select(func.count()).select_from(EmailLog).where(EmailLog.status == status.value)
+        query = (
+            select(func.count())
+            .select_from(EmailLog)
+            .where(EmailLog.status == status.value)
+            .where(business_email_log_filter())
+        )
         if product_id is not None:
             query = query.where(EmailLog.product_id == product_id)
         count = await db.scalar(query)
@@ -91,6 +102,74 @@ class EmailLogService:
         return await db.scalar(
             select(EmailLog).where(EmailLog.id == log_id, EmailLog.product_id == product_id)
         )
+
+    @staticmethod
+    async def bulk_delete_logs(
+        db: AsyncSession,
+        *,
+        log_ids: list[int],
+        product_id: int,
+    ) -> tuple[list[int], list[int]]:
+        unique_ids = list(dict.fromkeys(log_ids))
+        rows = (
+            await db.scalars(
+                select(EmailLog.id).where(
+                    EmailLog.product_id == product_id,
+                    EmailLog.id.in_(unique_ids),
+                )
+            )
+        ).all()
+        deleted_ids = list(rows)
+        missing_ids = [log_id for log_id in unique_ids if log_id not in set(deleted_ids)]
+        if not deleted_ids:
+            return [], missing_ids
+
+        await db.execute(
+            update(OutreachSendQueueItem)
+            .where(
+                OutreachSendQueueItem.product_id == product_id,
+                OutreachSendQueueItem.email_log_id.in_(deleted_ids),
+            )
+            .values(email_log_id=None)
+        )
+        rows_to_delete = (
+            await db.scalars(
+                select(EmailLog).where(
+                    EmailLog.product_id == product_id,
+                    EmailLog.id.in_(deleted_ids),
+                )
+            )
+        ).all()
+        for row in rows_to_delete:
+            await db.delete(row)
+        await db.commit()
+        return deleted_ids, missing_ids
+
+    @staticmethod
+    async def bulk_delete_logs_by_status(
+        db: AsyncSession,
+        *,
+        status: EmailLogStatus,
+        product_id: int,
+    ) -> list[int]:
+        rows = (
+            await db.scalars(
+                select(EmailLog.id).where(
+                    EmailLog.product_id == product_id,
+                    EmailLog.status == status.value,
+                    business_email_log_filter(),
+                )
+            )
+        ).all()
+        deleted_ids = list(rows)
+        if not deleted_ids:
+            return []
+        deleted_ids, _ = await EmailLogService.bulk_delete_logs(
+            db,
+            log_ids=deleted_ids,
+            product_id=product_id,
+        )
+        return deleted_ids
 
     @staticmethod
     async def save_as_message_template(

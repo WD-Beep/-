@@ -1264,6 +1264,37 @@ async def test_tiktok_apify_timeout_continues_other_queries(monkeypatch):
     assert any("query HOMEHIVE clear PVC jewelry bags" in err and "超时" in err for err in result.errors)
 
 
+@pytest.mark.anyio
+async def test_tiktok_apify_timeout_without_candidates_sets_provider_state(monkeypatch):
+    from app.services.apify_client import ApifyError
+    from app.services.platform_providers.tiktok_apify import TikTokApifyProvider
+
+    monkeypatch.setattr(settings, "apify_token", "apify_api_test")
+    monkeypatch.setattr(settings, "apify_tiktok_timeout_seconds", 30)
+    monkeypatch.setattr(settings, "competitor_product_keyword_timeout_seconds", 30)
+    monkeypatch.setattr(settings, "tiktok_apify_keyword_concurrency", 1)
+
+    async def fake_actor(actor_id, run_input, **kwargs):
+        raise ApifyError("Apify 请求超时（>120s）")
+
+    task = CollectionTask(
+        name="amazon cn",
+        platform="tiktok",
+        platforms=["tiktok"],
+        keywords=["亚马逊带货红人"],
+        collection_mode="discovery",
+        discovery_limit=5,
+    )
+
+    with patch("app.services.platform_providers.tiktok_apify.run_actor_sync", side_effect=fake_actor):
+        result = await TikTokApifyProvider.discover(task)
+
+    state = result.provider_availability_state["tiktok"]
+    assert state["reason"] == "timeout"
+    assert state["api_calls"] == 1
+    assert any("Apify 请求超时" in err for err in result.errors)
+
+
 def test_youtube_provider_routes_to_apify_when_configured():
     from app.services.api_direct_provider import get_platform_capability
 

@@ -12,6 +12,7 @@ from app.services.apify_client import ApifyError, run_actor_sync
 from app.services.collection_targets import discovery_fetch_limit
 from app.services.concurrency import map_bounded
 from app.services.platform_types import PlatformCapability, PlatformCandidateProfile, PlatformDiscoveryResult
+from app.services.task_run_progress import classify_provider_unavailable_state
 from app.services.platform_utils import (
     dedupe_profiles,
     engagement_rate_from_metrics,
@@ -28,6 +29,11 @@ logger = logging.getLogger(__name__)
 def _is_memory_limit_error(message: str) -> bool:
     lowered = (message or "").lower()
     return "memory-limit-exceeded" in lowered or "memory limit" in lowered or "内存" in lowered
+
+
+def _is_timeout_error(message: str) -> bool:
+    lowered = (message or "").lower()
+    return "timeout" in lowered or "超时" in message or "瓒呮椂" in message
 
 
 def _author_meta(item: dict) -> dict:
@@ -267,6 +273,13 @@ class TikTokApifyProvider:
                 attempted_queries += 1
                 rate_limit_count += local_rate_limits
                 errors.extend(local_errors)
+                if local_rate_limits:
+                    provider_unavailable_state = {
+                        "status": "provider_unavailable",
+                        "reason": "rate_limit",
+                        "message": "TikTok Apify rate limit; skipped remaining TikTok queries for this run",
+                        "api_calls": attempted_queries,
+                    }
                 if any(_is_memory_limit_error(err) for err in local_errors):
                     provider_unavailable_state = {
                         "status": "provider_unavailable",
@@ -274,6 +287,12 @@ class TikTokApifyProvider:
                         "message": "Apify 内存额度已满/并发 actor 过多，已短路跳过后续 TikTok query",
                         "api_calls": attempted_queries,
                     }
+                elif any(_is_timeout_error(err) for err in local_errors):
+                    provider_unavailable_state = classify_provider_unavailable_state(
+                        "tiktok",
+                        next(err for err in local_errors if _is_timeout_error(err)),
+                        api_calls=attempted_queries,
+                    )
                 for profile in local_profiles:
                     if len(profiles) >= limit:
                         break

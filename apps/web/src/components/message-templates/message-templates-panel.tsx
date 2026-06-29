@@ -41,6 +41,7 @@ import {
   messageTemplateScenarioLabel,
   translateErrorMessage,
 } from "@/lib/labels";
+import { canDeleteMessageTemplate, canEditMessageTemplate } from "@/lib/message-template-helpers";
 
 function formatDate(value: string | null): string {
   if (!value) return "-";
@@ -205,6 +206,27 @@ export function MessageTemplatesPanel() {
     }
   }
 
+  const scenarioCounts = MESSAGE_TEMPLATE_SCENARIO_OPTIONS.map((option) => ({
+    ...option,
+    count: items.filter((item) => item.scenario === option.value).length,
+  }));
+  const defaultCount = items.filter((item) => item.is_system_default).length;
+  const totalUses = items.reduce((sum, item) => sum + item.usage_count, 0);
+  const lastUpdated = items
+    .map((item) => item.updated_at)
+    .filter(Boolean)
+    .sort()
+    .at(-1) ?? null;
+  const hasActiveFilters = Boolean(search || scenarioFilter || platformFilter || languageFilter || tagFilter);
+
+  function clearFilters() {
+    setSearch("");
+    setScenarioFilter("");
+    setPlatformFilter("");
+    setLanguageFilter("");
+    setTagFilter("");
+  }
+
   return (
     <AdminShell title="话术库" description="保存和复用达人沟通话术">
       {requiresProduct ? (
@@ -226,214 +248,217 @@ export function MessageTemplatesPanel() {
         </div>
       ) : null}
 
-      <div className="mb-4 flex flex-wrap items-end gap-3">
-        <Button onClick={openCreateDialog} disabled={requiresProduct}>
-          <Plus className="h-4 w-4" />
-          新增话术
-        </Button>
-        <Button variant="outline" onClick={() => void loadData()} disabled={loading || requiresProduct}>
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-          刷新列表
-        </Button>
-      </div>
-
-      <Card className="mb-4">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base">筛选</CardTitle>
-          <CardDescription>按关键词、场景、平台、语言或标签查找历史话术</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-            <div className="relative xl:col-span-2">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="搜索标题或正文"
-                className="pl-9"
-                disabled={requiresProduct}
-              />
-            </div>
-            <select
-              value={scenarioFilter}
-              onChange={(e) => setScenarioFilter(e.target.value)}
-              disabled={requiresProduct}
-              className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-            >
-              <option value="">全部场景</option>
-              {MESSAGE_TEMPLATE_SCENARIO_OPTIONS.map((item) => (
-                <option key={item.value} value={item.value}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-            <select
-              value={platformFilter}
-              onChange={(e) => setPlatformFilter(e.target.value)}
-              disabled={requiresProduct}
-              className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-            >
-              <option value="">全部平台</option>
-              {MESSAGE_TEMPLATE_PLATFORM_OPTIONS.filter((item) => item.value).map((item) => (
-                <option key={item.value} value={item.value}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-            <select
-              value={languageFilter}
-              onChange={(e) => setLanguageFilter(e.target.value)}
-              disabled={requiresProduct}
-              className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-            >
-              <option value="">全部语言</option>
-              {MESSAGE_TEMPLATE_LANGUAGE_OPTIONS.map((item) => (
-                <option key={item.value} value={item.value}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
+      <div className="ops-page">
+        <div className="ops-toolbar shrink-0">
+          <div className="relative min-w-[280px] flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              value={tagFilter}
-              onChange={(e) => setTagFilter(e.target.value)}
-              placeholder="按标签筛选"
-              className="max-w-xs"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="搜索标题或正文"
+              className="pl-9"
               disabled={requiresProduct}
             />
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => void loadData()}
-              disabled={loading || requiresProduct}
-            >
-              应用筛选
-            </Button>
           </div>
-        </CardContent>
-      </Card>
+          <select
+            value={scenarioFilter}
+            onChange={(e) => setScenarioFilter(e.target.value)}
+            disabled={requiresProduct}
+            className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+          >
+            <option value="">全部场景</option>
+            {MESSAGE_TEMPLATE_SCENARIO_OPTIONS.map((item) => (
+              <option key={item.value} value={item.value}>{item.label}</option>
+            ))}
+          </select>
+          <select
+            value={platformFilter}
+            onChange={(e) => setPlatformFilter(e.target.value)}
+            disabled={requiresProduct}
+            className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+          >
+            <option value="">全部平台</option>
+            {MESSAGE_TEMPLATE_PLATFORM_OPTIONS.filter((item) => item.value).map((item) => (
+              <option key={item.value} value={item.value}>{item.label}</option>
+            ))}
+          </select>
+          <select
+            value={languageFilter}
+            onChange={(e) => setLanguageFilter(e.target.value)}
+            disabled={requiresProduct}
+            className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+          >
+            <option value="">全部语言</option>
+            {MESSAGE_TEMPLATE_LANGUAGE_OPTIONS.map((item) => (
+              <option key={item.value} value={item.value}>{item.label}</option>
+            ))}
+          </select>
+          <Input
+            value={tagFilter}
+            onChange={(e) => setTagFilter(e.target.value)}
+            placeholder="标签"
+            className="w-[160px]"
+            disabled={requiresProduct}
+          />
+          {hasActiveFilters ? (
+            <Button variant="ghost" size="sm" onClick={clearFilters}>清除</Button>
+          ) : null}
+          <Button variant="outline" onClick={() => void loadData()} disabled={loading || requiresProduct}>
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            刷新
+          </Button>
+          <Button onClick={openCreateDialog} disabled={requiresProduct}>
+            <Plus className="h-4 w-4" />
+            新增话术
+          </Button>
+        </div>
 
-      {error ? <ErrorAlert message={error} className="mb-4" /> : null}
+        <div className="asset-summary shrink-0">
+          <div className="asset-summary-item">
+            <div className="asset-summary-label">话术总数</div>
+            <div className="asset-summary-value">{total}</div>
+          </div>
+          <div className="asset-summary-item">
+            <div className="asset-summary-label">系统默认</div>
+            <div className="asset-summary-value">{defaultCount}</div>
+          </div>
+          <div className="asset-summary-item">
+            <div className="asset-summary-label">累计使用</div>
+            <div className="asset-summary-value">{totalUses}</div>
+          </div>
+          <div className="asset-summary-item">
+            <div className="asset-summary-label">最近更新</div>
+            <div className="mt-2 truncate text-sm font-medium text-slate-700">{formatDate(lastUpdated)}</div>
+          </div>
+        </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>话术列表</CardTitle>
-          <CardDescription>共 {total} 条话术</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {loading ? (
-            <LoadingState label="加载话术..." />
-          ) : requiresProduct ? (
-            <EmptyState
-              title="请选择具体产品"
-              description="在左侧切换到某个产品/品牌后，即可查看和管理该产品下的话术。"
-            />
-          ) : items.length === 0 ? (
-            <EmptyState
-              title="暂无话术"
-              description="首次打开将自动加载系统默认英文外联模板；也可点击「新增话术」保存自定义模板。"
-            />
-          ) : (
-            <div className="space-y-4">
-              {items.map((template) => {
-                const busy = actionId === template.id;
-                const platformLabel = template.platform
-                  ? PLATFORM_LABELS[template.platform] ?? template.platform
-                  : "不限";
-                return (
-                  <div
-                    key={template.id}
-                    className="rounded-lg border p-4 transition-colors hover:bg-muted/30"
+        {error ? <ErrorAlert message={error} /> : null}
+
+        <Card className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <CardHeader className="shrink-0 border-b px-4 py-3">
+            <CardTitle>话术列表</CardTitle>
+            <CardDescription>按场景、平台、语言和标签管理可复用外联素材。</CardDescription>
+          </CardHeader>
+          <CardContent className="flex min-h-0 flex-1 flex-col p-0">
+            {loading ? (
+              <LoadingState label="加载话术..." />
+            ) : requiresProduct ? (
+              <div className="asset-empty">
+                <EmptyState
+                  title="请选择具体产品"
+                  description="在左侧切换到某个产品/品牌后，即可查看和管理该产品下的话术。"
+                />
+              </div>
+            ) : items.length === 0 ? (
+              <div className="asset-empty">
+                <EmptyState
+                  title="暂无话术"
+                  description="新增外联开场白、邮件模板或 FAQ 话术后，团队可在触达流程中快速复用。"
+                  action={<Button onClick={openCreateDialog}><Plus className="h-4 w-4" />新增话术</Button>}
+                  secondaryAction={<Button variant="outline">查看模板示例</Button>}
+                />
+              </div>
+            ) : (
+              <div className="asset-two-pane">
+                <aside className="border-r bg-slate-50/70 p-3">
+                  <button
+                    type="button"
+                    onClick={() => setScenarioFilter("")}
+                    className={`mb-1 flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm ${scenarioFilter === "" ? "bg-white font-medium text-blue-700 shadow-sm ring-1 ring-slate-200" : "text-slate-600 hover:bg-white"}`}
                   >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="min-w-0 flex-1 space-y-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h3 className="font-medium">{template.title}</h3>
-                          {template.is_system_default ? (
-                            <Badge variant="outline" className="text-xs">
-                              系统默认
-                            </Badge>
-                          ) : null}
-                          <Badge variant="secondary">
-                            {messageTemplateScenarioLabel(template.scenario)}
-                          </Badge>
-                          <Badge variant="outline">{platformLabel}</Badge>
-                          <Badge variant="outline">
-                            {messageTemplateLanguageLabel(template.language)}
-                          </Badge>
-                        </div>
-                        {template.tags.length > 0 ? (
-                          <div className="flex flex-wrap gap-1">
-                            {template.tags.map((tag) => (
-                              <Badge key={tag} variant="outline" className="text-xs">
-                                {tag}
-                              </Badge>
-                            ))}
-                          </div>
-                        ) : null}
-                        <p className="text-sm text-muted-foreground">{previewContent(template.content)}</p>
-                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                          <span>更新：{formatDate(template.updated_at)}</span>
-                          <span>创建：{formatDate(template.created_at)}</span>
-                          <span>最近使用：{formatDate(template.last_used_at)}</span>
-                          <span>使用 {template.usage_count} 次</span>
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => void handleCopy(template)}
-                          disabled={busy}
-                        >
-                          <Copy className="h-3.5 w-3.5" />
-                          复制
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => void handleUse(template)}
-                          disabled={busy}
-                        >
-                          {busy ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <Zap className="h-3.5 w-3.5" />
-                          )}
-                          使用
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => void handleDuplicate(template)}
-                          disabled={busy}
-                        >
-                          <CopyPlus className="h-3.5 w-3.5" />
-                          复制为新话术
-                        </Button>
-                        <Button variant="outline" size="sm" onClick={() => openEditDialog(template)}>
-                          <Pencil className="h-3.5 w-3.5" />
-                          编辑
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => void handleDelete(template)}
-                          disabled={busy}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                          删除
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+                    <span>全部场景</span>
+                    <span className="text-xs tabular-nums text-slate-400">{items.length}</span>
+                  </button>
+                  {scenarioCounts.map((scenario) => (
+                    <button
+                      key={scenario.value}
+                      type="button"
+                      onClick={() => setScenarioFilter(scenario.value)}
+                      className={`mb-1 flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm ${scenarioFilter === scenario.value ? "bg-white font-medium text-blue-700 shadow-sm ring-1 ring-slate-200" : "text-slate-600 hover:bg-white"}`}
+                    >
+                      <span className="truncate">{scenario.label}</span>
+                      <span className="text-xs tabular-nums text-slate-400">{scenario.count}</span>
+                    </button>
+                  ))}
+                </aside>
+                <div className="ops-table-wrap">
+                  <table className="ops-table min-w-[980px]">
+                    <thead>
+                      <tr>
+                        <th>标题</th>
+                        <th>场景</th>
+                        <th>平台/语言</th>
+                        <th>使用</th>
+                        <th>更新时间</th>
+                        <th className="text-right">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {items.map((template) => {
+                        const busy = actionId === template.id;
+                        const platformLabel = template.platform ? PLATFORM_LABELS[template.platform] ?? template.platform : "不限";
+                        return (
+                          <tr key={template.id}>
+                            <td>
+                              <div className="min-w-0">
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <p className="truncate font-medium">{template.title}</p>
+                                  {template.is_system_default ? <Badge variant="outline" className="shrink-0 text-xs">系统默认</Badge> : null}
+                                </div>
+                                <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">{previewContent(template.content, 96)}</p>
+                                {template.tags.length > 0 ? (
+                                  <div className="mt-1 flex flex-wrap gap-1">
+                                    {template.tags.slice(0, 3).map((tag) => (
+                                      <Badge key={tag} variant="outline" className="text-xs">{tag}</Badge>
+                                    ))}
+                                  </div>
+                                ) : null}
+                              </div>
+                            </td>
+                            <td><Badge variant="secondary">{messageTemplateScenarioLabel(template.scenario)}</Badge></td>
+                            <td>
+                              <p className="text-sm">{platformLabel}</p>
+                              <p className="text-xs text-muted-foreground">{messageTemplateLanguageLabel(template.language)}</p>
+                            </td>
+                            <td className="tabular-nums">
+                              <p>{template.usage_count} 次</p>
+                              <p className="text-xs text-muted-foreground">{formatDate(template.last_used_at)}</p>
+                            </td>
+                            <td className="text-muted-foreground">{formatDate(template.updated_at)}</td>
+                            <td>
+                              <div className="flex justify-end gap-1">
+                                <Button variant="ghost" size="icon" className="ops-icon-button" onClick={() => void handleCopy(template)} disabled={busy} title="复制">
+                                  <Copy className="h-4 w-4" />
+                                </Button>
+                                <Button variant="ghost" size="icon" className="ops-icon-button" onClick={() => void handleUse(template)} disabled={busy} title="复制并记录使用">
+                                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
+                                </Button>
+                                <Button variant="ghost" size="icon" className="ops-icon-button" onClick={() => void handleDuplicate(template)} disabled={busy} title="复制为新话术">
+                                  <CopyPlus className="h-4 w-4" />
+                                </Button>
+                                {canEditMessageTemplate(template) ? (
+                                  <Button variant="ghost" size="icon" className="ops-icon-button" onClick={() => openEditDialog(template)} title="编辑">
+                                    <Pencil className="h-4 w-4" />
+                                  </Button>
+                                ) : null}
+                                {canDeleteMessageTemplate(template) ? (
+                                  <Button variant="ghost" size="icon" className="ops-icon-button text-red-600 hover:bg-red-50 hover:text-red-700" onClick={() => void handleDelete(template)} disabled={busy} title="删除">
+                                    <Trash2 className="h-4 w-4" />
+                                  </Button>
+                                ) : null}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
 
       <MessageTemplateFormDialog
         open={formOpen}

@@ -18,6 +18,7 @@ from app.collectors.base import CollectedInfluencer
 from app.schemas.common import PaginatedResponse
 from app.schemas.influencer import (
     InfluencerCreate,
+    InfluencerBulkDeleteResponse,
     InfluencerFilter,
     InfluencerRead,
     InfluencerUpdate,
@@ -37,6 +38,7 @@ from app.services.influencer_source import InfluencerSourceService
 from app.services.email_sent_status import load_email_sent_map, successful_email_sent_exists
 from app.services.platform_utils import normalize_profile_url
 from app.services.tenant_scope import ALL_PRODUCTS_ID
+from app.services.test_data_visibility import business_influencer_filter
 
 PRIMARY_PLATFORMS: tuple[str, ...] = ("tiktok", "youtube", "instagram", "facebook")
 LINK_IMPORT_STAT_PLATFORMS: tuple[str, ...] = ("pinterest", "ltk", "shopmy")
@@ -92,6 +94,7 @@ class ProductInfluencerService:
             select(ProductInfluencer, GlobalInfluencerProfile)
             .join(GlobalInfluencerProfile, ProductInfluencer.global_influencer_id == GlobalInfluencerProfile.id)
             .where(ProductInfluencerService._inserted_scope(product_id))
+            .where(business_influencer_filter())
         )
 
     @staticmethod
@@ -104,6 +107,7 @@ class ProductInfluencerService:
         GP=GlobalInfluencerProfile,
     ):
         min_score = filters.min_score
+        query = query.where(business_influencer_filter(PI=PI, GP=GP))
         if filters.high_match:
             query = query.where(
                 or_(PI.final_priority.in_(("P0", "P1")), PI.score >= 75.0)
@@ -118,6 +122,10 @@ class ProductInfluencerService:
             query = query.where(GP.country == filters.country)
         if filters.category:
             query = query.where(GP.category == filters.category)
+        if filters.niche:
+            query = query.where(GP.niche.ilike(f"%{filters.niche}%"))
+        if filters.tag:
+            query = query.where(PI.tags.contains([filters.tag]))
 
         status = filters.lead_status or filters.follow_status
         if status:
@@ -215,6 +223,17 @@ class ProductInfluencerService:
                 query = query.where(sent_exists)
             else:
                 query = query.where(not_(sent_exists))
+        if filters.exclude_terminal_statuses:
+            excluded = (
+                "blacklisted",
+                "invalid",
+                "replied",
+                "interested",
+                "quoted",
+                "cooperating",
+                "cooperated",
+            )
+            query = query.where(or_(PI.follow_status.is_(None), ~PI.follow_status.in_(excluded)))
         return query
 
     @staticmethod
@@ -411,6 +430,40 @@ class ProductInfluencerService:
         await db.commit()
 
     @staticmethod
+    async def delete_influencers(
+        db: AsyncSession,
+        *,
+        product_id: int,
+        record_ids: list[int],
+    ) -> InfluencerBulkDeleteResponse:
+        unique_ids = list(dict.fromkeys(record_ids))
+        if not unique_ids:
+            return InfluencerBulkDeleteResponse(deleted_count=0, deleted_ids=[], missing_ids=[])
+
+        rows = (
+            await db.scalars(
+                select(ProductInfluencer).where(
+                    ProductInfluencer.id.in_(unique_ids),
+                    ProductInfluencerService._inserted_scope(product_id),
+                )
+            )
+        ).all()
+        deleted_ids = [row.id for row in rows]
+        deleted_set = set(deleted_ids)
+        missing_ids = [record_id for record_id in unique_ids if record_id not in deleted_set]
+
+        for row in rows:
+            await db.delete(row)
+        if rows:
+            await db.commit()
+
+        return InfluencerBulkDeleteResponse(
+            deleted_count=len(deleted_ids),
+            deleted_ids=deleted_ids,
+            missing_ids=missing_ids,
+        )
+
+    @staticmethod
     async def list_for_export(
         db: AsyncSession,
         *,
@@ -447,6 +500,25 @@ class ProductInfluencerService:
                 )
             items.append(read)
         return items
+
+    @staticmethod
+    async def list_ids_by_filters(
+        db: AsyncSession,
+        *,
+        product_id: int,
+        filters: InfluencerFilter,
+        limit: int = 500,
+    ) -> list[int]:
+        PI = ProductInfluencer
+        base_query = ProductInfluencerService._apply_filters(
+            ProductInfluencerService._base_join(product_id), filters, product_id=product_id
+        )
+        rows = (
+            await db.scalars(
+                base_query.with_only_columns(PI.id).order_by(PI.id.desc()).limit(max(1, min(limit, 500)))
+            )
+        ).all()
+        return list(rows)
 
     @staticmethod
     async def get_platform_stats(

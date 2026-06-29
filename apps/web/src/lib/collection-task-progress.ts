@@ -18,14 +18,14 @@ const STAGE_LABELS: Record<string, string> = {
 };
 
 export const COLLECTION_TASK_TABLE_LAYOUT = {
-  statusCell: "min-w-[88px] w-[88px] shrink-0 px-4 py-3 align-middle",
+  statusCell: "min-w-[88px] w-[88px] shrink-0 align-middle",
   statusBadge: "inline-flex whitespace-nowrap shrink-0 text-xs",
   actionsCell:
-    "sticky right-0 z-10 w-[180px] min-w-[180px] shrink-0 whitespace-nowrap bg-background px-2 py-3 shadow-[-6px_0_8px_-6px_rgba(0,0,0,0.12)] group-hover:bg-muted/20",
+    "ops-sticky-actions w-[180px] min-w-[180px] shrink-0 whitespace-nowrap",
   actionsHead:
-    "sticky right-0 z-10 w-[180px] min-w-[180px] shrink-0 whitespace-nowrap bg-muted/40 px-2 py-2.5 font-medium shadow-[-6px_0_8px_-6px_rgba(0,0,0,0.12)]",
+    "ops-sticky-actions w-[180px] min-w-[180px] shrink-0 whitespace-nowrap text-right",
   actionsGroup: "flex flex-nowrap items-center justify-end gap-0.5",
-  actionButton: "h-8 w-8 shrink-0 p-0",
+  actionButton: "ops-icon-button shrink-0",
 } as const;
 
 export type CollectionTaskProgressSummary = {
@@ -81,6 +81,9 @@ function providerReasonText(reason: string, label: string, message: string | nul
   }
   if (reason === "timeout") {
     return `${label}：平台 provider 超时，已跳过`;
+  }
+  if (reason === "rate_limit") {
+    return `${label}：平台接口限流，已暂停或跳过该平台`;
   }
   if (reason === "network_unreachable") {
     return `${label}：平台 provider 不可达，已跳过`;
@@ -342,6 +345,68 @@ export function buildTaskResultBreakdown(task: CollectionTask): TaskResultBreakd
   };
 }
 
+function zeroResultDiagnosticHint(task: CollectionTask): string | null {
+  const inserted = task.inserted_count ?? task.result_count ?? 0;
+  if (inserted > 0) return null;
+  if (task.status !== "completed_no_results" && task.status !== "completed" && task.status !== "partial_failed") {
+    return null;
+  }
+  const discovered = task.discovered_count ?? 0;
+  const deduped = task.deduped_count ?? 0;
+  const fetched = task.profile_fetched_count ?? 0;
+  const filtered = task.filtered_out_count ?? 0;
+  const below = task.filtered_below_min_followers_count ?? 0;
+  const excluded = task.filtered_excluded_keyword_count ?? 0;
+  const missingContact = task.missing_contact_count ?? 0;
+  const checkpoint = task.run_checkpoint ?? {};
+  if (/主页外链|涓婚〉澶栭摼|Amazon storefront|ShopMy|Linktree/i.test(task.status_summary ?? "")) {
+    return null;
+  }
+  const contactFiltered =
+    typeof checkpoint.filtered_by_contact_count === "number"
+      ? checkpoint.filtered_by_contact_count
+      : task.require_email || task.require_contact
+        ? Math.max(missingContact, 0)
+        : 0;
+  const productFiltered =
+    typeof checkpoint.filtered_by_product_match_count === "number"
+      ? checkpoint.filtered_by_product_match_count
+      : typeof checkpoint.product_evidence_filtered_count === "number"
+        ? checkpoint.product_evidence_filtered_count
+        : 0;
+
+  if (discovered <= 0 && filtered <= 0 && fetched <= 0) return null;
+
+  const reasons: string[] = [];
+  if (task.require_email || task.require_contact || contactFiltered > 0) {
+    reasons.push("任务要求必须有邮箱/联系方式");
+  }
+  if (below > 0 || excluded > 0) {
+    reasons.push("部分候选未达到粉丝或互动条件");
+  }
+  if (productFiltered > 0) {
+    reasons.push("同款商品证据不足");
+  }
+  if (filtered > 0 && reasons.length === 0) {
+    reasons.push("过滤条件较严格");
+  }
+
+  const detailParts = [
+    `发现 ${discovered} 个候选`,
+    deduped > 0 ? `去重后 ${deduped} 个` : null,
+    fetched > 0 ? `补全主页 ${fetched} 个` : null,
+    filtered > 0 ? `过滤 ${filtered} 个` : null,
+    contactFiltered > 0 ? `联系方式过滤 ${contactFiltered} 个` : null,
+    productFiltered > 0 ? `同款商品证据过滤 ${productFiltered} 个` : null,
+  ].filter(Boolean);
+  const reasonText = reasons.length ? `主要原因：${reasons.join("，")}。` : "";
+  const suggestion =
+    task.require_email || task.require_contact
+      ? "建议关闭必须邮箱/联系方式，先入库后筛选。"
+      : "建议放宽粉丝/互动或同款证据条件，先入库后筛选。";
+  return `${detailParts.join("，")}，但最终入库 0。${reasonText}${suggestion}`;
+}
+
 export function isCollectionTaskRateLimited(task: CollectionTask): boolean {
   const checkpoint = task.run_checkpoint ?? {};
   if (checkpoint.rate_limited === true) return true;
@@ -558,7 +623,7 @@ export function collectionTaskRunningHint(
   const stale = options?.stale ?? task.stale;
   const recoverable = options?.recoverable ?? task.recoverable;
   if (stale && recoverable) {
-    return `任务可能中断：${collectionTaskInterruptedHint(task)}；可点击重新运行继续`;
+    return `任务可能中断：${collectionTaskInterruptedHint(task)}；可点击继续运行`;
   }
   const checkpoint = task.run_checkpoint ?? {};
   const partialSkipped =
@@ -604,6 +669,10 @@ export function formatCollectionResultLines(task: CollectionTask): CollectionRes
   let hint: string | null = collectionTaskSeedDiscoveryDiagnosticHint(task);
   if (!hint) {
     hint = collectionTaskProviderDiagnosticHint(task);
+  }
+
+  if (!hint) {
+    hint = zeroResultDiagnosticHint(task);
   }
 
   if (!hint) {

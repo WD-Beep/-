@@ -15,15 +15,29 @@ export function LoadingState({ label = "加载中..." }: { label?: string }) {
 export function EmptyState({
   title = "暂无数据",
   description,
+  action,
+  secondaryAction,
 }: {
   title?: string;
   description?: string;
+  action?: React.ReactNode;
+  secondaryAction?: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
-      <Inbox className="h-10 w-10 text-muted-foreground/50" />
-      <p className="font-medium text-foreground">{title}</p>
-      {description ? <p className="max-w-md text-sm text-muted-foreground">{description}</p> : null}
+    <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
+      <span className="flex h-11 w-11 items-center justify-center rounded-lg border border-slate-200 bg-slate-50">
+        <Inbox className="h-6 w-6 text-slate-400" />
+      </span>
+      <div className="space-y-1">
+        <p className="font-medium text-foreground">{title}</p>
+        {description ? <p className="max-w-md text-sm leading-6 text-muted-foreground">{description}</p> : null}
+      </div>
+      {action || secondaryAction ? (
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          {action}
+          {secondaryAction}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -40,7 +54,7 @@ export function ErrorAlert({
   return (
     <div
       className={cn(
-        "rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive",
+        "asset-inline-alert",
         className,
       )}
     >

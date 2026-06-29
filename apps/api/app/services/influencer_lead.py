@@ -410,6 +410,70 @@ class InfluencerLeadService:
         return product_row
 
     @staticmethod
+    async def mark_product_email_replied(
+        db: AsyncSession,
+        product_row: ProductInfluencer,
+        *,
+        subject: str | None = None,
+        snippet: str | None = None,
+        interested: bool = False,
+        operator_name: str | None = None,
+    ) -> ProductInfluencer:
+        old_status = product_row.follow_status
+        if old_status in {LeadStatus.INVALID.value, LeadStatus.BLACKLISTED.value}:
+            await InfluencerLeadService.create_product_followup(
+                db,
+                product_row,
+                action_type=FollowupActionType.REPLIED.value,
+                content=snippet or subject,
+                operator_name=operator_name,
+                contact_channel="email",
+            )
+            product_row.last_reply_at = datetime.now(UTC)
+            await db.flush()
+            return product_row
+
+        higher_statuses = {
+            LeadStatus.INTERESTED.value,
+            LeadStatus.QUOTED.value,
+            LeadStatus.COOPERATING.value,
+            LeadStatus.COOPERATED.value,
+            "negotiating",
+            "collaborated",
+        }
+        if old_status in higher_statuses:
+            new_status = old_status
+        elif interested:
+            new_status = LeadStatus.INTERESTED.value
+        else:
+            new_status = LeadStatus.REPLIED.value
+
+        if new_status != old_status:
+            product_row.follow_status = new_status
+            InfluencerLeadService._apply_product_status_side_effects(product_row, old_status, new_status)
+            await InfluencerLeadService.create_product_followup(
+                db,
+                product_row,
+                action_type=FollowupActionType.STATUS_CHANGED.value,
+                old_status=old_status,
+                new_status=new_status,
+                operator_name=operator_name,
+                contact_channel="email",
+            )
+
+        await InfluencerLeadService.create_product_followup(
+            db,
+            product_row,
+            action_type=FollowupActionType.REPLIED.value,
+            content=snippet or subject,
+            operator_name=operator_name,
+            contact_channel="email",
+        )
+        product_row.last_reply_at = datetime.now(UTC)
+        await db.flush()
+        return product_row
+
+    @staticmethod
     async def add_product_followup(
         db: AsyncSession,
         product_row: ProductInfluencer,

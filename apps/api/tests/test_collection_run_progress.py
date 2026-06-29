@@ -21,7 +21,10 @@ from app.services.http_retry import RETRYABLE_STATUS, should_retry
 from app.services.task_run_progress import (
     RunCheckpoint,
     STAGE_AI_COMPLETED,
+    STAGE_AI_PROCESSING,
+    STAGE_COMPLETED,
     STAGE_DISCOVERY,
+    apply_terminal_task_state,
     profile_checkpoint_key,
     reset_run_progress,
     should_commit_progress,
@@ -148,6 +151,32 @@ def test_run_checkpoint_preserves_product_and_provider_context():
     assert "facebook:homehive clear pvc jewelry bags" in data["completed_search_keys"]
 
 
+def test_terminal_success_state_clears_stale_ai_progress_summary():
+    task = _task(
+        status=CollectionTaskStatus.RUNNING.value,
+        current_stage=STAGE_AI_PROCESSING,
+        status_summary="AI 评分中… 已处理 20/97，成功 18",
+        processed_count=20,
+        success_count=18,
+        inserted_count=30,
+        result_count=21,
+    )
+
+    apply_terminal_task_state(
+        task,
+        status=CollectionTaskStatus.COMPLETED_WITH_RESULTS,
+        summary="采集完成：合格入库 30 个",
+        inserted_count=30,
+    )
+
+    assert task.status == CollectionTaskStatus.COMPLETED_WITH_RESULTS.value
+    assert task.current_stage == STAGE_COMPLETED
+    assert task.inserted_count == 30
+    assert task.result_count == 30
+    assert task.success_count == 30
+    assert "AI 评分中" not in (task.status_summary or "")
+    assert "AI 完成中" not in (task.status_summary or "")
+
 def test_should_retry_rules():
     assert should_retry(429, None) is True
     assert should_retry(500, None) is True
@@ -262,6 +291,17 @@ def test_running_stale_uses_backend_threshold(monkeypatch):
 
     assert CollectionTaskService.is_running_stale(fresh, now=now) is False
     assert CollectionTaskService.is_running_stale(stale, now=now) is True
+
+
+def test_collection_stability_defaults_are_conservative():
+    assert settings.collection_max_running_tasks == 1
+    assert settings.youtube_apify_keyword_concurrency == 1
+    assert settings.tiktok_apify_keyword_concurrency == 1
+    assert settings.facebook_apify_keyword_concurrency == 1
+    assert settings.facebook_apify_profile_concurrency == 1
+    assert settings.collection_profile_enrich_concurrency == 2
+    assert settings.collection_contact_concurrency == 2
+    assert settings.collection_ai_concurrency == 1
 
 
 def test_update_task_progress_can_clear_last_error():
@@ -517,6 +557,33 @@ def test_run_stale_running_uses_resume_checkpoint(monkeypatch):
     assert task.processed_count == 5
     assert task.success_count == 2
     assert task.run_checkpoint["persisted_profiles"]
+    assert background_tasks.tasks[0].kwargs == {"resume": True}
+
+
+def test_run_stale_running_message_says_continue_from_checkpoint(monkeypatch):
+    monkeypatch.setattr(settings, "collection_running_stale_seconds", 300)
+    task = _task(
+        status=CollectionTaskStatus.RUNNING.value,
+        updated_at=datetime.now(UTC) - timedelta(seconds=301),
+        current_stage="discovery",
+        run_checkpoint={"completed_search_keys": ["youtube:amazon"]},
+    )
+    db = AsyncMock()
+    background_tasks = BackgroundTasks()
+
+    async def _get_task(_db, _task_id):
+        return task
+
+    monkeypatch.setattr(CollectionTaskService, "get_task", _get_task)
+    _patch_no_blocking_running_task(monkeypatch)
+
+    async def _run():
+        result = await run_collection_task(1, background_tasks, db, ctx=_tenant_ctx())
+        assert result.status_summary
+        assert "checkpoint" in result.status_summary
+
+    anyio.run(_run)
+    assert task.run_checkpoint["completed_search_keys"] == ["youtube:amazon"]
     assert background_tasks.tasks[0].kwargs == {"resume": True}
 
 

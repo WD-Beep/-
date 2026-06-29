@@ -32,7 +32,24 @@ class Settings(BaseSettings):
     )
     smtp_use_tls: bool = True
     smtp_from_name: str = ""
-    outreach_daily_send_limit: int = 20
+    outreach_daily_send_limit: int = 50
+    smtp_test_recipient: str = ""
+    smtp_test_schedule_enabled: bool = False
+    smtp_test_interval_minutes: int = 1440
+
+    inbound_email_address: str = Field(
+        default="",
+        validation_alias=AliasChoices("INBOUND_EMAIL_ADDRESS", "IMAP_INBOX_ADDRESS"),
+    )
+    imap_host: str = ""
+    imap_port: int = 993
+    imap_user: str = ""
+    imap_password: str = ""
+    imap_use_ssl: bool = True
+    imap_folder: str = "INBOX"
+    imap_poll_enabled: bool = False
+    imap_poll_interval_minutes: int = 5
+    email_inbound_webhook_secret: str = ""
 
     openai_api_key: str = ""
     openai_model: str = "gpt-5.5"
@@ -43,11 +60,16 @@ class Settings(BaseSettings):
 
     collector_mode: str = "apify"
     instagram_data_provider: str = "apify"
-    youtube_data_provider: str = "apify"
+    youtube_data_provider: str = "auto"
     tiktok_data_provider: str = "apify"
     facebook_data_provider: str = "apify"
 
     youtube_api_key: str = ""
+    youtube_official_timeout_seconds: int = 30
+    youtube_official_max_retries: int = 2
+    youtube_official_retry_backoff_seconds: float = 2.0
+    youtube_official_search_max_pages: int = 1
+    youtube_official_max_results_per_keyword: int = 25
     api_direct_api_key: str = ""
     api_direct_api_base: str = "https://apidirect.io"
     api_direct_timeout_seconds: int = 30
@@ -56,11 +78,11 @@ class Settings(BaseSettings):
     api_direct_max_requests_per_platform: int = 20
     collection_search_concurrency: int = 4
     collection_profile_concurrency: int = 8
-    collection_profile_enrich_concurrency: int = 3
+    collection_profile_enrich_concurrency: int = 2
     collection_profile_request_timeout_seconds: int = 20
-    collection_max_running_tasks: int = 2
-    collection_contact_concurrency: int = 5
-    collection_ai_concurrency: int = 2
+    collection_max_running_tasks: int = 1
+    collection_contact_concurrency: int = 2
+    collection_ai_concurrency: int = 1
     collection_batch_commit_size: int = 20
     collection_running_stale_seconds: int = Field(
         default=180,
@@ -82,16 +104,16 @@ class Settings(BaseSettings):
     apify_facebook_search_actor_id: str = "parseforge~facebook-search-scraper"
     apify_facebook_pages_actor_id: str = "apify~facebook-pages-scraper"
     apify_timeout_seconds: int = 180
-    apify_youtube_timeout_seconds: int = 90
-    apify_youtube_max_retries: int = 1
+    apify_youtube_timeout_seconds: int = 180
+    apify_youtube_max_retries: int = 2
     apify_tiktok_timeout_seconds: int = 120
     apify_tiktok_max_retries: int = 1
-    tiktok_apify_keyword_concurrency: int = 2
+    tiktok_apify_keyword_concurrency: int = 1
     tiktok_apify_memory_mbytes: int = 2048
     youtube_discovery_keyword_timeout_seconds: int = 90
     youtube_discovery_slow_threshold_seconds: int = 45
     youtube_discovery_max_duration_seconds: int = 300
-    youtube_apify_keyword_concurrency: int = 2
+    youtube_apify_keyword_concurrency: int = 1
     youtube_api_direct_keyword_concurrency: int = 2
     apify_facebook_timeout_seconds: int = 90
     apify_facebook_max_retries: int = 0
@@ -99,8 +121,8 @@ class Settings(BaseSettings):
     facebook_apify_profile_timeout_seconds: int = 90
     facebook_discovery_slow_threshold_seconds: int = 45
     facebook_discovery_max_duration_seconds: int = 300
-    facebook_apify_keyword_concurrency: int = 2
-    facebook_apify_profile_concurrency: int = 2
+    facebook_apify_keyword_concurrency: int = 1
+    facebook_apify_profile_concurrency: int = 1
 
     # Amazon competitor_product：缩短等待、限制关键词、平台/任务超时
     competitor_product_task_timeout_seconds: int = 300
@@ -147,6 +169,9 @@ class Settings(BaseSettings):
     mailchimp_list_id: str = ""
     mailchimp_status_if_new: str = "pending"
     mailchimp_timeout_seconds: int = 30
+    klaviyo_api_key: str = ""
+    klaviyo_list_id: str = ""
+    klaviyo_timeout_seconds: int = 30
 
     contact_discovery_enabled: bool = True
     contact_discovery_max_pages: int = 5
@@ -223,6 +248,41 @@ class Settings(BaseSettings):
             "use_tls": self.smtp_use_tls,
             "message": message,
             "outreach_daily_send_limit": self.outreach_daily_send_limit,
+            "test_recipient": self.smtp_test_recipient.strip() or None,
+            "test_schedule_enabled": self.smtp_test_schedule_enabled,
+            "test_interval_minutes": max(1, int(self.smtp_test_interval_minutes or 1440)),
+        }
+
+    @property
+    def is_imap_configured(self) -> bool:
+        return bool(self.imap_host and self.imap_user and self.imap_password)
+
+    @property
+    def is_inbound_webhook_configured(self) -> bool:
+        return bool(self.email_inbound_webhook_secret.strip())
+
+    def get_inbound_email_status(self) -> dict:
+        imap_configured = self.is_imap_configured
+        webhook_configured = self.is_inbound_webhook_configured
+        configured = imap_configured or webhook_configured
+        if imap_configured and webhook_configured:
+            message = "IMAP 与 inbound webhook 均已配置，可接收红人回复。"
+        elif imap_configured:
+            message = "IMAP 已配置，可轮询收件箱接收红人回复。"
+        elif webhook_configured:
+            message = "Inbound webhook 已配置，可接收邮件服务商推送的回复。"
+        else:
+            message = "未配置收信能力。请配置 IMAP_* 或 EMAIL_INBOUND_WEBHOOK_SECRET。"
+        return {
+            "configured": configured,
+            "imap_configured": imap_configured,
+            "webhook_configured": webhook_configured,
+            "inbound_address": self.inbound_email_address.strip() or self.imap_user.strip() or None,
+            "imap_host": self.imap_host or None,
+            "imap_port": self.imap_port if self.imap_host else None,
+            "imap_folder": self.imap_folder or None,
+            "imap_poll_enabled": self.imap_poll_enabled,
+            "message": message,
         }
 
     @property
@@ -254,7 +314,12 @@ class Settings(BaseSettings):
 
     @property
     def active_youtube_provider(self) -> str:
-        return (self.youtube_data_provider or "apify").strip().lower()
+        name = (self.youtube_data_provider or "auto").strip().lower()
+        if name in {"auto", "official", "apify"}:
+            return name
+        if name == "api_direct":
+            return "auto"
+        return "auto"
 
     @property
     def active_tiktok_provider(self) -> str:
@@ -341,6 +406,22 @@ class Settings(BaseSettings):
                 "Mailchimp configured, ready for audience sync."
                 if configured
                 else "MAILCHIMP_API_KEY / MAILCHIMP_LIST_ID not configured."
+            ),
+        }
+
+    @property
+    def is_klaviyo_configured(self) -> bool:
+        return bool(self.klaviyo_api_key.strip() and self.klaviyo_list_id.strip())
+
+    def get_klaviyo_status(self) -> dict:
+        configured = self.is_klaviyo_configured
+        return {
+            "configured": configured,
+            "list_id": self.klaviyo_list_id.strip() or None,
+            "message": (
+                "Klaviyo configured for audience sync."
+                if configured
+                else "KLAVIYO_API_KEY / KLAVIYO_LIST_ID not configured."
             ),
         }
 
