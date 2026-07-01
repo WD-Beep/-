@@ -336,14 +336,14 @@ export function EmailRepliesPanel() {
         </>
       }
     >
-      <div className="space-y-4">
+      <div className="flex h-full min-h-0 flex-col gap-4">
         {error ? <ErrorAlert message={error} onRetry={() => void load()} /> : null}
         {notice ? <SuccessAlert message={notice} /> : null}
         {requiresProduct ? (
           <ErrorAlert message="请先在左侧选择具体产品后再查看和处理红人回复。" />
         ) : null}
 
-        <section className="ops-panel p-4">
+        <section className="ops-panel shrink-0 p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap gap-2">
               {VIEW_TABS.map((tab) => (
@@ -383,7 +383,7 @@ export function EmailRepliesPanel() {
           </div>
         </section>
 
-        <section className="ops-panel overflow-hidden">
+        <section className="ops-panel flex min-h-0 flex-1 flex-col overflow-hidden">
           {requiresProduct ? (
             <EmptyState title="请选择具体产品" description="红人回复按产品隔离展示，选择产品后即可收取、查看和回复邮件。" />
           ) : loading ? (
@@ -393,10 +393,10 @@ export function EmailRepliesPanel() {
           ) : visibleReplies.length === 0 ? (
             <EmptyState title="暂无符合条件的回复" description="可以切换筛选，或点击“收取未读回复”同步邮箱。" />
           ) : (
-            <div className="overflow-x-auto">
+            <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
               <table className="w-full min-w-[1080px] text-sm">
-                <thead>
-                  <tr className="border-b text-left text-muted-foreground">
+                <thead className="sticky top-0 z-10 bg-[hsl(210_30%_99%)]">
+                  <tr className="border-b text-left text-muted-foreground shadow-[0_1px_0_hsl(214_24%_88%)]">
                     <th className="w-12 px-4 py-3">
                       <input
                         type="checkbox"
