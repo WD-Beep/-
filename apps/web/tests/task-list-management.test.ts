@@ -56,5 +56,12 @@ test("collection task list query uses page and page size", () => {
     task_view: "test_history",
     search: "seed",
   });
-  assert.equal(query, "page=3&page_size=50&task_view=test_history&search=seed");
+  assert.equal(query, "page=3&page_size=50&owner_scope=mine&task_view=test_history&search=seed");
+});
+
+test("collection task list query supports admin all-owner scope", () => {
+  const query = buildCollectionTasksQueryString(1, 20, {
+    owner_scope: "all",
+  });
+  assert.equal(query, "page=1&page_size=20&owner_scope=all");
 });

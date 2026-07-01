@@ -18,7 +18,7 @@ from app.schemas.outreach_campaign import (
     OutreachCampaignUpdateRequest,
 )
 from app.services.outreach_campaign_service import OutreachCampaignService
-from app.services.tenant_scope import ALL_PRODUCTS_ID
+from app.services.tenant_scope import ALL_PRODUCTS_ID, scoped_product_id
 
 router = APIRouter(prefix="/outreach-campaigns", tags=["outreach-campaigns"])
 
@@ -37,8 +37,7 @@ async def list_outreach_campaigns(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> list[OutreachCampaignRead]:
-    product_id = _require_product_scope(ctx)
-    return await OutreachCampaignService.list_campaigns(db, product_id=product_id)
+    return await OutreachCampaignService.list_campaigns(db, product_id=scoped_product_id(ctx.product_id))
 
 
 @router.get("/workbench", response_model=OutreachOneClickWorkbenchResponse)
@@ -46,8 +45,7 @@ async def get_outreach_workbench(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> OutreachOneClickWorkbenchResponse:
-    product_id = _require_product_scope(ctx)
-    return await OutreachCampaignService.get_one_click_workbench(db, product_id=product_id)
+    return await OutreachCampaignService.get_one_click_workbench(db, product_id=scoped_product_id(ctx.product_id))
 
 
 @router.post("", response_model=OutreachCampaignRead, status_code=status.HTTP_201_CREATED)

@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
@@ -98,14 +98,6 @@ export function EmailRepliesPanel() {
   const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (requiresProduct) {
-      setReplies([]);
-      setInfluencers([]);
-      setCampaigns([]);
-      setSelectedReplyIds(new Set());
-      setLoading(false);
-      return;
-    }
     setLoading(true);
     setError(null);
     try {
@@ -119,11 +111,11 @@ export function EmailRepliesPanel() {
       setCampaigns(campaignData);
       setSelectedReplyIds(new Set());
     } catch (err) {
-      setError(err instanceof Error ? err.message : "回复列表加载失败");
+      setError(err instanceof Error ? err.message : "鍥炲鍒楄〃鍔犺浇澶辫触");
     } finally {
       setLoading(false);
     }
-  }, [requiresProduct]);
+  }, []);
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -313,7 +305,7 @@ export function EmailRepliesPanel() {
       setNotice(`已删除 ${result.deleted_count} 封回复`);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "删除回复失败，请稍后再试");
+      setError(err instanceof Error ? err.message : "鍒犻櫎鍥炲澶辫触锛岃绋嶅悗鍐嶈瘯");
     } finally {
       setDeleting(false);
     }
@@ -325,7 +317,7 @@ export function EmailRepliesPanel() {
       description="集中查看红人邮件回复，处理未读线索和未匹配邮件。"
       actions={
         <>
-          <Button variant="outline" onClick={() => void load()} disabled={requiresProduct || loading}>
+          <Button variant="outline" onClick={() => void load()} disabled={loading}>
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
             刷新
           </Button>
@@ -340,7 +332,7 @@ export function EmailRepliesPanel() {
         {error ? <ErrorAlert message={error} onRetry={() => void load()} /> : null}
         {notice ? <SuccessAlert message={notice} /> : null}
         {requiresProduct ? (
-          <ErrorAlert message="请先在左侧选择具体产品后再查看和处理红人回复。" />
+          <ErrorAlert message="总盘模式可以查看全部回复；收取、回复或删除前请先选择具体产品。" />
         ) : null}
 
         <section className="ops-panel shrink-0 p-4">
@@ -384,14 +376,12 @@ export function EmailRepliesPanel() {
         </section>
 
         <section className="ops-panel flex min-h-0 flex-1 flex-col overflow-hidden">
-          {requiresProduct ? (
-            <EmptyState title="请选择具体产品" description="红人回复按产品隔离展示，选择产品后即可收取、查看和回复邮件。" />
-          ) : loading ? (
+          {loading ? (
             <div className="flex items-center gap-2 p-6 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" /> 正在加载回复...
             </div>
           ) : visibleReplies.length === 0 ? (
-            <EmptyState title="暂无符合条件的回复" description="可以切换筛选，或点击“收取未读回复”同步邮箱。" />
+            <EmptyState title="暂无符合条件的回复" description="可以切换筛选，或在具体产品下收取未读回复。" />
           ) : (
             <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
               <table className="w-full min-w-[1080px] text-sm">
@@ -581,7 +571,7 @@ export function EmailRepliesPanel() {
                 </div>
                 {!expanded.product_influencer_id ? (
                   <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                    当前未自动关联红人，建议先关联后发送。unmatched_reply_identity_warning
+                    当前未自动关联红人，建议先关联后发送。
                   </div>
                 ) : null}
                 <textarea

@@ -1235,6 +1235,7 @@ export async function fetchCollectionTasks(
   pageSize = 50,
   options?: {
     effectiveness?: "high_value" | "effective" | "ineffective" | "low_value_result" | "no_result" | "failed";
+    owner_scope?: CollectionTaskOwnerScope;
     task_view?: TaskListView;
     search?: string;
     status?: CollectionTaskStatus;
@@ -1261,11 +1262,14 @@ export type TaskListView =
   | "test_history"
   | "archived";
 
+export type CollectionTaskOwnerScope = "mine" | "all";
+
 export function buildCollectionTasksQueryString(
   page = 1,
   pageSize = 50,
   options?: {
     effectiveness?: "high_value" | "effective" | "ineffective" | "low_value_result" | "no_result" | "failed";
+    owner_scope?: CollectionTaskOwnerScope;
     task_view?: TaskListView;
     search?: string;
     status?: CollectionTaskStatus;
@@ -1276,6 +1280,7 @@ export function buildCollectionTasksQueryString(
     page: String(page),
     page_size: String(pageSize),
   });
+  params.set("owner_scope", options?.owner_scope ?? "mine");
   if (options?.effectiveness) {
     params.set("effectiveness", options.effectiveness);
   }

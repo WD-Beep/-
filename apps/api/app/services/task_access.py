@@ -20,4 +20,6 @@ def ensure_task_access(task: CollectionTask | None, ctx: TenantContext) -> Colle
         )
     if task.product_id != ctx.product_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问该采集任务")
+    if not ctx.is_admin and task.user_id != ctx.user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问该采集任务")
     return task

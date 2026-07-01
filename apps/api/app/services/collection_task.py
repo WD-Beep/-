@@ -338,6 +338,8 @@ class CollectionTaskService:
             query = query.where(CollectionTask.is_archived.is_(False))
         if filters.product_id:
             query = query.where(CollectionTask.product_id == filters.product_id)
+        if filters.owner_scope != "all" or not filters.owner_is_admin:
+            query = query.where(CollectionTask.user_id == filters.owner_user_id)
         if filters.platform:
             query = query.where(CollectionTask.platform == filters.platform)
         if filters.status:
@@ -380,12 +382,17 @@ class CollectionTaskService:
         rows: list[CollectionTask],
         *,
         product_id: int | None,
+        owner_user_id: int | None = None,
+        owner_scope: str = "mine",
+        owner_is_admin: bool = False,
     ) -> set[int]:
         if not rows:
             return set()
         query = select(CollectionTask).where(CollectionTask.is_archived.is_(False))
         if product_id is not None:
             query = query.where(CollectionTask.product_id == product_id)
+        if owner_scope != "all" or not owner_is_admin:
+            query = query.where(CollectionTask.user_id == owner_user_id)
         result = await db.execute(query)
         all_rows = result.scalars().all()
         counts: dict[tuple, int] = {}
@@ -418,6 +425,9 @@ class CollectionTaskService:
             db,
             rows,
             product_id=filters.product_id,
+            owner_user_id=filters.owner_user_id,
+            owner_scope=filters.owner_scope,
+            owner_is_admin=filters.owner_is_admin,
         )
         retention_flags = await batch_task_has_retention_traces(
             db,
@@ -618,9 +628,14 @@ class CollectionTaskService:
         action: str,
         product_id: int,
         task_ids: list[int] | None = None,
+        owner_user_id: int | None = None,
+        owner_scope: str = "mine",
+        owner_is_admin: bool = False,
     ) -> CollectionTaskBulkManageResult:
         id_filter = set(task_ids or [])
         query = select(CollectionTask).where(CollectionTask.product_id == product_id)
+        if owner_scope != "all" or not owner_is_admin:
+            query = query.where(CollectionTask.user_id == owner_user_id)
         if id_filter:
             query = query.where(CollectionTask.id.in_(id_filter))
         if action == "restore_archived":

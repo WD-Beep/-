@@ -179,6 +179,139 @@ def test_collection_tasks_filtered_by_product():
     asyncio.run(_run())
 
 
+def test_collection_tasks_default_to_current_owner_scope():
+    async def _run() -> None:
+        suffix = uuid.uuid4().hex[:8]
+        async with async_session_factory() as db_session:
+            mine = CollectionTask(
+                name=f"mine-{suffix}",
+                platform="youtube",
+                platforms=["youtube"],
+                keywords=["mine"],
+                product_id=1,
+                user_id=1,
+            )
+            teammate = CollectionTask(
+                name=f"teammate-{suffix}",
+                platform="youtube",
+                platforms=["youtube"],
+                keywords=["teammate"],
+                product_id=1,
+                user_id=2,
+            )
+            db_session.add_all([mine, teammate])
+            await db_session.flush()
+
+            page = await CollectionTaskService.list_tasks(
+                db_session,
+                CollectionTaskFilter(product_id=1, owner_user_id=1, owner_scope="mine"),
+                page=1,
+                page_size=200,
+            )
+
+            names = {item.name for item in page.items}
+            assert f"mine-{suffix}" in names
+            assert f"teammate-{suffix}" not in names
+            await db_session.rollback()
+
+    asyncio.run(_run())
+
+
+def test_collection_tasks_admin_all_scope_can_see_team_tasks():
+    async def _run() -> None:
+        suffix = uuid.uuid4().hex[:8]
+        async with async_session_factory() as db_session:
+            mine = CollectionTask(
+                name=f"admin-mine-{suffix}",
+                platform="youtube",
+                platforms=["youtube"],
+                keywords=["mine"],
+                product_id=1,
+                user_id=1,
+            )
+            teammate = CollectionTask(
+                name=f"admin-teammate-{suffix}",
+                platform="youtube",
+                platforms=["youtube"],
+                keywords=["teammate"],
+                product_id=1,
+                user_id=2,
+            )
+            db_session.add_all([mine, teammate])
+            await db_session.flush()
+
+            page = await CollectionTaskService.list_tasks(
+                db_session,
+                CollectionTaskFilter(product_id=1, owner_user_id=1, owner_scope="all", owner_is_admin=True),
+                page=1,
+                page_size=200,
+            )
+
+            names = {item.name for item in page.items}
+            assert f"admin-mine-{suffix}" in names
+            assert f"admin-teammate-{suffix}" in names
+            await db_session.rollback()
+
+    asyncio.run(_run())
+
+
+def test_collection_tasks_all_products_scope_shows_total_tasks():
+    async def _run() -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        from app.main import app
+
+        suffix = uuid.uuid4().hex[:8]
+        async with async_session_factory() as db_session:
+            product_b = _product_b()
+            db_session.add(product_b)
+            await db_session.flush()
+            product_b_id = product_b.id
+
+            db_session.add_all(
+                [
+                    CollectionTask(
+                        name=f"total-a-{suffix}",
+                        platform="youtube",
+                        platforms=["youtube"],
+                        keywords=["a"],
+                        product_id=1,
+                        user_id=1,
+                    ),
+                    CollectionTask(
+                        name=f"total-b-{suffix}",
+                        platform="youtube",
+                        platforms=["youtube"],
+                        keywords=["b"],
+                        product_id=product_b_id,
+                        user_id=2,
+                    ),
+                ]
+            )
+            await db_session.commit()
+
+        transport = ASGITransport(app=app)
+        try:
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.get(
+                    f"/api/collection-tasks?search=total-&page_size=200",
+                    headers={"X-User-Id": "1", "X-Product-Id": "0"},
+                )
+                assert response.status_code == 200, response.text
+                names = {item["name"] for item in response.json()["items"]}
+                assert f"total-a-{suffix}" in names
+                assert f"total-b-{suffix}" in names
+        finally:
+            from sqlalchemy import delete
+
+            async with async_session_factory() as db_session:
+                await db_session.execute(delete(CollectionTask).where(CollectionTask.name.like(f"total-%-{suffix}")))
+                await db_session.execute(delete(Product).where(Product.slug == f"test-product-b-{suffix}"))
+                await db_session.commit()
+
+    asyncio.run(_run())
+
+
 def test_hard_filter_independent_per_product_recipe():
     task = SimpleNamespace(
         collection_mode="discovery",
@@ -514,6 +647,42 @@ def test_ensure_task_access_rejects_cross_product():
     assert exc.value.status_code == 403
 
 
+def test_ensure_task_access_rejects_cross_owner_for_non_admin():
+    from app.deps.tenant import TenantContext
+    from app.services.task_access import ensure_task_access
+
+    task = CollectionTask(
+        name="teammate-task",
+        platform="instagram",
+        platforms=["instagram"],
+        keywords=["B00VOEZYHI"],
+        product_id=1,
+        user_id=2,
+    )
+    ctx = TenantContext(user_id=1, product_id=1, workspace_id=1, is_admin=False)
+
+    with pytest.raises(Exception) as exc:
+        ensure_task_access(task, ctx)
+    assert exc.value.status_code == 403
+
+
+def test_ensure_task_access_allows_cross_owner_for_admin():
+    from app.deps.tenant import TenantContext
+    from app.services.task_access import ensure_task_access
+
+    task = CollectionTask(
+        name="teammate-task",
+        platform="instagram",
+        platforms=["instagram"],
+        keywords=["B00VOEZYHI"],
+        product_id=1,
+        user_id=2,
+    )
+    ctx = TenantContext(user_id=1, product_id=1, workspace_id=1, is_admin=True)
+
+    assert ensure_task_access(task, ctx) is task
+
+
 def test_protected_api_rejects_missing_tenant_headers():
     async def _run() -> None:
         from httpx import ASGITransport, AsyncClient
@@ -604,6 +773,65 @@ def test_email_logs_filtered_by_product():
         finally:
             async with async_session_factory() as db_session:
                 await db_session.execute(delete(EmailLog).where(EmailLog.subject.like(f"%-{suffix}")))
+                await db_session.commit()
+
+    asyncio.run(_run())
+
+
+def test_email_logs_all_products_scope_shows_total_logs():
+    async def _run() -> None:
+        from httpx import ASGITransport, AsyncClient
+        from sqlalchemy import delete
+
+        from app.main import app
+        from app.models.email_log import EmailLog
+        from app.models.enums import EmailLogStatus
+
+        suffix = uuid.uuid4().hex[:8]
+        product_b_id: int
+        async with async_session_factory() as db_session:
+            product_b = _product_b()
+            db_session.add(product_b)
+            await db_session.flush()
+            product_b_id = product_b.id
+
+            db_session.add_all(
+                [
+                    EmailLog(
+                        task_id=None,
+                        product_id=1,
+                        user_id=1,
+                        recipients=["a@example.com"],
+                        subject=f"total-product-a-{suffix}",
+                        status=EmailLogStatus.SENT.value,
+                    ),
+                    EmailLog(
+                        task_id=None,
+                        product_id=product_b_id,
+                        user_id=2,
+                        recipients=["b@example.com"],
+                        subject=f"total-product-b-{suffix}",
+                        status=EmailLogStatus.SENT.value,
+                    ),
+                ]
+            )
+            await db_session.commit()
+
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.get(
+                    "/api/email-logs?page_size=200",
+                    headers={"X-User-Id": "1", "X-Product-Id": "0"},
+                )
+                assert response.status_code == 200, response.text
+                subjects = {item["subject"] for item in response.json()["items"]}
+                assert f"total-product-a-{suffix}" in subjects
+                assert f"total-product-b-{suffix}" in subjects
+        finally:
+            async with async_session_factory() as db_session:
+                await db_session.execute(delete(EmailLog).where(EmailLog.subject.like(f"total-product-%-{suffix}")))
+                await db_session.execute(delete(Product).where(Product.slug == f"test-product-b-{suffix}"))
                 await db_session.commit()
 
     asyncio.run(_run())

@@ -207,14 +207,15 @@ class OutreachCampaignService:
     async def get_one_click_workbench(
         db: AsyncSession,
         *,
-        product_id: int,
+        product_id: int | None,
     ) -> OutreachOneClickWorkbenchResponse:
         latest = await OutreachCampaignService._latest_workbench_campaign(
             db, product_id=product_id
         )
+        latest_product_id = latest.product_id if latest and product_id is None else product_id
         latest_read = (
             await OutreachCampaignService._campaign_read_with_stats(
-                db, campaign=latest, product_id=product_id
+                db, campaign=latest, product_id=latest_product_id
             )
             if latest
             else None
@@ -228,7 +229,7 @@ class OutreachCampaignService:
         )
         replies = (
             await OutreachCampaignService.list_campaign_replies(
-                db, product_id=product_id, campaign_id=latest.id
+                db, product_id=latest_product_id, campaign_id=latest.id
             )
             if latest
             else OutreachCampaignReplyBoardResponse(
@@ -266,42 +267,49 @@ class OutreachCampaignService:
     async def _latest_workbench_campaign(
         db: AsyncSession,
         *,
-        product_id: int,
+        product_id: int | None,
     ) -> OutreachEmailCampaign | None:
+        latest_filters = []
+        if product_id is not None:
+            latest_filters.extend(
+                [
+                    OutreachEmailCampaign.product_id == product_id,
+                    OutreachSendQueueItem.product_id == product_id,
+                ]
+            )
         latest_with_queue = await db.scalar(
             select(OutreachEmailCampaign)
             .join(
                 OutreachSendQueueItem,
                 OutreachSendQueueItem.campaign_id == OutreachEmailCampaign.id,
             )
-            .where(
-                OutreachEmailCampaign.product_id == product_id,
-                OutreachSendQueueItem.product_id == product_id,
-            )
+            .where(*latest_filters)
             .group_by(OutreachEmailCampaign.id)
             .order_by(func.max(OutreachSendQueueItem.updated_at).desc(), OutreachEmailCampaign.updated_at.desc())
             .limit(1)
         )
         if latest_with_queue:
             return latest_with_queue
-        return await db.scalar(
-            select(OutreachEmailCampaign)
-            .where(OutreachEmailCampaign.product_id == product_id)
-            .order_by(OutreachEmailCampaign.updated_at.desc())
-            .limit(1)
-        )
+        query = select(OutreachEmailCampaign).order_by(OutreachEmailCampaign.updated_at.desc()).limit(1)
+        if product_id is not None:
+            query = query.where(OutreachEmailCampaign.product_id == product_id)
+        return await db.scalar(query)
 
     @staticmethod
-    async def _count_available_recipients(db: AsyncSession, *, product_id: int) -> int:
+    async def _count_available_recipients(db: AsyncSession, *, product_id: int | None) -> int:
+        query = (
+            select(ProductInfluencer, GlobalInfluencerProfile)
+            .join(
+                GlobalInfluencerProfile,
+                GlobalInfluencerProfile.id == ProductInfluencer.global_influencer_id,
+            )
+            .limit(MAX_CAMPAIGN_RECIPIENTS)
+        )
+        if product_id is not None:
+            query = query.where(ProductInfluencer.product_id == product_id)
         rows = (
             await db.execute(
-                select(ProductInfluencer, GlobalInfluencerProfile)
-                .join(
-                    GlobalInfluencerProfile,
-                    GlobalInfluencerProfile.id == ProductInfluencer.global_influencer_id,
-                )
-                .where(ProductInfluencer.product_id == product_id)
-                .limit(MAX_CAMPAIGN_RECIPIENTS)
+                query
             )
         ).all()
         count = 0
@@ -318,7 +326,7 @@ class OutreachCampaignService:
                 continue
             if await product_influencer_has_successful_email_sent(
                 db,
-                product_id=product_id,
+                product_id=product_row.product_id,
                 product_influencer_id=product_row.id,
             ):
                 continue
@@ -329,9 +337,10 @@ class OutreachCampaignService:
     async def _latest_workbench_results(
         db: AsyncSession,
         *,
-        product_id: int,
+        product_id: int | None,
         campaign: OutreachEmailCampaign,
     ) -> OutreachWorkbenchResultSection:
+        stats_product_id = product_id or campaign.product_id
         recipients = (
             await db.scalars(
                 select(OutreachCampaignRecipient).where(
@@ -342,7 +351,7 @@ class OutreachCampaignService:
         queue_rows = (
             await db.scalars(
                 select(OutreachSendQueueItem).where(
-                    OutreachSendQueueItem.product_id == product_id,
+                    OutreachSendQueueItem.product_id == stats_product_id,
                     OutreachSendQueueItem.campaign_id == campaign.id,
                 )
             )
@@ -353,7 +362,7 @@ class OutreachCampaignService:
         items: list[OutreachWorkbenchResultItem] = []
         for rec in recipients:
             pair = await ProductInfluencerService.get_product_influencer(
-                db, product_id=product_id, record_id=rec.product_influencer_id
+                db, product_id=stats_product_id, record_id=rec.product_influencer_id
             )
             if pair:
                 _product_row, global_row = pair
@@ -420,18 +429,15 @@ class OutreachCampaignService:
     async def list_campaigns(
         db: AsyncSession,
         *,
-        product_id: int,
+        product_id: int | None,
     ) -> list[OutreachCampaignRead]:
-        rows = (
-            await db.scalars(
-                select(OutreachEmailCampaign)
-                .where(OutreachEmailCampaign.product_id == product_id)
-                .order_by(OutreachEmailCampaign.updated_at.desc())
-            )
-        ).all()
+        query = select(OutreachEmailCampaign).order_by(OutreachEmailCampaign.updated_at.desc())
+        if product_id is not None:
+            query = query.where(OutreachEmailCampaign.product_id == product_id)
+        rows = (await db.scalars(query)).all()
         return [
             await OutreachCampaignService._campaign_read_with_stats(
-                db, campaign=row, product_id=product_id
+                db, campaign=row, product_id=product_id or row.product_id
             )
             for row in rows
         ]

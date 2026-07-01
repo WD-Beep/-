@@ -22,7 +22,7 @@ from app.schemas.email_reply import (
     InboundEmailWebhookRequest,
 )
 from app.services.email_reply_service import EmailReplyService
-from app.services.tenant_scope import ALL_PRODUCTS_ID
+from app.services.tenant_scope import ALL_PRODUCTS_ID, scoped_product_id
 
 router = APIRouter(prefix="/email-inbound", tags=["email-inbound"])
 email_replies_router = APIRouter(prefix="/email-replies", tags=["email-replies"])
@@ -97,10 +97,9 @@ async def list_email_replies(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> PaginatedResponse[EmailReplyRead]:
-    product_id = _require_product_scope(ctx)
     items, total = await EmailReplyService.list_replies(
         db,
-        product_id=product_id,
+        product_id=scoped_product_id(ctx.product_id),
         product_influencer_id=product_influencer_id,
         email_log_id=email_log_id,
         campaign_id=campaign_id,
@@ -124,10 +123,9 @@ async def get_email_reply_work_count(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> EmailReplyCountSummary:
-    product_id = _require_product_scope(ctx)
     unprocessed_count, unmatched_count = await EmailReplyService.count_reply_work(
         db,
-        product_id=product_id,
+        product_id=scoped_product_id(ctx.product_id),
     )
     return EmailReplyCountSummary(
         unprocessed_count=unprocessed_count,

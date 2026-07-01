@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.session import async_session_factory, get_db
 from app.deps.tenant import TenantContext, get_tenant_context, require_write_product_id
+from app.services.tenant_scope import ALL_PRODUCTS_ID, scoped_product_id
 from app.services.task_access import ensure_task_access
 from app.models.collection_task import CollectionTask
 from app.models.enums import CollectionTaskStatus, CandidateStatus
@@ -127,6 +128,7 @@ async def list_collection_tasks(
     status: CollectionTaskStatus | None = None,
     search: str | None = None,
     effectiveness: Literal["high_value", "effective", "ineffective", "low_value_result", "no_result", "failed"] | None = None,
+    owner_scope: Literal["mine", "all"] = "mine",
     task_view: Literal[
         "all",
         "high_value",
@@ -142,13 +144,18 @@ async def list_collection_tasks(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> PaginatedResponse[CollectionTaskRead]:
-    product_id = require_write_product_id(ctx)
+    product_id = scoped_product_id(ctx.product_id)
+    if ctx.product_id == ALL_PRODUCTS_ID:
+        owner_scope = "all"
     filters = CollectionTaskFilter(
         product_id=product_id,
         platform=platform,
         status=status,
         search=search,
         effectiveness=effectiveness,
+        owner_user_id=ctx.user_id,
+        owner_scope=owner_scope,
+        owner_is_admin=ctx.is_admin or ctx.product_id == ALL_PRODUCTS_ID,
         task_view=task_view,
     )
     return await CollectionTaskService.list_tasks(db, filters, page, page_size)
@@ -224,6 +231,9 @@ async def bulk_manage_collection_tasks(
         action=data.action,
         product_id=product_id,
         task_ids=data.task_ids,
+        owner_user_id=ctx.user_id,
+        owner_scope="mine",
+        owner_is_admin=ctx.is_admin,
     )
     await refresh_scheduler()
     return result

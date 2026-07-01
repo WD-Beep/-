@@ -649,6 +649,9 @@ class CollectionTaskRead(CollectionTaskBase, TimestampMixin, ORMModel):
 
 class CollectionTaskFilter(BaseModel):
     product_id: int | None = None
+    owner_user_id: int | None = None
+    owner_scope: Literal["mine", "all"] = "mine"
+    owner_is_admin: bool = False
     platform: str | None = None
     status: CollectionTaskStatus | None = None
     search: str | None = None

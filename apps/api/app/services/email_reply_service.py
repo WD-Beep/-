@@ -623,7 +623,7 @@ class EmailReplyService:
     async def list_replies(
         db: AsyncSession,
         *,
-        product_id: int,
+        product_id: int | None,
         product_influencer_id: int | None = None,
         email_log_id: int | None = None,
         campaign_id: int | None = None,
@@ -633,7 +633,9 @@ class EmailReplyService:
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[EmailReplyRead], int]:
-        filters = [EmailReply.product_id == product_id]
+        filters = []
+        if product_id is not None:
+            filters.append(EmailReply.product_id == product_id)
         if product_influencer_id is not None:
             filters.append(EmailReply.product_influencer_id == product_influencer_id)
         if email_log_id is not None:
@@ -662,13 +664,14 @@ class EmailReplyService:
         return [EmailReplyRead.model_validate(row) for row in rows], total
 
     @staticmethod
-    async def count_reply_work(db: AsyncSession, *, product_id: int) -> tuple[int, int]:
+    async def count_reply_work(db: AsyncSession, *, product_id: int | None) -> tuple[int, int]:
+        product_filters = [] if product_id is None else [EmailReply.product_id == product_id]
         unprocessed_count = int(
             await db.scalar(
                 select(func.count())
                 .select_from(EmailReply)
                 .where(
-                    EmailReply.product_id == product_id,
+                    *product_filters,
                     EmailReply.processing_status == "unprocessed",
                     EmailReply.product_influencer_id.is_not(None),
                 )
@@ -679,7 +682,7 @@ class EmailReplyService:
             await db.scalar(
                 select(func.count())
                 .select_from(EmailReply)
-                .where(EmailReply.product_id == product_id, EmailReply.product_influencer_id.is_(None))
+                .where(*product_filters, EmailReply.product_influencer_id.is_(None))
             )
             or 0
         )

@@ -45,6 +45,11 @@ export function setStoredUserId(userId: number): void {
   window.localStorage.setItem(USER_STORAGE_KEY, String(userId));
 }
 
+export function clearStoredUserId(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(USER_STORAGE_KEY);
+}
+
 export function tenantHeaders(): Record<string, string> {
   return {
     "X-User-Id": String(getStoredUserId()),
