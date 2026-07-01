@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { Clock, Loader2, Play, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -121,13 +122,29 @@ export function OutreachSendQueueCard() {
   const failedCount = items.filter((item) => item.status === "failed").length;
 
   return (
-    <Card className="queue-mini-panel shrink-0 overflow-hidden">
+    <Card className="queue-mini-panel email-logs-queue-panel shrink-0 overflow-hidden">
       <CardHeader className="queue-card-header">
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Clock className="h-4 w-4" />
-          今日待发送
-        </CardTitle>
-        <CardDescription>只显示最近队列，完整队列请进入发送队列页。</CardDescription>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Clock className="h-4 w-4" />
+              今日待发送
+            </CardTitle>
+            <CardDescription>优先处理今日队列、失败项和二次跟进。</CardDescription>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="default" size="sm" disabled={processing || pendingCount === 0} onClick={() => void handleProcessToday()}>
+              {processing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+              发送今日队列
+            </Button>
+            <Button variant="outline" size="sm" disabled={loading} onClick={() => void loadQueue()}>
+              刷新
+            </Button>
+            <Button variant="secondary" size="sm" asChild>
+              <Link href="/outreach-send-queue">完整队列</Link>
+            </Button>
+          </div>
+        </div>
       </CardHeader>
       <CardContent className="space-y-3 px-4 py-3">
         {error ? <ErrorAlert message={error} /> : null}
@@ -144,13 +161,6 @@ export function OutreachSendQueueCard() {
               <strong>{count}</strong>
             </div>
           ))}
-          <Button variant="default" size="sm" disabled={processing || pendingCount === 0} onClick={() => void handleProcessToday()}>
-            {processing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-            发送今日队列
-          </Button>
-          <Button variant="outline" size="sm" disabled={loading} onClick={() => void loadQueue()}>
-            刷新
-          </Button>
           {failedCount > 0 ? (
             <Button variant="outline" size="sm" disabled={clearingFailed} onClick={() => void handleClearFailed()}>
               {clearingFailed ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}

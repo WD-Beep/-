@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Copy, ListChecks, Loader2, MoreHorizontal, RefreshCw, Trash2 } from "lucide-react";
+import type { ReactNode } from "react";
+import { Copy, ListChecks, Loader2, MailCheck, MailX, MoreHorizontal, RefreshCw, Reply, Send, Trash2 } from "lucide-react";
 
 import { SaveEmailAsTemplateDialog } from "@/components/email-logs/save-email-as-template-dialog";
 import { OutreachSendQueueCard } from "@/components/email-logs/outreach-send-queue-card";
@@ -163,6 +164,33 @@ function RecordMetricPill({
   );
 }
 
+function EmailLogsMetricCard({
+  label,
+  value,
+  helper,
+  icon,
+  tone = "default",
+  onClick,
+}: {
+  label: string;
+  value: number;
+  helper: string;
+  icon: ReactNode;
+  tone?: "default" | "success" | "danger" | "warning";
+  onClick?: () => void;
+}) {
+  return (
+    <button type="button" className="email-log-kpi" data-tone={tone} onClick={onClick}>
+      <span className="email-log-kpi-icon">{icon}</span>
+      <span className="email-log-kpi-copy">
+        <span className="email-log-kpi-label">{label}</span>
+        <strong>{value}</strong>
+        <span className="email-log-kpi-helper">{helper}</span>
+      </span>
+    </button>
+  );
+}
+
 export function EmailLogsPanel({
   initialView = "all",
   recordsOnly = false,
@@ -269,6 +297,12 @@ export function EmailLogsPanel({
   const tabs = getEmailLogViewTabs(summary);
   const summaryMetrics = getOutreachSummaryMetrics(summary, activeView);
   const visibleLogs = filterEmailLogsByView(logsWithReplies, activeView) as LogWithReply[];
+  const latestSentLog = logsWithReplies
+    .filter((log) => log.sent_at)
+    .sort((a, b) => new Date(b.sent_at ?? 0).getTime() - new Date(a.sent_at ?? 0).getTime())[0];
+  const latestReplyLog = logsWithReplies
+    .filter((log) => log.reply?.received_at)
+    .sort((a, b) => new Date(b.reply?.received_at ?? 0).getTime() - new Date(a.reply?.received_at ?? 0).getTime())[0];
   const totalPages = Math.max(1, Math.ceil(visibleLogs.length / LOGS_PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
   const pagedLogs = visibleLogs.slice((currentPage - 1) * LOGS_PAGE_SIZE, currentPage * LOGS_PAGE_SIZE);
@@ -391,12 +425,9 @@ export function EmailLogsPanel({
               </Link>
             </Button>
           </>
-        ) : null
-      }
-    >
-      <div className={recordsOnly ? "outreach-records-workbench" : "flex h-full min-h-0 flex-col gap-3 p-4 lg:p-5"}>
-        {!recordsOnly ? (
-          <div className="flex shrink-0 flex-wrap items-center gap-2">
+        ) : (
+          <>
+            <span className="text-[13px] text-slate-500">{loading ? "正在同步" : `共 ${total} 条日志`}</span>
             <Button variant="outline" onClick={loadData} disabled={loading}>
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
               刷新
@@ -404,15 +435,72 @@ export function EmailLogsPanel({
             <Button variant="secondary" asChild>
               <Link href="/outreach-records">查看发送记录</Link>
             </Button>
-          </div>
-        ) : null}
-
+          </>
+        )
+      }
+    >
+      <div className={recordsOnly ? "outreach-records-workbench" : "email-logs-workbench"}>
         {error ? <ErrorAlert message={error} className={recordsOnly ? "outreach-inline-alert" : "shrink-0"} /> : null}
-        {smtpConfigured && !recordsOnly ? (
-          <SuccessAlert message="SMTP 已配置。重新发信后会新增一条发送记录。" className="shrink-0" />
+
+        {!recordsOnly ? (
+          <section className="email-logs-overview">
+            <div className="email-log-kpi-grid">
+              <EmailLogsMetricCard
+                label="已发送"
+                value={summary.sent}
+                helper="成功发出的外联邮件"
+                tone="default"
+                icon={<Send className="h-4 w-4" />}
+                onClick={() => jumpToRecords("sent")}
+              />
+              <EmailLogsMetricCard
+                label="发送失败"
+                value={summary.failed}
+                helper="需要检查邮箱或频率"
+                tone="danger"
+                icon={<MailX className="h-4 w-4" />}
+                onClick={() => jumpToRecords("failed")}
+              />
+              <EmailLogsMetricCard
+                label="已回复"
+                value={summary.replied}
+                helper="红人已经回复的记录"
+                tone="success"
+                icon={<Reply className="h-4 w-4" />}
+                onClick={() => jumpToRecords("replied")}
+              />
+              <EmailLogsMetricCard
+                label="未回复"
+                value={summary.unreplied}
+                helper="可继续安排二次跟进"
+                tone="warning"
+                icon={<MailCheck className="h-4 w-4" />}
+                onClick={() => jumpToRecords("unreplied")}
+              />
+            </div>
+            <aside className="email-logs-status-panel">
+              <div>
+                <p className="email-logs-status-label">邮箱状态</p>
+                <div className="mt-1 flex flex-wrap items-center gap-2">
+                  <Badge variant={smtpConfigured ? "success" : "warning"}>{smtpConfigured ? "SMTP 已配置" : "SMTP 未确认"}</Badge>
+                  <span className="text-xs text-slate-500">发送后会自动进入发送记录。</span>
+                </div>
+              </div>
+              <div className="email-logs-status-grid">
+                <div>
+                  <span>最近发送</span>
+                  <strong>{latestSentLog ? formatDate(latestSentLog.sent_at) : "-"}</strong>
+                </div>
+                <div>
+                  <span>最近回复</span>
+                  <strong>{latestReplyLog?.reply ? formatDate(latestReplyLog.reply.received_at) : "-"}</strong>
+                </div>
+              </div>
+            </aside>
+          </section>
         ) : null}
 
-        <section className={recordsOnly ? "outreach-summary-panel" : "ops-panel shrink-0"}>
+        <section className={recordsOnly ? "outreach-summary-panel" : "hidden"}>
           <div className={recordsOnly ? "outreach-summary-heading" : "px-5 py-3"}>
             <div>
               <h2 className={recordsOnly ? "outreach-section-title" : "text-base font-semibold"}>
@@ -441,7 +529,7 @@ export function EmailLogsPanel({
 
         {!recordsOnly ? <OutreachSendQueueCard /> : null}
 
-        <section ref={recordsRef} className={recordsOnly ? "outreach-records-panel" : "ops-panel flex min-h-0 flex-1 flex-col overflow-hidden"}>
+        <section ref={recordsRef} className={recordsOnly ? "outreach-records-panel" : "ops-panel email-logs-records-panel"}>
           <div className={recordsOnly ? "outreach-records-header" : "shrink-0 px-5 py-3"}>
             <div>
               <h2 className={recordsOnly ? "outreach-section-title" : "text-base font-semibold"}>
@@ -506,18 +594,18 @@ export function EmailLogsPanel({
                   </div>
                 </div>
 
-                <div className={recordsOnly ? "outreach-table-wrap" : "min-h-0 flex-1 overflow-auto"}>
-                  <table className={recordsOnly ? "outreach-table" : "w-full min-w-[960px] text-sm"}>
-                    <thead className={recordsOnly ? undefined : "sticky top-0 z-10 bg-background"}>
-                      <tr className={recordsOnly ? undefined : "border-b text-left text-muted-foreground"}>
-                        <th className={recordsOnly ? "w-10" : "w-10 py-2.5 pr-3 pl-4 font-medium"}>
+                <div className={recordsOnly ? "outreach-table-wrap" : "ops-table-wrap"}>
+                  <table className={recordsOnly ? "outreach-table" : "ops-table email-logs-table min-w-[1040px]"}>
+                    <thead>
+                      <tr>
+                        <th className="w-10">
                           <input type="checkbox" aria-label="选择本页记录" checked={allVisibleSelected} onChange={toggleAllVisibleLogs} />
                         </th>
-                        <th className={recordsOnly ? "w-[22%]" : "w-[22%] py-2.5 pr-4 font-medium"}>红人 / 收件人</th>
-                        <th className={recordsOnly ? "w-[30%]" : "w-[30%] py-2.5 pr-4 font-medium"}>标题 / 摘要</th>
-                        <th className={recordsOnly ? "w-[24%]" : "w-[24%] py-2.5 pr-4 font-medium"}>状态 / 跟进</th>
-                        <th className={recordsOnly ? "w-[14%]" : "w-[14%] py-2.5 pr-4 font-medium"}>时间</th>
-                        <th className={recordsOnly ? "w-[10%]" : "w-[10%] py-2.5 pr-4 font-medium"}>操作</th>
+                        <th className="w-[22%]">红人 / 收件人</th>
+                        <th className="w-[30%]">标题 / 摘要</th>
+                        <th className="w-[24%]">状态 / 跟进</th>
+                        <th className="w-[14%]">时间</th>
+                        <th className="w-[10%]">操作</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -538,8 +626,8 @@ export function EmailLogsPanel({
 
                         return (
                           <Fragment key={log.id}>
-                            <tr className={recordsOnly ? "outreach-data-row" : "border-b align-top last:border-0"}>
-                              <td className={recordsOnly ? undefined : "py-3 pr-3 pl-4"}>
+                            <tr className={recordsOnly ? "outreach-data-row" : "align-top"}>
+                              <td>
                                 <input
                                   type="checkbox"
                                   aria-label={`选择记录 ${log.id}`}
@@ -547,7 +635,7 @@ export function EmailLogsPanel({
                                   onChange={() => toggleSelectedLog(log.id)}
                                 />
                               </td>
-                              <td className={recordsOnly ? undefined : "py-3 pr-4"}>
+                              <td>
                                 <div className="space-y-1.5">
                                   <p className="break-all text-sm font-medium text-foreground">
                                     {log.influencer_username ? `@${log.influencer_username}` : "-"}
@@ -555,14 +643,14 @@ export function EmailLogsPanel({
                                   <EmailAddressCell email={log.recipients[0] ?? null} />
                                 </div>
                               </td>
-                              <td className={recordsOnly ? undefined : "py-3 pr-4"}>
+                              <td>
                                 <div className="space-y-1.5">
                                   <p className="line-clamp-2 max-w-[340px] break-words text-sm font-medium leading-5">{log.subject}</p>
                                   {failureText ? <p className="line-clamp-1 max-w-[340px] text-xs text-destructive">失败：{failureText}</p> : null}
                                   {replySummary ? <p className="line-clamp-1 max-w-[340px] text-xs text-muted-foreground">回复：{truncate(replySummary, 90)}</p> : null}
                                 </div>
                               </td>
-                              <td className={recordsOnly ? undefined : "py-3 pr-4"}>
+                              <td>
                                 <div className="space-y-2">
                                   <div className="flex flex-wrap gap-1.5">
                                     <Badge variant={status.variant}>{status.label}</Badge>
@@ -578,13 +666,13 @@ export function EmailLogsPanel({
                                   </div>
                                 </div>
                               </td>
-                              <td className={recordsOnly ? "outreach-time-cell" : "whitespace-nowrap py-3 pr-4 text-xs text-muted-foreground"}>
+                              <td className={recordsOnly ? "outreach-time-cell" : "whitespace-nowrap text-xs text-muted-foreground"}>
                                 <div className="space-y-1">
                                   <p>发送：{formatDate(log.sent_at)}</p>
                                   {reply ? <p>回复：{formatDate(reply.received_at)}</p> : null}
                                 </div>
                               </td>
-                              <td className={recordsOnly ? undefined : "py-3 pr-4"}>
+                              <td>
                                 <div className={recordsOnly ? "outreach-row-actions" : "flex min-w-[132px] flex-wrap items-center gap-1.5"}>
                                   <Button variant={recordsOnly ? "outline" : "ghost"} size="sm" onClick={() => toggleExpandedRow(log.id)}>
                                     {expanded ? "收起" : "详情"}
