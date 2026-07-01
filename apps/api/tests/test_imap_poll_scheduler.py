@@ -188,11 +188,18 @@ async def test_poll_imap_product_scope_does_not_ingest_other_product():
         assert batch.ingested == 1
         assert batch.skipped == 0
 
+        message_id = f"<scope-reply-{suffix}@example.com>"
         reply_p1 = await db.scalar(
-            select(EmailReply).where(EmailReply.product_id == 1)
+            select(EmailReply).where(
+                EmailReply.product_id == 1,
+                EmailReply.message_id == message_id,
+            )
         )
         reply_p2 = await db.scalar(
-            select(EmailReply).where(EmailReply.product_id == 2)
+            select(EmailReply).where(
+                EmailReply.product_id == 2,
+                EmailReply.message_id == message_id,
+            )
         )
         assert reply_p1 is not None
         assert reply_p2 is None

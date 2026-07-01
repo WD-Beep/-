@@ -19,6 +19,7 @@ import {
   validateForm,
 } from "../src/lib/task-form-payload.ts";
 import {
+  COUNTRY_OPTIONS,
   LINK_IMPORT_USAGE_LINES,
   LINK_ONLY_PLATFORM_CARD_LINES,
   SEED_DISCOVERY_PLATFORMS,
@@ -356,24 +357,42 @@ test("default keyword mode selects at least one verified platform", () => {
   assert.ok(initial.platforms.every((platform) => ["instagram", "youtube", "tiktok", "facebook"].includes(platform)));
 });
 
-test("default keyword collection uses high-value-first quality settings", () => {
+test("country options display English labels while submitting country codes", () => {
+  assert.deepEqual(
+    COUNTRY_OPTIONS.map((country) => country.label),
+    [
+      "All countries / No limit",
+      "United States",
+      "Germany",
+      "United Kingdom",
+      "Australia",
+      "Canada",
+    ],
+  );
+  assert.deepEqual(
+    COUNTRY_OPTIONS.map((country) => country.value),
+    ["", "US", "DE", "GB", "AU", "CA"],
+  );
+});
+
+test("default keyword collection captures candidates before quality filtering", () => {
   const initial = getInitialForm(true, null, "keyword_discovery");
   const payload = formValuesToPayload(
     {
       ...initial,
-      name: "high value default",
+      name: "candidate first default",
       keywordsText: "amazon finds creator",
     },
     noopCaps,
   );
 
-  assert.equal(payload.min_followers_count, 10000);
+  assert.equal(payload.min_followers_count, null);
   assert.equal(payload.min_engagement_rate, null);
   assert.equal(payload.require_email, false);
   assert.equal(payload.require_contact, false);
   assert.equal(payload.strict_quality_filter, false);
-  assert.equal(payload.insert_qualified_only, true);
-  assert.equal(payload.export_qualified_only, true);
+  assert.equal(payload.insert_qualified_only, false);
+  assert.equal(payload.export_qualified_only, false);
 });
 
 test("stable collection mode relaxes filters and submits one conservative platform", () => {
@@ -401,20 +420,20 @@ test("stable collection mode relaxes filters and submits one conservative platfo
   assert.deepEqual(payload.platforms, ["youtube"]);
 });
 
-test("switching back to keyword collection restores high-value-first defaults", () => {
+test("switching back to keyword collection keeps candidate-first defaults", () => {
   const relaxedLinkImport = {
     ...createEmptyTaskForm(),
     sourceMethod: "link_import" as const,
     collection_mode: "link_import" as const,
-    min_followers_count: "",
-    insert_qualified_only: false,
-    export_qualified_only: false,
+    min_followers_count: "10000",
+    insert_qualified_only: true,
+    export_qualified_only: true,
   };
   const form = applyDiscoverySource("keyword_hashtag", relaxedLinkImport, noopCaps);
 
-  assert.equal(form.min_followers_count, "10000");
-  assert.equal(form.insert_qualified_only, true);
-  assert.equal(form.export_qualified_only, true);
+  assert.equal(form.min_followers_count, "");
+  assert.equal(form.insert_qualified_only, false);
+  assert.equal(form.export_qualified_only, false);
 });
 
 test("selecting only YouTube maps to single-platform payload", () => {
@@ -506,6 +525,24 @@ test("link seed discovery submit ignores stale link import source method", () =>
   assert.equal(payload.collection_mode, "link_seed_discovery");
   assert.deepEqual(payload.input_urls, []);
   assert.ok(payload.keywords.includes("home decor"));
+});
+
+test("keyword discovery submit ignores stale link import source method", () => {
+  const form = {
+    ...keywordForm({ name: "keyword stale source" }),
+    sourceMethod: "link_import" as const,
+    collection_mode: "discovery" as const,
+    platforms: ["youtube"],
+    platform: "youtube",
+    keywordsText: "Makeup Bag",
+    inputUrlsText: "",
+  };
+
+  assert.equal(validateForm(form, noopCaps), null);
+  const payload = formValuesToPayload(form, noopCaps);
+  assert.equal(payload.collection_mode, "discovery");
+  assert.deepEqual(payload.input_urls, []);
+  assert.ok(payload.keywords.includes("Makeup Bag"));
 });
 
 test("multi platform auto selects only configured platforms when others are unavailable", () => {

@@ -301,6 +301,7 @@ class EmailService:
         matched_knowledge: list | None = None,
         risk_notes: list | None = None,
         message_id: str | None = None,
+        reply_email_log_id: int | None = None,
     ) -> EmailLog:
         log = EmailLog(
             task_id=task_id,
@@ -322,6 +323,7 @@ class EmailService:
             risk_notes=risk_notes,
             sent_at=datetime.now(UTC) if status == EmailLogStatus.SENT else None,
             message_id=message_id,
+            reply_email_log_id=reply_email_log_id,
         )
         db.add(log)
         await db.commit()
@@ -350,6 +352,7 @@ class EmailService:
         matched_knowledge: list | None = None,
         risk_notes: list | None = None,
         message_id: str | None = None,
+        reply_email_log_id: int | None = None,
     ) -> EmailLog:
         return await EmailService.create_outreach_email_log(
             db,
@@ -371,6 +374,7 @@ class EmailService:
             matched_knowledge=matched_knowledge,
             risk_notes=risk_notes,
             message_id=message_id,
+            reply_email_log_id=reply_email_log_id,
         )
 
     @staticmethod

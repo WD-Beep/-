@@ -4,11 +4,26 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from pydantic import EmailStr, TypeAdapter, ValidationError
+
 from app.models.global_influencer_profile import GlobalInfluencerProfile
 from app.models.influencer import Influencer
 from app.models.product_influencer import ProductInfluencer
 from app.models.product_influencer_source import ProductInfluencerSource
 from app.schemas.influencer import InfluencerRead, InfluencerSourceRead
+
+_EMAIL_ADAPTER = TypeAdapter(EmailStr)
+
+
+def _api_email(value: str | None) -> str | None:
+    if not value or not value.strip():
+        return None
+    try:
+        return str(_EMAIL_ADAPTER.validate_python(value.strip()))
+    except ValidationError:
+        return None
+
+
 def merged_influencer_for_ai(
     product_row: ProductInfluencer,
     global_row: GlobalInfluencerProfile,
@@ -32,10 +47,10 @@ def merged_influencer_for_ai(
         avg_likes=global_row.avg_likes,
         avg_comments=global_row.avg_comments,
         engagement_rate=global_row.engagement_rate,
-        email=global_row.final_email or global_row.email,
-        final_email=global_row.final_email or global_row.email,
-        public_email=global_row.public_email,
-        business_email=global_row.business_email,
+        email=_api_email(global_row.final_email or global_row.email),
+        final_email=_api_email(global_row.final_email or global_row.email),
+        public_email=_api_email(global_row.public_email),
+        business_email=_api_email(global_row.business_email),
         email_source=global_row.email_source,
         contact_credibility=global_row.contact_credibility,
         contact_score=global_row.contact_score,

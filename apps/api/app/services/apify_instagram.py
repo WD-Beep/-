@@ -180,6 +180,48 @@ def _profile_url_from_any(raw: dict) -> str | None:
     return profile_url_from_apify_raw(raw)
 
 
+def _profile_fallback_enabled() -> bool:
+    actor_id = getattr(settings, "apify_instagram_profile_fallback_actor_id", "")
+    enabled = getattr(settings, "apify_instagram_profile_fallback_enabled", True)
+    if not enabled or not actor_id:
+        return False
+    return actor_id.strip().replace("/", "~") != settings.apify_instagram_actor_id.strip().replace("/", "~")
+
+
+def _fallback_profile_input(usernames: list[str]) -> dict:
+    return {
+        "targetUsernames": usernames,
+        "usernames": usernames,
+    }
+
+
+def _normalize_fallback_profile_raw(raw: dict, *, requested_username: str) -> dict:
+    item = dict(raw)
+    username = _username_from_any(item) or requested_username
+    item.setdefault("username", username)
+    if item.get("full_name") and not item.get("fullName"):
+        item["fullName"] = item.get("full_name")
+    if item.get("followers_count") is not None and item.get("followersCount") is None:
+        item["followersCount"] = item.get("followers_count")
+    if item.get("profile_pic_url") and not item.get("profilePicUrl"):
+        item["profilePicUrl"] = item.get("profile_pic_url")
+    if item.get("profile_pic_url_hd") and not item.get("profilePicUrlHD"):
+        item["profilePicUrlHD"] = item.get("profile_pic_url_hd")
+    if item.get("is_private") is not None and item.get("isPrivate") is None:
+        item["isPrivate"] = item.get("is_private")
+    if item.get("externalUrl") and not item.get("homepage"):
+        item["homepage"] = item.get("externalUrl")
+    if item.get("external_url") and not item.get("homepage"):
+        item["homepage"] = item.get("external_url")
+    if item.get("website") and not item.get("homepage"):
+        item["homepage"] = item.get("website")
+    if item.get("posts") and not item.get("images"):
+        item["images"] = item.get("posts")
+    if item.get("latestPosts") and not item.get("images"):
+        item["images"] = item.get("latestPosts")
+    return item
+
+
 def _raw_field_summary(raw: dict, *, max_fields: int = 18) -> str:
     fields: list[str] = []
 
@@ -592,6 +634,11 @@ async def scrape_instagram_profiles(
         item_result = profile if profile is not None else failed
         await on_item_complete(label, item_result, err)
 
+    def _remove_failed_profile(key: str) -> None:
+        nonlocal failed_profiles
+        failed_profiles = [profile for profile in failed_profiles if profile.username.lower() != key]
+        failed_keys.discard(key)
+
     async def _scrape_chunk(chunk: list[str]) -> None:
         run_input = {
             "usernames": chunk,
@@ -676,6 +723,52 @@ async def scrape_instagram_profiles(
         concurrency=settings.effective_profile_enrich_concurrency,
         should_stop=should_stop,
     )
+
+    async def _scrape_fallback_targets(usernames: list[str]) -> None:
+        if not usernames or not _profile_fallback_enabled():
+            return
+        actor_id = settings.apify_instagram_profile_fallback_actor_id.strip()
+        run_input = _fallback_profile_input(usernames)
+        try:
+            raw_items = await run_actor_sync(actor_id, run_input)
+        except Exception as exc:
+            errors.append(f"Apify fallback 涓婚〉鎵规澶辫触 {actor_id}: {exc}")
+            return
+        requested = {username.lower(): username for username in usernames}
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                continue
+            raw_username = _username_from_any(raw)
+            if not raw_username:
+                continue
+            key = raw_username.lower()
+            if key not in requested or key in hydrated_usernames:
+                continue
+            item = _normalize_fallback_profile_raw(raw, requested_username=requested[key])
+            try:
+                profile = map_apify_instagram_profile(item, fallback_url=url_by_username.get(key))
+            except ValueError as exc:
+                errors.append(f"Apify fallback 涓婚〉鏁版嵁鏄犲皠澶辫触 @{raw_username}: {exc}")
+                continue
+            _remove_failed_profile(key)
+            seen.add(key)
+            hydrated_usernames.add(key)
+            results.append(profile)
+            await _notify(requested_labels.get(key, f"@{raw_username}"), profile, None, None)
+
+    fallback_targets: list[str] = []
+    recoverable_fallback_reasons = {
+        ProfileFailureReason.MISSING_PROFILE_DETAIL,
+        ProfileFailureReason.SCRAPER_BLOCKED,
+    }
+    failed_reason_by_key = {profile.username.lower(): profile.reason for profile in failed_profiles}
+    for key in requested_labels:
+        if key in hydrated_usernames:
+            continue
+        reason = failed_reason_by_key.get(key)
+        if reason is None or reason in recoverable_fallback_reasons:
+            fallback_targets.append(key)
+    await _scrape_fallback_targets(fallback_targets)
 
     for key, label in requested_labels.items():
         if key in hydrated_usernames or key in failed_keys:

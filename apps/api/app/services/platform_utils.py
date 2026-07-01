@@ -375,22 +375,29 @@ def candidate_row_from_profile(
         if source_meta.get("link_type") in {"post", "pin", "product", "short"}
         else None
     )
+    source_caption = profile.source_caption or source_meta.get("source_caption")
+    source_hashtag = profile.source_hashtag or source_meta.get("source_hashtag")
+    resolved_has_email = has_email if has_email is not None else source_meta.get("has_email")
+    resolved_has_contact = has_contact if has_contact is not None else source_meta.get("has_contact")
+    resolved_contact_status = contact_status if contact_status is not None else source_meta.get("contact_status")
     return {
         "username": profile.username,
         "profile_url": profile.profile_url,
         "platform": profile.platform,
         "source_type": profile.source_type,
         "source_keyword": source_keyword,
+        "source_hashtag": source_hashtag,
         "source_post_url": source_post_url,
+        "source_caption": source_caption,
         "source_input_url": source_input_url,
         "source_discovery_type": profile.source_discovery_type,
         "source_meta": source_meta or None,
         "followers_count": followers_count if followers_count is not None else profile.followers_count,
         "engagement_rate": engagement_rate if engagement_rate is not None else profile.engagement_rate,
         "is_high_value": is_high_value,
-        "has_email": has_email,
-        "has_contact": has_contact,
-        "contact_status": contact_status,
+        "has_email": resolved_has_email,
+        "has_contact": resolved_has_contact,
+        "contact_status": resolved_contact_status,
         "insert_blocked_reason": insert_blocked_reason,
         "status": status,
         "failure_reason": failure_reason,

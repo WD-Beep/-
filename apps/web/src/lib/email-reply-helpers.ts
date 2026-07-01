@@ -12,7 +12,71 @@ export type EmailReplyCenterItem = {
   campaign_id: number | null;
   processing_status: string | null;
   intent_status: string | null;
+  raw_headers?: Record<string, unknown> | null;
 };
+
+export type EmailReplyInfluencerSummary = {
+  id: number;
+  username: string | null;
+  display_name: string | null;
+  final_email?: string | null;
+  business_email?: string | null;
+  public_email?: string | null;
+  email?: string | null;
+};
+
+export type EmailReplyMatchCandidate = {
+  product_influencer_id: number;
+  campaign_id?: number | null;
+  display_name?: string | null;
+  username?: string | null;
+  email?: string | null;
+  reason?: string | null;
+  matched_text?: string | null;
+};
+
+function influencerEmail(influencer: EmailReplyInfluencerSummary | null | undefined): string | null {
+  if (!influencer) return null;
+  return influencer.final_email || influencer.business_email || influencer.public_email || influencer.email || null;
+}
+
+export function getEmailReplyInfluencerDisplay(
+  reply: EmailReplyCenterItem,
+  influencer: EmailReplyInfluencerSummary | null | undefined,
+): string {
+  if (!reply.product_influencer_id || !influencer) return "未自动关联";
+  const name = influencer.display_name || influencer.username || String(influencer.id);
+  const email = influencerEmail(influencer);
+  return email ? `${name} · ${email}` : name;
+}
+
+export function getEmailReplyMatchCandidates(reply: EmailReplyCenterItem): EmailReplyMatchCandidate[] {
+  const replyMatch = reply.raw_headers?.reply_match;
+  if (!replyMatch || typeof replyMatch !== "object" || !("candidates" in replyMatch)) return [];
+  const candidates = (replyMatch as { candidates?: unknown }).candidates;
+  if (!Array.isArray(candidates)) return [];
+  return candidates.filter((candidate): candidate is EmailReplyMatchCandidate => {
+    if (!candidate || typeof candidate !== "object") return false;
+    return typeof (candidate as { product_influencer_id?: unknown }).product_influencer_id === "number";
+  });
+}
+
+export function buildEmailReplyResponseDraft({
+  influencerName,
+  intentStatus,
+}: {
+  influencerName?: string | null;
+  intentStatus?: string | null;
+}): string {
+  const name = influencerName?.trim() || "there";
+  if (intentStatus === "follow_up") {
+    return `Hi ${name},\n\nThanks for getting back to us. I am following up with a few more details and would be happy to answer any questions about the collaboration.\n\nBest,`;
+  }
+  if (intentStatus === "interested") {
+    return `Hi ${name},\n\nThanks for getting back to us. We'd be happy to share more details about the collaboration, including the brief, timeline, and next steps.\n\nBest,`;
+  }
+  return `Hi ${name},\n\nThanks for your reply. We'd be happy to continue the conversation and share more details.\n\nBest,`;
+}
 
 export function getEmailReplyIntentLabel(status: string | null | undefined): string {
   switch (status) {

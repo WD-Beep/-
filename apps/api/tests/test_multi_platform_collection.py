@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import anyio
@@ -842,3 +843,98 @@ def test_apply_terminal_task_state_clears_stale_interrupt_on_success():
     assert task.last_error is None
     assert task.status_summary is None
     assert task.run_checkpoint.get("interrupted") is None
+
+
+def test_progress_updates_serialize_shared_session_commits():
+    from app.services.discovery_progress import DiscoveryProgressReporter
+    from app.services.task_run_progress import RunCheckpoint, STAGE_DISCOVERY, STAGE_HYDRATION, update_task_progress
+
+    class ContendedDb:
+        def __init__(self):
+            self.in_commit = False
+            self.commits = 0
+
+        async def commit(self):
+            if self.in_commit:
+                raise RuntimeError("IllegalStateChangeError: commit already in progress")
+            self.in_commit = True
+            await asyncio.sleep(0.01)
+            self.commits += 1
+            self.in_commit = False
+
+    async def _run():
+        db = ContendedDb()
+        task = CollectionTask(
+            id=99,
+            name="shared session progress",
+            platform="multi",
+            platforms=["instagram", "tiktok"],
+            collection_mode=CollectionMode.DISCOVERY.value,
+            discovery_limit=20,
+        )
+        checkpoint = RunCheckpoint()
+        reporter = DiscoveryProgressReporter(db, task, checkpoint, target_qualified=20)
+
+        await asyncio.gather(
+            update_task_progress(
+                db,
+                task,
+                stage=STAGE_HYDRATION,
+                processed=1,
+                total=2,
+                success=1,
+                skipped=0,
+                failed=0,
+                checkpoint=checkpoint,
+                commit=True,
+            ),
+            reporter.update(
+                phase=STAGE_DISCOVERY,
+                discovered_count=1,
+                deduped_count=1,
+                platform="tiktok",
+                commit=True,
+            ),
+        )
+        assert db.commits == 2
+
+    anyio.run(_run)
+
+
+def test_multi_platform_progress_updates_do_not_decrease_aggregate_counts():
+    from app.services.discovery_progress import DiscoveryProgressReporter
+    from app.services.task_run_progress import RunCheckpoint, STAGE_DISCOVERY
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    async def _run():
+        task = CollectionTask(
+            id=100,
+            name="shared aggregate progress",
+            platform="multi",
+            platforms=["instagram", "tiktok", "youtube"],
+            collection_mode=CollectionMode.DISCOVERY.value,
+            discovery_limit=20,
+            discovered_count=157,
+            deduped_count=146,
+            profile_fetched_count=44,
+        )
+        reporter = DiscoveryProgressReporter(FakeDb(), task, RunCheckpoint(), target_qualified=20)
+
+        await reporter.update(
+            phase=STAGE_DISCOVERY,
+            discovered_count=0,
+            deduped_count=0,
+            profile_fetched_count=0,
+            platform="youtube",
+            current_platform="youtube",
+            commit=False,
+        )
+
+        assert task.discovered_count == 157
+        assert task.deduped_count == 146
+        assert task.profile_fetched_count == 44
+
+    anyio.run(_run)

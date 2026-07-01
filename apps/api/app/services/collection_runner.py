@@ -146,6 +146,7 @@ from app.services.platform_utils import (
     resolve_platform_unique_id,
 )
 from app.services.concurrency import map_bounded
+from app.services.cross_platform_instagram_enrichment import enrich_profiles_with_instagram_email
 from app.services.task_influencer import TaskInfluencerService
 from app.services.task_candidate import TaskCandidateService
 from app.services.task_run_progress import (
@@ -1372,6 +1373,14 @@ class CollectionRunnerService:
             if discovery_reporter_token is not None:
                 reset_discovery_reporter(discovery_reporter_token)
                 discovery_reporter_token = None
+
+            if aggregate.platform_profiles:
+                enriched_items = await enrich_profiles_with_instagram_email(aggregate.platform_profiles)
+                enriched_by_key = {collected_identity_key(item): item for item in enriched_items}
+                collected = [
+                    enriched_by_key.get(collected_identity_key(item), item)
+                    for item in collected
+                ]
 
             await update_task_progress(
                 db,

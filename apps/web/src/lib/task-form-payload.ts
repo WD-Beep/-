@@ -7,13 +7,13 @@ export type DiscoverySource = "keyword_hashtag" | "link_import" | "shopping_seed
 
 const DEFAULT_PLATFORMS = ["youtube"];
 export const KEYWORD_HIGH_VALUE_DEFAULTS = {
-  min_followers_count: "10000",
+  min_followers_count: "",
   min_engagement_rate: "",
   require_email: false,
   require_contact: false,
   strict_quality_filter: false,
-  insert_qualified_only: true,
-  export_qualified_only: true,
+  insert_qualified_only: false,
+  export_qualified_only: false,
 } as const;
 
 export type TaskFormValues = {
@@ -235,7 +235,7 @@ export function isLinkImportTaskForm(
   values: Pick<TaskFormValues, "sourceMethod" | "collection_mode">,
 ): boolean {
   if (values.collection_mode === "link_seed_discovery") return false;
-  return values.collection_mode === "link_import" || values.sourceMethod === "link_import";
+  return values.collection_mode === "link_import";
 }
 
 function templatesToForm(templates: Record<string, string> = {}): Pick<
@@ -890,6 +890,8 @@ export function applyDiscoverySource(
   prev: TaskFormValues,
   platformCapabilities: PlatformCapability[],
 ): TaskFormValues {
+  const sourceChangedQualityDefaults =
+    prev.sourceMethod === "keyword_discovery" ? {} : KEYWORD_HIGH_VALUE_DEFAULTS;
   if (source === "link_import") {
     return {
       ...prev,
@@ -917,6 +919,7 @@ export function applyDiscoverySource(
   if (source === "multi_platform_auto") {
     return withKeywordHighValueDefaults({
       ...prev,
+      ...sourceChangedQualityDefaults,
       stable_collection_mode: false,
       ...clearLinkImportFields(),
       sourceMethod: "keyword_discovery",
@@ -929,6 +932,7 @@ export function applyDiscoverySource(
     : getKeywordDiscoveryDefaultPlatforms(platformCapabilities);
   return withKeywordHighValueDefaults({
     ...prev,
+    ...sourceChangedQualityDefaults,
     stable_collection_mode: false,
     ...clearLinkImportFields(),
     sourceMethod: "keyword_discovery",

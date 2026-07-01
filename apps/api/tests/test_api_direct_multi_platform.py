@@ -1304,6 +1304,18 @@ def test_youtube_provider_routes_to_apify_when_configured():
     assert cap.status == "supported"
 
 
+def test_youtube_outer_platform_timeout_allows_provider_deadline_to_return(monkeypatch):
+    from app.services.api_direct_provider import _platform_timeout_seconds
+
+    monkeypatch.setattr(settings, "youtube_discovery_max_duration_seconds", 300)
+    monkeypatch.setattr(settings, "youtube_discovery_keyword_timeout_seconds", 150)
+
+    timeout = _platform_timeout_seconds("youtube", competitor_mode=False)
+
+    assert timeout is not None
+    assert timeout > settings.youtube_discovery_max_duration_seconds
+
+
 def test_facebook_provider_routes_to_apify_when_configured():
     from app.services.api_direct_provider import _provider_cls, get_platform_capability
 

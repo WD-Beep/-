@@ -10,7 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import type { CollectionMode, CollectionTask, CollectionTaskPayload, PlatformCapability, TaskSourceMethod } from "@/lib/api";
 import { fetchPlatformCapabilities } from "@/lib/api";
 import { formatLinkImportPlatformHints, parseLinkImportPreview } from "@/lib/collection-sources";
-import { COLLECTION_MODE_OPTIONS, KEYWORD_DISCOVERY_PLATFORMS, KEYWORD_SEED_DISCOVERY_PLATFORMS, LINK_IMPORT_URL_EXAMPLES, LINK_IMPORT_USAGE_LINES, LINK_ONLY_PENDING_KEYWORD_HINT, LINK_ONLY_PLATFORM_CARD_LINES, PLATFORM_LABELS, SEED_DISCOVERY_PLATFORMS, URL_ONLY_PLATFORMS, VERIFIED_KEYWORD_PLATFORM_HINT } from "@/lib/labels";
+import { COLLECTION_MODE_OPTIONS, COUNTRY_OPTIONS as ENGLISH_COUNTRY_OPTIONS, KEYWORD_DISCOVERY_PLATFORMS, KEYWORD_SEED_DISCOVERY_PLATFORMS, LINK_IMPORT_URL_EXAMPLES, LINK_IMPORT_USAGE_LINES, LINK_ONLY_PENDING_KEYWORD_HINT, LINK_ONLY_PLATFORM_CARD_LINES, PLATFORM_LABELS, SEED_DISCOVERY_PLATFORMS, URL_ONLY_PLATFORMS, VERIFIED_KEYWORD_PLATFORM_HINT } from "@/lib/labels";
 import {
   advancedFilterSummary,
   applyStableCollectionMode,
@@ -782,12 +782,18 @@ export function TaskFormDialog({
                       </div>
                       <div className="space-y-2">
                         <Label htmlFor="country">国家</Label>
-                        <Input
+                        <select
                           id="country"
                           value={form.country}
                           onChange={(e) => setForm({ ...form, country: e.target.value })}
-                          placeholder="US / UK / JP"
-                        />
+                          className="flex h-11 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          {ENGLISH_COUNTRY_OPTIONS.map((country) => (
+                            <option key={country.value || "all"} value={country.value}>
+                              {country.label}
+                            </option>
+                          ))}
+                        </select>
                       </div>
                     </div>
                       </>

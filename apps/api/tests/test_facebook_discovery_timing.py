@@ -39,6 +39,60 @@ def _page_item(url: str) -> dict:
 
 
 @pytest.mark.anyio
+async def test_facebook_apify_content_urls_use_post_and_reel_actors(monkeypatch):
+    monkeypatch.setattr(settings, "apify_token", "apify_api_test")
+    monkeypatch.setattr(settings, "facebook_discovery_keyword_timeout_seconds", 30)
+    monkeypatch.setattr(settings, "apify_facebook_timeout_seconds", 30)
+
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_actor(actor_id, run_input, **_kwargs):
+        calls.append((actor_id, run_input))
+        url = run_input["startUrls"][0]["url"]
+        return [
+            {
+                "url": url,
+                "text": "public creator post",
+                "author": {
+                    "url": "https://www.facebook.com/examplepage",
+                    "name": "Example Page",
+                    "followers": 43000,
+                },
+            }
+        ]
+
+    task = CollectionTask(
+        name="fb-content-url",
+        platform="facebook",
+        platforms=["facebook"],
+        keywords=[],
+        input_urls=[
+            "https://www.facebook.com/examplepage/posts/123",
+            "https://www.facebook.com/reel/456",
+        ],
+        collection_mode="keyword",
+        discovery_limit=10,
+    )
+
+    with patch(
+        "app.services.platform_providers.facebook_apify.run_actor_sync",
+        side_effect=fake_actor,
+    ):
+        with patch(
+            "app.services.platform_providers.facebook_apify.report_discovery_progress",
+            new_callable=AsyncMock,
+        ):
+            result = await FacebookApifyProvider.discover(task)
+
+    assert calls[0][0] == settings.apify_facebook_posts_actor_id
+    assert calls[1][0] == settings.apify_facebook_reels_actor_id
+    assert result.profiles[0].username == "examplepage"
+    assert result.profiles[0].source_input_url == "https://www.facebook.com/examplepage/posts/123"
+    assert result.profiles[0].source_post_url == "https://www.facebook.com/examplepage/posts/123"
+    assert result.profiles[0].source_caption == "public creator post"
+
+
+@pytest.mark.anyio
 async def test_facebook_apify_runs_keywords_with_configured_concurrency(monkeypatch):
     monkeypatch.setattr(settings, "apify_token", "apify_api_test")
     monkeypatch.setattr(settings, "facebook_apify_keyword_concurrency", 2)

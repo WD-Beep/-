@@ -28,7 +28,7 @@ from app.models.collection_task import CollectionTask
 
 from app.services.collection_funnel import build_running_discovery_summary
 
-from app.services.task_run_progress import RunCheckpoint
+from app.services.task_run_progress import RunCheckpoint, session_commit_lock
 
 
 
@@ -38,6 +38,20 @@ _reporter: ContextVar[DiscoveryProgressReporter | None] = ContextVar("discovery_
 
 
 
+
+
+def _is_multi_platform_task(task: CollectionTask) -> bool:
+    platforms = getattr(task, "platforms", None) or []
+    return getattr(task, "platform", None) == "multi" or len(platforms) > 1
+
+
+def _merge_progress_count(task: CollectionTask, field_name: str, value: int | None) -> int | None:
+    if value is None:
+        return None
+    if not _is_multi_platform_task(task):
+        return value
+    current = getattr(task, field_name, None) or 0
+    return max(current, value)
 
 
 @dataclass
@@ -154,33 +168,47 @@ class DiscoveryProgressReporter:
 
         self.task.current_stage = phase
 
-        if discovered_count is not None:
+        merged_discovered_count = _merge_progress_count(self.task, "discovered_count", discovered_count)
+        merged_deduped_count = _merge_progress_count(self.task, "deduped_count", deduped_count)
+        merged_profile_fetched_count = _merge_progress_count(
+            self.task,
+            "profile_fetched_count",
+            profile_fetched_count,
+        )
+        merged_filtered_out_count = _merge_progress_count(self.task, "filtered_out_count", filtered_out_count)
+        merged_inserted_count = _merge_progress_count(self.task, "inserted_count", inserted_count)
 
-            self.task.discovered_count = discovered_count
+        if merged_discovered_count is not None:
 
-        if deduped_count is not None:
+            self.task.discovered_count = merged_discovered_count
 
-            self.task.deduped_count = deduped_count
+        if merged_deduped_count is not None:
 
-        if profile_fetched_count is not None:
+            self.task.deduped_count = merged_deduped_count
 
-            self.task.profile_fetched_count = profile_fetched_count
+        if merged_profile_fetched_count is not None:
 
-        if filtered_out_count is not None:
+            self.task.profile_fetched_count = merged_profile_fetched_count
 
-            self.task.filtered_out_count = filtered_out_count
+        if merged_filtered_out_count is not None:
 
-        if inserted_count is not None:
+            self.task.filtered_out_count = merged_filtered_out_count
 
-            self.task.inserted_count = inserted_count
+        if merged_inserted_count is not None:
 
-            self.task.success_count = inserted_count
+            self.task.inserted_count = merged_inserted_count
 
-            self.task.result_count = inserted_count
+            self.task.success_count = merged_inserted_count
+
+            self.task.result_count = merged_inserted_count
 
 
 
-        processed = inserted_count if inserted_count is not None else (profile_fetched_count or deduped_count or discovered_count or 0)
+        processed = (
+            merged_inserted_count
+            if merged_inserted_count is not None
+            else (merged_profile_fetched_count or merged_deduped_count or merged_discovered_count or 0)
+        )
 
         self.task.processed_count = max(0, processed)
 
@@ -345,7 +373,8 @@ class DiscoveryProgressReporter:
         if commit:
 
             async with self._commit_lock:
-                await self.db.commit()
+                async with await session_commit_lock(self.db):
+                    await self.db.commit()
 
 
 

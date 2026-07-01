@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from weakref import WeakKeyDictionary
 from dataclasses import dataclass, field
 from copy import deepcopy
 from typing import Any
@@ -26,6 +28,17 @@ STAGE_AI_COMPLETED = "ai_completed"
 STAGE_COMPLETED = "completed"
 STAGE_FAILED = "failed"
 _UNSET = object()
+_SESSION_COMMIT_LOCKS: WeakKeyDictionary[AsyncSession, asyncio.Lock] = WeakKeyDictionary()
+_SESSION_COMMIT_LOCKS_GUARD = asyncio.Lock()
+
+
+async def session_commit_lock(db: AsyncSession) -> asyncio.Lock:
+    async with _SESSION_COMMIT_LOCKS_GUARD:
+        lock = _SESSION_COMMIT_LOCKS.get(db)
+        if lock is None:
+            lock = asyncio.Lock()
+            _SESSION_COMMIT_LOCKS[db] = lock
+        return lock
 
 
 def profile_checkpoint_key(
@@ -284,7 +297,8 @@ async def update_task_progress(
         target_qualified=target_qualified,
     )
     if commit:
-        await db.commit()
+        async with await session_commit_lock(db):
+            await db.commit()
 
 
 def reset_run_progress(task: CollectionTask) -> None:

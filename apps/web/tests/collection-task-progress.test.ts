@@ -110,6 +110,38 @@ test("running stale state is driven by backend flags", () => {
   assert.equal(isCollectionTaskRunningStale(task({ status: "failed", stale: true, recoverable: true })), false);
 });
 
+test("candidate dialog wires youtube email enrichment buttons to API and refreshes list", () => {
+  const apiSource = readFileSync(new URL("../src/lib/api.ts", import.meta.url), "utf8");
+  assert.match(apiSource, /enrichYoutubeCandidateEmail/);
+  assert.match(apiSource, /collection-tasks\/\$\{taskId\}\/candidates\/\$\{candidateId\}\/enrich-youtube-email/);
+  assert.match(apiSource, /enrichYoutubeCandidateEmails/);
+  assert.match(apiSource, /collection-tasks\/\$\{taskId\}\/candidates\/enrich-youtube-emails/);
+
+  const dialogSource = readFileSync(
+    new URL("../src/components/collection-tasks/task-candidates-dialog.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(dialogSource, /enrichYoutubeCandidateEmail/);
+  assert.match(dialogSource, /enrichYoutubeCandidateEmails/);
+  assert.match(dialogSource, /handleEnrichYoutubeEmail/);
+  assert.match(dialogSource, /handleBatchEnrichYoutubeEmails/);
+  assert.match(dialogSource, /补邮箱/);
+  assert.match(dialogSource, /批量补 YouTube 邮箱/);
+  assert.match(dialogSource, /refreshCandidates/);
+});
+
+test("candidate dialog avoids opening jitter from filter reset and loading layout changes", () => {
+  const dialogSource = readFileSync(
+    new URL("../src/components/collection-tasks/task-candidates-dialog.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(dialogSource, /filtersReady/);
+  assert.match(dialogSource, /if \(!open \|\| !task \|\| !filtersReady\) return/);
+  assert.match(dialogSource, /h-\[90vh\] max-h-\[760px\]/);
+  assert.doesNotMatch(dialogSource, /queueMicrotask\(\(\) => \{\s*setExportError/);
+});
+
 test("progress summary prioritizes structured progress fields", () => {
   const summary = collectionTaskProgressSummary(
     task({
@@ -807,4 +839,24 @@ test("candidate dialog uses generic shopping seed enrichment copy", () => {
   assert.match(source, /Instagram\/TikTok\/YouTube\/Facebook/);
   assert.doesNotMatch(source, /LTK 补全/);
   assert.doesNotMatch(source, /补全 LTK seed/);
+});
+test("candidate dialog wires recrawl buttons to API and refreshes list", () => {
+  const apiSource = readFileSync(new URL("../src/lib/api.ts", import.meta.url), "utf8");
+  assert.match(apiSource, /recrawlCollectionTaskCandidate/);
+  assert.match(apiSource, /collection-tasks\/\$\{taskId\}\/candidates\/\$\{candidateId\}\/recrawl/);
+  assert.match(apiSource, /recrawlCollectionTaskFailedCandidates/);
+  assert.match(apiSource, /collection-tasks\/\$\{taskId\}\/candidates\/recrawl-failed/);
+
+  const dialogSource = readFileSync(
+    new URL("../src/components/collection-tasks/task-candidates-dialog.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(dialogSource, /recrawlCollectionTaskCandidate/);
+  assert.match(dialogSource, /recrawlCollectionTaskFailedCandidates/);
+  assert.match(dialogSource, /handleRecrawlCandidate/);
+  assert.match(dialogSource, /handleRecrawlFailedCandidates/);
+  assert.match(dialogSource, /void loadCandidates/);
+  assert.match(dialogSource, /canRecrawlCandidate/);
+  assert.doesNotMatch(dialogSource, /platform\s*!==\s*["']instagram["']/);
+  assert.doesNotMatch(dialogSource, /title="[^"]*后续支持[^"]*"/);
 });

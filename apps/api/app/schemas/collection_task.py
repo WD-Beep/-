@@ -796,6 +796,59 @@ class CollectionTaskCandidateRead(ORMModel):
     updated_at: datetime | None = None
 
 
+class CollectionTaskCandidateRecrawlRequest(BaseModel):
+    candidate_id: int | None = None
+    profile_url: str | None = None
+
+
+class CollectionTaskCandidateRecrawlResult(BaseModel):
+    candidate_id: int
+    task_id: int
+    status: str
+    attempted: bool = True
+    message: str | None = None
+    global_influencer_id: int | None = None
+    product_influencer_id: int | None = None
+
+
+class CollectionTaskCandidateBatchRecrawlRequest(BaseModel):
+    concurrency: int = Field(default=3, ge=1, le=5)
+    limit: int | None = Field(default=None, ge=1, le=500)
+
+
+class CollectionTaskCandidateBatchRecrawlResult(BaseModel):
+    task_id: int
+    attempted: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    skipped: int = 0
+    items: list[CollectionTaskCandidateRecrawlResult] = Field(default_factory=list)
+
+
+class CollectionTaskCandidateEmailEnrichmentResult(BaseModel):
+    candidate_id: int
+    task_id: int
+    status: str
+    attempted: bool = True
+    message: str | None = None
+    email: str | None = None
+    global_influencer_id: int | None = None
+    product_influencer_id: int | None = None
+
+
+class CollectionTaskCandidateBatchEmailEnrichmentRequest(BaseModel):
+    limit: int | None = Field(default=20, ge=1, le=100)
+
+
+class CollectionTaskCandidateBatchEmailEnrichmentResult(BaseModel):
+    task_id: int
+    attempted: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    skipped: int = 0
+    items: list[CollectionTaskCandidateEmailEnrichmentResult] = Field(default_factory=list)
+
+
 def resolve_candidate_source_input_url(
     source_input_url: str | None,
     source_meta: dict | None,

@@ -5,12 +5,18 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
+from app.models.email_log import EmailLog
 from app.models.email_reply import EmailReply
+from app.models.enums import EmailLogStatus
+from app.models.global_influencer_profile import GlobalInfluencerProfile
 from app.models.outreach_email_campaign import OutreachEmailCampaign
 from app.models.product_influencer import ProductInfluencer
 from app.models.tenant import Product
@@ -19,12 +25,15 @@ from app.schemas.email_reply import (
     EmailReplyIngestResult,
     EmailReplyBulkDeleteResponse,
     EmailReplyRead,
+    EmailReplySendResponseResult,
     EmailReplySummary,
     InboundEmailPayload,
     InboundEmailWebhookRequest,
 )
-from app.services.email_reply_matcher import EmailReplyMatcher
+from app.services.email import EmailService, format_smtp_send_error
+from app.services.email_reply_matcher import EmailReplyMatcher, _is_generic_address, reply_match_meta, with_reply_match_meta
 from app.services.email_reply_utils import (
+    build_outbound_message_id,
     detect_cooperation_interest,
     extract_email_address,
     is_automated_sender,
@@ -33,13 +42,218 @@ from app.services.email_reply_utils import (
     parse_references,
 )
 from app.services.follow_up_scheduler import mark_record_replied
-from app.services.imap_reply_client import fetch_unread_imap_messages
 from app.services.influencer_lead import InfluencerLeadService
+from app.services.imap_reply_client import fetch_unread_imap_messages
+from app.services.outreach_recipient import normalize_email_address
 
 logger = logging.getLogger(__name__)
 
 
 class EmailReplyService:
+    @staticmethod
+    def _response_subject(reply_subject: str | None, requested_subject: str | None) -> str:
+        subject = (requested_subject or "").strip() or (reply_subject or "").strip() or "(no subject)"
+        return subject if subject.lower().startswith("re:") else f"Re: {subject}"
+
+    @staticmethod
+    def _reply_response_meta(raw_headers: dict | None, meta: dict) -> dict:
+        headers = dict(raw_headers or {})
+        headers["reply_response"] = meta
+        return headers
+
+    @staticmethod
+    def _thread_references(reply: EmailReply) -> list[str]:
+        raw = reply.raw_headers or {}
+        references = parse_references(raw.get("References") or raw.get("references"))
+        for value in (reply.in_reply_to, reply.message_id):
+            normalized = normalize_message_id(value)
+            if normalized and normalized not in references:
+                references.append(normalized)
+        return references
+
+    @staticmethod
+    async def _reply_warning(
+        db: AsyncSession,
+        reply: EmailReply,
+        recipient: str,
+    ) -> str | None:
+        if not reply.product_influencer_id:
+            return "unmatched_reply_identity_warning"
+        if _is_generic_address(recipient):
+            return "generic_sender_warning"
+
+        product_row = await db.get(ProductInfluencer, reply.product_influencer_id)
+        if not product_row:
+            return "unmatched_reply_identity_warning"
+        global_row = await db.get(GlobalInfluencerProfile, product_row.global_influencer_id)
+        if not global_row:
+            return "unmatched_reply_identity_warning"
+
+        known = {
+            normalize_email_address(value)
+            for value in (
+                global_row.final_email,
+                global_row.business_email,
+                global_row.public_email,
+                global_row.email,
+            )
+        }
+        known.discard(None)
+        if known and normalize_email_address(recipient) not in known:
+            return "sender_email_mismatch_warning"
+        return None
+
+    @staticmethod
+    async def send_response(
+        db: AsyncSession,
+        *,
+        product_id: int,
+        user_id: int | None,
+        reply_id: int,
+        body: str,
+        subject: str | None = None,
+        use_ai_draft: bool = False,
+        mark_processed: bool = True,
+    ) -> EmailReplySendResponseResult:
+        reply = await db.get(EmailReply, reply_id)
+        if not reply or reply.product_id != product_id:
+            raise ValueError("reply_not_found")
+
+        existing = await db.scalar(
+            select(EmailLog)
+            .where(
+                EmailLog.reply_email_log_id == reply.id,
+                EmailLog.status == EmailLogStatus.SENT.value,
+            )
+            .order_by(EmailLog.sent_at.desc().nullslast(), EmailLog.id.desc())
+            .limit(1)
+        )
+        if existing:
+            return EmailReplySendResponseResult(
+                sent=True,
+                message_id=existing.message_id,
+                reply_id=reply.id,
+                product_influencer_id=reply.product_influencer_id,
+                campaign_id=reply.campaign_id,
+                sent_at=existing.sent_at,
+                delivery_provider="smtp",
+                warning="duplicate_response_skipped",
+            )
+
+        recipient = extract_email_address(reply.from_address)
+        if not recipient:
+            raise ValueError("missing_reply_recipient")
+
+        clean_body = (body or "").strip()
+        if not clean_body:
+            raise ValueError("empty_response_body")
+
+        outbound_subject = EmailReplyService._response_subject(reply.subject, subject)
+        message_id = build_outbound_message_id(product_id=product_id)
+        warning = await EmailReplyService._reply_warning(db, reply, recipient)
+
+        message = MIMEMultipart()
+        message["From"] = settings.smtp_from
+        message["To"] = recipient
+        message["Subject"] = outbound_subject
+        message["Message-ID"] = message_id
+        if reply.message_id:
+            message["In-Reply-To"] = normalize_message_id(reply.message_id) or reply.message_id
+        references = EmailReplyService._thread_references(reply)
+        if references:
+            message["References"] = " ".join(references)
+        message.attach(MIMEText(clean_body, "plain", "utf-8"))
+
+        sent_at = datetime.now(UTC)
+        try:
+            await EmailService._send_message(message, [recipient])
+        except Exception as exc:
+            error = format_smtp_send_error(exc)
+            await EmailService.create_outreach_email_log(
+                db,
+                task_id=None,
+                recipients=[recipient],
+                subject=outbound_subject,
+                body=clean_body,
+                status=EmailLogStatus.FAILED,
+                error_message=error,
+                product_id=product_id,
+                user_id=user_id,
+                product_influencer_id=reply.product_influencer_id,
+                sender_email=settings.smtp_from or None,
+                generated_by_ai=use_ai_draft,
+                ai_provider="template" if use_ai_draft else None,
+                message_id=message_id,
+                reply_email_log_id=reply.id,
+            )
+            return EmailReplySendResponseResult(
+                sent=False,
+                message_id=message_id,
+                reply_id=reply.id,
+                product_influencer_id=reply.product_influencer_id,
+                campaign_id=reply.campaign_id,
+                delivery_provider="smtp",
+                warning=warning,
+                error=error,
+            )
+
+        log = await EmailService.create_outreach_email_log(
+            db,
+            task_id=None,
+            recipients=[recipient],
+            subject=outbound_subject,
+            body=clean_body,
+            status=EmailLogStatus.SENT,
+            product_id=product_id,
+            user_id=user_id,
+            product_influencer_id=reply.product_influencer_id,
+            sender_email=settings.smtp_from or None,
+            generated_by_ai=use_ai_draft,
+            ai_provider="template" if use_ai_draft else None,
+            message_id=message_id,
+            reply_email_log_id=reply.id,
+        )
+        sent_at = log.sent_at or sent_at
+
+        if mark_processed:
+            reply.processing_status = "processed"
+            reply.handled_at = sent_at
+        reply.raw_headers = EmailReplyService._reply_response_meta(
+            reply.raw_headers,
+            {
+                "response_sent": True,
+                "response_message_id": message_id,
+                "response_sent_at": sent_at.isoformat(),
+                "response_provider": "smtp",
+                "response_email_log_id": log.id,
+            },
+        )
+
+        if reply.product_influencer_id:
+            product_row = await db.get(ProductInfluencer, reply.product_influencer_id)
+            if product_row:
+                await InfluencerLeadService.create_product_followup(
+                    db,
+                    product_row=product_row,
+                    action_type="email_sent",
+                    content=f"{outbound_subject}\n\n{clean_body}",
+                    operator_name="email_reply_response",
+                    contact_channel="email",
+                )
+
+        await db.commit()
+        await db.refresh(reply)
+        return EmailReplySendResponseResult(
+            sent=True,
+            message_id=message_id,
+            reply_id=reply.id,
+            product_influencer_id=reply.product_influencer_id,
+            campaign_id=reply.campaign_id,
+            sent_at=sent_at,
+            delivery_provider="smtp",
+            warning=warning,
+        )
+
     @staticmethod
     async def _resolve_unmatched_product_id(
         db: AsyncSession,
@@ -94,6 +308,7 @@ class EmailReplyService:
         from_address: str,
         to_address: str | None,
         normalized_message_id: str | None,
+        match_meta: dict | None = None,
     ) -> EmailReplyIngestResult:
         product_id = await EmailReplyService._resolve_unmatched_product_id(db, payload.product_id)
         if product_id is None:
@@ -119,7 +334,10 @@ class EmailReplyService:
             subject=(payload.subject or "")[:500],
             body=payload.body,
             snippet=make_snippet(payload.body),
-            raw_headers=payload.raw_headers,
+            raw_headers=with_reply_match_meta(
+                payload.raw_headers,
+                match_meta or {"status": "unmatched", "confidence": None, "reason": None, "candidates": []},
+            ),
             received_at=payload.received_at or datetime.now(UTC),
         )
         db.add(reply)
@@ -135,6 +353,7 @@ class EmailReplyService:
             reply_id=reply.id,
             product_id=reply.product_id,
             match_method=reply.match_method,
+            match_confidence=(match_meta or {}).get("confidence"),
             message="已接收回复，但还没有匹配到红人，请在未匹配回复中手动关联",
         )
 
@@ -169,6 +388,8 @@ class EmailReplyService:
             from_address=from_address,
             to_address=to_address or "",
             subject=payload.subject,
+            snippet=make_snippet(payload.body),
+            body=payload.body,
             in_reply_to=payload.in_reply_to,
             references=payload.references,
             product_id_hint=payload.product_id,
@@ -179,13 +400,29 @@ class EmailReplyService:
                     status="skipped",
                     message="系统通知或广告邮件未匹配到红人，已跳过",
                 )
+            resolved_product_id = await EmailReplyService._resolve_unmatched_product_id(db, payload.product_id)
+            if resolved_product_id is None:
+                return EmailReplyIngestResult(
+                    status="failed",
+                    message="已收到回复，但无法判断归属产品，请先选择产品后手动拉取收件箱",
+                )
+            snippet = make_snippet(payload.body)
+            candidate_meta = await EmailReplyMatcher.candidate_meta(
+                db,
+                from_address=from_address,
+                subject=payload.subject,
+                snippet=snippet,
+                body=payload.body,
+                product_id_hint=resolved_product_id,
+            )
             return await EmailReplyService._save_unmatched_reply(
                 db,
-                payload,
+                payload.model_copy(update={"product_id": resolved_product_id}),
                 source=source,
                 from_address=from_address,
                 to_address=to_address,
                 normalized_message_id=normalized_message_id,
+                match_meta=candidate_meta,
             )
 
         product_row = None
@@ -217,7 +454,13 @@ class EmailReplyService:
             subject=(payload.subject or "")[:500],
             body=payload.body,
             snippet=snippet,
-            raw_headers=payload.raw_headers,
+            raw_headers=with_reply_match_meta(
+                payload.raw_headers,
+                {
+                    **reply_match_meta(match),
+                    "matched_at": datetime.now(UTC).isoformat(),
+                },
+            ),
             received_at=received_at,
         )
         db.add(reply)
@@ -258,9 +501,81 @@ class EmailReplyService:
             email_log_id=reply.email_log_id,
             campaign_id=reply.campaign_id,
             match_method=reply.match_method,
+            match_confidence=match.match_confidence,
             follow_status=follow_status,
             message="已接收并匹配红人回复",
         )
+
+    @staticmethod
+    async def rematch_unmatched_replies(
+        db: AsyncSession,
+        *,
+        product_id: int | None = None,
+        limit: int = 200,
+    ) -> int:
+        filters = [EmailReply.product_influencer_id.is_(None)]
+        if product_id is not None:
+            filters.append(EmailReply.product_id == product_id)
+
+        replies = (
+            await db.scalars(
+                select(EmailReply)
+                .where(*filters)
+                .order_by(EmailReply.received_at.desc())
+                .limit(limit)
+            )
+        ).all()
+
+        updated = 0
+        for reply in replies:
+            references = parse_references((reply.raw_headers or {}).get("References"))
+            if not reply.in_reply_to and not references:
+                continue
+            was_unmatched = reply.product_influencer_id is None
+            match = await EmailReplyMatcher.match(
+                db,
+                from_address=reply.from_address,
+                to_address=reply.to_address,
+                subject=reply.subject,
+                snippet=reply.snippet,
+                body=reply.body,
+                in_reply_to=reply.in_reply_to,
+                references=references,
+                product_id_hint=reply.product_id,
+            )
+            if match and match.product_influencer_id:
+                reply.product_id = match.product_id
+                reply.product_influencer_id = match.product_influencer_id
+                reply.email_log_id = match.email_log_id
+                reply.campaign_id = match.campaign_id
+                reply.match_method = match.match_method
+                reply.raw_headers = with_reply_match_meta(
+                    reply.raw_headers,
+                    {
+                        **reply_match_meta(match),
+                        "matched_at": datetime.now(UTC).isoformat(),
+                        "rematched": True,
+                    },
+                )
+                if was_unmatched:
+                    updated += 1
+                continue
+
+            reply.raw_headers = with_reply_match_meta(
+                reply.raw_headers,
+                await EmailReplyMatcher.candidate_meta(
+                    db,
+                    from_address=reply.from_address,
+                    subject=reply.subject,
+                    snippet=reply.snippet,
+                    body=reply.body,
+                    product_id_hint=reply.product_id,
+                ),
+            )
+
+        if replies:
+            await db.commit()
+        return updated
 
     @staticmethod
     async def ingest_batch(
@@ -394,6 +709,19 @@ class EmailReplyService:
             reply.product_influencer_id = product_row.id
             if reply.match_method == "unmatched":
                 reply.match_method = "manual"
+            reply.raw_headers = with_reply_match_meta(
+                reply.raw_headers,
+                {
+                    "status": "matched",
+                    "confidence": "high",
+                    "reason": "manual",
+                    "product_influencer_id": product_row.id,
+                    "campaign_id": campaign_id or reply.campaign_id,
+                    "email_log_id": reply.email_log_id,
+                    "candidates": [],
+                    "matched_at": datetime.now(UTC).isoformat(),
+                },
+            )
 
         if campaign_id is not None:
             campaign = await db.get(OutreachEmailCampaign, campaign_id)

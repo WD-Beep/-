@@ -24,6 +24,15 @@ export const PLATFORM_LABELS: Record<string, string> = {
   amazon: "Amazon",
 };
 
+export const COUNTRY_OPTIONS = [
+  { value: "", label: "All countries / No limit" },
+  { value: "US", label: "United States" },
+  { value: "DE", label: "Germany" },
+  { value: "GB", label: "United Kingdom" },
+  { value: "AU", label: "Australia" },
+  { value: "CA", label: "Canada" },
+] as const;
+
 export const PLATFORM_CAPABILITY_STATUS_LABELS: Record<string, string> = {
   supported: "API Direct 已支持",
   not_configured: "API Direct 未配置",

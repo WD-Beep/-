@@ -144,7 +144,9 @@ def test_followers_in_range_matches_preferences():
 
 def test_discovery_hard_min_followers_floor_and_ceiling():
     task_10k = _task(collection_mode="keyword", min_followers_count=10_000)
-    assert cf.discovery_hard_min_followers(task_10k) == 30_000
+    assert cf.discovery_hard_min_followers(task_10k) == 10_000
+    task_default = _task(collection_mode="keyword", min_followers_count=None)
+    assert cf.discovery_hard_min_followers(task_default) == 30_000
     task_50k = _task(collection_mode="discovery", min_followers_count=50_000)
     assert cf.discovery_hard_min_followers(task_50k) == 50_000
 
@@ -155,10 +157,8 @@ def test_discovery_hard_min_followers_floor_and_ceiling():
     assert not r_none.passed
     assert r_none.reason == "below_min_followers"
 
-    r_29999 = cf.evaluate_post_hydration_hard_filter(_item(followers_count=29_999, bio="travel"), task)
-    assert not r_29999.passed
-    assert r_29999.reason == "below_min_followers"
-
+    assert cf.evaluate_post_hydration_hard_filter(_item(followers_count=10_000, bio="travel"), task).passed
+    assert cf.evaluate_post_hydration_hard_filter(_item(followers_count=29_999, bio="travel"), task).passed
     assert cf.evaluate_post_hydration_hard_filter(_item(followers_count=30_000, bio="travel"), task).passed
     assert cf.evaluate_post_hydration_hard_filter(_item(followers_count=50_000, bio="travel"), task).passed
 
@@ -169,9 +169,9 @@ def test_discovery_hard_min_followers_floor_and_ceiling():
 
 def test_urls_mode_hard_min_followers():
     task = _task(collection_mode="urls", min_followers_count=10_000)
-    assert cf.discovery_hard_min_followers(task) == 30_000
+    assert cf.discovery_hard_min_followers(task) == 10_000
     low = _item(followers_count=25_000, bio="travel")
-    assert not cf.evaluate_post_hydration_hard_filter(low, task).passed
+    assert cf.evaluate_post_hydration_hard_filter(low, task).passed
     assert cf.evaluate_post_hydration_hard_filter(_item(followers_count=35_000, bio="travel"), task).passed
 
 
@@ -278,12 +278,18 @@ def test_url_only_platform_reserved_urls_fail_validation():
         assert result.reason == "invalid_profile"
 
 
-def test_multi_task_instagram_item_still_hard_filters_30k():
+def test_multi_task_instagram_item_respects_explicit_min_followers():
     task = _task(platform="multi", platforms=["instagram", "tiktok"], min_followers_count=10_000)
     low = _item(platform="instagram", followers_count=25_000, bio="travel")
     high = _item(platform="instagram", followers_count=35_000, bio="travel")
-    assert not cf.evaluate_post_hydration_hard_filter(low, task).passed
+    assert cf.evaluate_post_hydration_hard_filter(low, task).passed
     assert cf.evaluate_post_hydration_hard_filter(high, task).passed
+
+
+def test_below_min_followers_detail_does_not_claim_fixed_30k_floor():
+    detail = cf.hard_filter_failure_detail("below_min_followers", platform="instagram")
+    assert "30000" not in detail
+    assert "任务设置" in detail
 
 
 def test_multi_task_tiktok_unknown_followers_filtered_when_min_set():

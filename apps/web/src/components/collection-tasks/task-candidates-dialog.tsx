@@ -10,8 +10,12 @@ import {
   COLLECTION_TASK_POLL_INTERVAL_MS,
   downloadCollectionTaskCandidatesExport,
   enrichLinkSeedProfiles,
+  enrichYoutubeCandidateEmail,
+  enrichYoutubeCandidateEmails,
   fetchCollectionTaskCandidates,
   isCollectionTaskRunning,
+  recrawlCollectionTaskCandidate,
+  recrawlCollectionTaskFailedCandidates,
   type CollectionTask,
   type CollectionTaskCandidate,
 } from "@/lib/api";
@@ -155,6 +159,51 @@ function sourceLabel(candidate: CollectionTaskCandidate): string {
   return candidate.source_discovery_type ?? "-";
 }
 
+const RECOVERABLE_RECRAWL_REASONS = new Set([
+  "missing_profile_detail",
+  "profile_fetch_failed",
+  "api_failed",
+  "unknown",
+  "scraper_blocked",
+  "provider_timeout",
+  "timeout",
+]);
+
+const UNRECOVERABLE_RECRAWL_REASONS = new Set([
+  "private_account",
+  "disabled_or_deleted",
+  "invalid_username",
+  "below_min_followers",
+  "below_min_engagement_rate",
+  "above_max_followers",
+  "duplicate",
+]);
+
+function canRecrawlCandidate(candidate: CollectionTaskCandidate): boolean {
+  if (!candidate.profile_url) return false;
+  if (!["profile_failed", "not_inserted", "pending_profile"].includes(candidate.status)) {
+    return false;
+  }
+  const reason = (candidate.failure_reason ?? "").toLowerCase();
+  const detail = (candidate.failure_detail ?? "").toLowerCase();
+  if (UNRECOVERABLE_RECRAWL_REASONS.has(reason)) return false;
+  if (/private|invalid url|invalid username|duplicate|below_min_followers/.test(detail)) return false;
+  return (
+    RECOVERABLE_RECRAWL_REASONS.has(reason) ||
+    /主页数据缺失|未获取到主页数据|补采失败|missing_profile_detail|profile_failed|provider timeout|timeout|post_author_missing/i.test(
+      detail,
+    )
+  );
+}
+
+function canEnrichYoutubeEmail(candidate: CollectionTaskCandidate): boolean {
+  return (
+    (candidate.platform ?? "").toLowerCase() === "youtube" &&
+    Boolean(candidate.profile_url) &&
+    candidate.has_email !== true
+  );
+}
+
 async function copyText(text: string) {
   try {
     await navigator.clipboard.writeText(text);
@@ -169,6 +218,7 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
   const [page, setPage] = useState(1);
   const [pages, setPages] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [filtersReady, setFiltersReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState("");
   const [failureFilter, setFailureFilter] = useState("");
@@ -184,20 +234,25 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
   const [search, setSearch] = useState("");
   const [exportError, setExportError] = useState<string | null>(null);
   const [statsMismatch, setStatsMismatch] = useState<string | null>(null);
+  const [recrawlError, setRecrawlError] = useState<string | null>(null);
+  const [recrawlingCandidateId, setRecrawlingCandidateId] = useState<number | null>(null);
+  const [recrawlingBatch, setRecrawlingBatch] = useState(false);
+  const [enrichingEmailCandidateId, setEnrichingEmailCandidateId] = useState<number | null>(null);
+  const [enrichingEmailBatch, setEnrichingEmailBatch] = useState(false);
 
   useEffect(() => {
-    if (!open || !task) return;
-    queueMicrotask(() => {
-      setExportError(null);
-      setStatsMismatch(null);
-      setPage(1);
-      if ((task.inserted_count ?? task.result_count ?? 0) > 0) {
-        setStatusFilter("inserted");
-      } else {
-        setStatusFilter("");
-      }
-    });
-  }, [open, task]);
+    if (!open || !task) {
+      setFiltersReady(false);
+      return;
+    }
+    setFiltersReady(false);
+    setExportError(null);
+    setRecrawlError(null);
+    setStatsMismatch(null);
+    setPage(1);
+    setStatusFilter((task.inserted_count ?? task.result_count ?? 0) > 0 ? "inserted" : "");
+    setFiltersReady(true);
+  }, [open, task?.id]);
 
   const buildCandidateQuery = useCallback((pageNumber = page) => {
     const minFollowers = minFollowersFilter.trim() ? Number(minFollowersFilter) : undefined;
@@ -250,8 +305,17 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
     return rest;
   }, [buildCandidateQuery]);
 
+  const refreshCandidates = useCallback(async () => {
+    if (!task) return;
+    setError(null);
+    const result = await fetchCollectionTaskCandidates(task.id, buildCandidateQuery());
+    setItems(result.items);
+    setTotal(result.total);
+    setPages(result.pages);
+  }, [task, buildCandidateQuery]);
+
   useEffect(() => {
-    if (!open || !task) return;
+    if (!open || !task || !filtersReady) return;
     const activeTask = task;
     let cancelled = false;
 
@@ -299,6 +363,7 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
   }, [
     task,
     open,
+    filtersReady,
     page,
     statusFilter,
     failureFilter,
@@ -320,6 +385,62 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
   ]);
   function resetFilters() {
     setPage(1);
+  }
+
+  async function handleRecrawlCandidate(candidate: CollectionTaskCandidate) {
+    if (!task) return;
+    setRecrawlError(null);
+    setRecrawlingCandidateId(candidate.id);
+    try {
+      await recrawlCollectionTaskCandidate(task.id, candidate.id);
+      await refreshCandidates();
+    } catch (err) {
+      setRecrawlError(err instanceof Error ? err.message : "重采失败");
+    } finally {
+      setRecrawlingCandidateId(null);
+    }
+  }
+
+  async function handleRecrawlFailedCandidates() {
+    if (!task) return;
+    setRecrawlError(null);
+    setRecrawlingBatch(true);
+    try {
+      await recrawlCollectionTaskFailedCandidates(task.id, { concurrency: 3 });
+      await refreshCandidates();
+    } catch (err) {
+      setRecrawlError(err instanceof Error ? err.message : "批量重采失败");
+    } finally {
+      setRecrawlingBatch(false);
+    }
+  }
+
+  async function handleEnrichYoutubeEmail(candidate: CollectionTaskCandidate) {
+    if (!task) return;
+    setRecrawlError(null);
+    setEnrichingEmailCandidateId(candidate.id);
+    try {
+      await enrichYoutubeCandidateEmail(task.id, candidate.id);
+      await refreshCandidates();
+    } catch (err) {
+      setRecrawlError(err instanceof Error ? err.message : "补邮箱失败");
+    } finally {
+      setEnrichingEmailCandidateId(null);
+    }
+  }
+
+  async function handleBatchEnrichYoutubeEmails() {
+    if (!task) return;
+    setRecrawlError(null);
+    setEnrichingEmailBatch(true);
+    try {
+      await enrichYoutubeCandidateEmails(task.id, { limit: 20 });
+      await refreshCandidates();
+    } catch (err) {
+      setRecrawlError(err instanceof Error ? err.message : "批量补 YouTube 邮箱失败");
+    } finally {
+      setEnrichingEmailBatch(false);
+    }
   }
 
   if (!open || !task) return null;
@@ -344,7 +465,7 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
         role="dialog"
         aria-modal="true"
         aria-labelledby="task-candidates-title"
-        className="flex max-h-[90vh] w-full max-w-6xl flex-col rounded-lg border bg-background shadow-lg"
+        className="flex h-[90vh] max-h-[760px] w-full max-w-6xl flex-col rounded-lg border bg-background shadow-lg"
       >
         <div className="flex items-start justify-between gap-4 border-b px-4 py-3">
           <div>
@@ -404,6 +525,32 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
                 继续补采社媒资料
               </Button>
             ) : null}
+            <Button
+              size="sm"
+              variant="secondary"
+              className="h-8 gap-1.5"
+              disabled={isCollectionTaskRunning(task) || enrichingEmailBatch}
+              title="批量补当前任务下 YouTube 缺邮箱候选，默认最多 20 条"
+              onClick={() => {
+                void handleBatchEnrichYoutubeEmails();
+              }}
+            >
+              {enrichingEmailBatch ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              批量补 YouTube 邮箱
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              className="h-8 gap-1.5"
+              disabled={isCollectionTaskRunning(task) || recrawlingBatch}
+              title="批量重采当前任务下可恢复的补采失败候选"
+              onClick={() => {
+                void handleRecrawlFailedCandidates();
+              }}
+            >
+              {recrawlingBatch ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              批量重采失败候选
+            </Button>
             <Button
               size="sm"
               variant="outline"
@@ -588,6 +735,7 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
 
         <div className="min-h-0 flex-1 overflow-auto px-4 py-2">
           {exportError ? <p className="py-2 text-sm text-destructive">{exportError}</p> : null}
+          {recrawlError ? <p className="py-2 text-sm text-destructive">{recrawlError}</p> : null}
           {statsMismatch ? (
             <p className="mb-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
               {statsMismatch}
@@ -809,8 +957,39 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
                           >
                             <Copy className="h-3.5 w-3.5" />
                           </Button>
-                          <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" disabled title="后续支持">
-                            重采
+                          {canEnrichYoutubeEmail(c) ? (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 px-2 text-xs"
+                              disabled={enrichingEmailCandidateId === c.id}
+                              title="调用 YouTube 邮箱 Actor 补采该候选邮箱"
+                              onClick={() => {
+                                void handleEnrichYoutubeEmail(c);
+                              }}
+                            >
+                              {enrichingEmailCandidateId === c.id ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                "补邮箱"
+                              )}
+                            </Button>
+                          ) : null}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 px-2 text-xs"
+                            disabled={!canRecrawlCandidate(c) || recrawlingCandidateId === c.id}
+                            title={canRecrawlCandidate(c) ? "重新拉取主页详情" : "该候选不适合自动重采"}
+                            onClick={() => {
+                              void handleRecrawlCandidate(c);
+                            }}
+                          >
+                            {recrawlingCandidateId === c.id ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              "重采"
+                            )}
                           </Button>
                         </div>
                       </td>

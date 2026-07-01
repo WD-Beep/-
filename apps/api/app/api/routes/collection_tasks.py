@@ -4,6 +4,7 @@ from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -22,7 +23,14 @@ from app.schemas.collection_task import (
     CollectionTaskBulkRunResult,
     CollectionTaskDeleteResult,
     CollectionTaskCandidateFilter,
+    CollectionTaskCandidateBatchRecrawlRequest,
+    CollectionTaskCandidateBatchRecrawlResult,
+    CollectionTaskCandidateBatchEmailEnrichmentRequest,
+    CollectionTaskCandidateBatchEmailEnrichmentResult,
+    CollectionTaskCandidateEmailEnrichmentResult,
     CollectionTaskCandidateRead,
+    CollectionTaskCandidateRecrawlRequest,
+    CollectionTaskCandidateRecrawlResult,
     CollectionTaskCreate,
     CollectionTaskFilter,
     CollectionTaskRead,
@@ -32,7 +40,10 @@ from app.schemas.collection_task import (
 )
 from app.schemas.common import PaginatedResponse
 from app.services.export import build_collection_task_candidates_excel
+from app.models.collection_task_candidate import CollectionTaskCandidate
 from app.services.task_candidate import TaskCandidateService
+from app.services.task_candidate_recrawl import TaskCandidateRecrawlService
+from app.services.youtube_email_enrichment import YouTubeEmailEnrichmentService
 from app.services.task_retention import task_has_retention_traces
 from app.schemas.scheduler import SchedulerRefreshResponse
 from app.scheduler import refresh_scheduler
@@ -310,6 +321,139 @@ async def list_collection_task_candidates(
         page=result.page,
         page_size=result.page_size,
         pages=result.pages,
+    )
+
+
+@router.post(
+    "/{task_id}/candidates/recrawl",
+    response_model=CollectionTaskCandidateRecrawlResult,
+)
+async def recrawl_collection_task_candidate_by_profile(
+    task_id: int,
+    data: CollectionTaskCandidateRecrawlRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> CollectionTaskCandidateRecrawlResult:
+    task = ensure_task_access(await CollectionTaskService.get_task_including_archived(db, task_id), ctx)
+    candidate_id = data.candidate_id
+    if candidate_id is None:
+        if not data.profile_url:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="candidate_id or profile_url is required")
+        result = await db.execute(
+            select(CollectionTaskCandidate.id).where(
+                CollectionTaskCandidate.task_id == task.id,
+                CollectionTaskCandidate.profile_url == data.profile_url,
+            )
+        )
+        candidate_id = result.scalar_one_or_none()
+        if candidate_id is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="candidate_not_found")
+    try:
+        result = await TaskCandidateRecrawlService.recrawl_candidate(
+            db,
+            candidate_id,
+            task_id=task.id,
+            profile_url=data.profile_url,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return CollectionTaskCandidateRecrawlResult(**result.__dict__)
+
+
+@router.post(
+    "/{task_id}/candidates/{candidate_id}/recrawl",
+    response_model=CollectionTaskCandidateRecrawlResult,
+)
+async def recrawl_collection_task_candidate(
+    task_id: int,
+    candidate_id: int,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> CollectionTaskCandidateRecrawlResult:
+    task = ensure_task_access(await CollectionTaskService.get_task_including_archived(db, task_id), ctx)
+    try:
+        result = await TaskCandidateRecrawlService.recrawl_candidate(db, candidate_id, task_id=task.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return CollectionTaskCandidateRecrawlResult(**result.__dict__)
+
+
+@router.post(
+    "/{task_id}/candidates/recrawl-failed",
+    response_model=CollectionTaskCandidateBatchRecrawlResult,
+)
+async def recrawl_collection_task_failed_candidates(
+    task_id: int,
+    data: CollectionTaskCandidateBatchRecrawlRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> CollectionTaskCandidateBatchRecrawlResult:
+    task = ensure_task_access(await CollectionTaskService.get_task_including_archived(db, task_id), ctx)
+    payload = data or CollectionTaskCandidateBatchRecrawlRequest()
+    try:
+        result = await TaskCandidateRecrawlService.recrawl_failed_candidates_for_task(
+            db,
+            task.id,
+            concurrency=payload.concurrency,
+            limit=payload.limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return CollectionTaskCandidateBatchRecrawlResult(
+        task_id=result.task_id,
+        attempted=result.attempted,
+        succeeded=result.succeeded,
+        failed=result.failed,
+        skipped=result.skipped,
+        items=[CollectionTaskCandidateRecrawlResult(**item.__dict__) for item in result.items],
+    )
+
+
+@router.post(
+    "/{task_id}/candidates/{candidate_id}/enrich-youtube-email",
+    response_model=CollectionTaskCandidateEmailEnrichmentResult,
+)
+async def enrich_collection_task_candidate_youtube_email(
+    task_id: int,
+    candidate_id: int,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> CollectionTaskCandidateEmailEnrichmentResult:
+    task = ensure_task_access(await CollectionTaskService.get_task_including_archived(db, task_id), ctx)
+    try:
+        result = await YouTubeEmailEnrichmentService.enrich_candidate(db, candidate_id, task_id=task.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return CollectionTaskCandidateEmailEnrichmentResult(**result.__dict__)
+
+
+@router.post(
+    "/{task_id}/candidates/enrich-youtube-emails",
+    response_model=CollectionTaskCandidateBatchEmailEnrichmentResult,
+)
+async def enrich_collection_task_candidates_youtube_emails(
+    task_id: int,
+    data: CollectionTaskCandidateBatchEmailEnrichmentRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> CollectionTaskCandidateBatchEmailEnrichmentResult:
+    task = ensure_task_access(await CollectionTaskService.get_task_including_archived(db, task_id), ctx)
+    payload = data or CollectionTaskCandidateBatchEmailEnrichmentRequest()
+    try:
+        result = await YouTubeEmailEnrichmentService.enrich_missing_for_task(
+            db,
+            task.id,
+            limit=payload.limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return CollectionTaskCandidateBatchEmailEnrichmentResult(
+        task_id=result.task_id,
+        attempted=result.attempted,
+        succeeded=result.succeeded,
+        failed=result.failed,
+        skipped=result.skipped,
+        items=[CollectionTaskCandidateEmailEnrichmentResult(**item.__dict__) for item in result.items],
     )
 
 

@@ -330,7 +330,9 @@ def build_searchable_text(data: CollectedInfluencer) -> str:
 
 def discovery_hard_min_followers(task: CollectionTask) -> int:
     """Instagram 统一流水线：硬性最低粉丝 = max(用户填写, 30000)。"""
-    return max(task.min_followers_count or 0, DISCOVERY_HARD_MIN_FOLLOWERS)
+    if task.min_followers_count is not None:
+        return task.min_followers_count
+    return DISCOVERY_HARD_MIN_FOLLOWERS
 
 
 def uses_discovery_hard_min_followers(task: CollectionTask) -> bool:
@@ -421,8 +423,7 @@ def hard_filter_failure_detail(reason: str | None, *, platform: str | None = Non
     if reason == "below_min_followers":
 
         return (
-            f"粉丝数未达到真实发现链路最低要求（需 ≥{DISCOVERY_HARD_MIN_FOLLOWERS}，"
-            "或任务设置的更高门槛）"
+            "粉丝数未达到真实发现链路最低要求（按任务设置的最低粉丝门槛过滤）"
         )
 
     return reason

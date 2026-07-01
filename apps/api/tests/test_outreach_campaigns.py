@@ -1,4 +1,4 @@
-﻿"""Outreach campaign creation, preview, queueing, sending, and safety tests."""
+"""Outreach campaign creation, preview, queueing, sending, and safety tests."""
 
 from __future__ import annotations
 
@@ -65,12 +65,12 @@ async def _create_influencer(
     follow_status: str | None = None,
 ) -> ProductInfluencer:
     run_at = datetime.now(UTC)
-    uname = f"camp_{suffix}"
+    uname = f"creator_{suffix}"
     item = CollectedInfluencer(
         platform="instagram",
         username=uname,
         profile_url=f"https://instagram.com/{uname}",
-        platform_unique_id=f"ig_camp_{suffix}",
+        platform_unique_id=f"ig_creator_{suffix}",
         followers_count=15000,
         engagement_rate=2.5,
         bio="travel",
@@ -293,7 +293,7 @@ async def test_preview_skips_sent_unless_allow_resend():
         preview1 = await _preview_with_mock(
             db, product_id=1, campaign_id=campaign_no_resend.id
         )
-        assert preview1.items[0].skip_reason == "宸叉湁鎴愬姛鍙戜俊璁板綍"
+        assert preview1.items[0].skip_reason == "已有成功发信记录"
 
         campaign_resend = await _create_campaign(
             db, ctx=ctx, influencer_ids=[influencer.id], allow_resend=True
@@ -321,7 +321,7 @@ async def test_queue_requires_preview_and_valid_recipients():
                 campaign_id=campaign.id,
                 payload=OutreachCampaignQueueRequest(confirm=True),
             )
-        assert "璇峰厛鐢熸垚涓€у寲閭欢鑽夌" in str(exc.value.detail)
+        assert "请先生成个性化邮件草稿" in str(exc.value.detail)
 
         await _preview_with_mock(db, product_id=1, campaign_id=campaign.id)
         result = await _queue_confirmed(db, ctx=ctx, campaign_id=campaign.id)
@@ -358,7 +358,7 @@ async def test_queue_skips_whitespace_only_subject_or_body():
         assert result.skipped == 1
 
         await db.refresh(rec)
-        assert rec.skip_reason == "閭欢鏍囬鎴栨鏂囦负绌猴紝鏃犳硶鍏ラ槦"
+        assert rec.skip_reason == "邮件标题或正文为空，无法入队"
         assert rec.queue_item_id is None
 
         queue_count = await db.scalar(
@@ -760,7 +760,7 @@ async def test_preview_shows_no_knowledge_message():
         campaign = await _create_campaign(db, ctx=ctx, influencer_ids=[influencer.id])
 
         gen = _mock_generation()
-        gen.reason = "鍩轰簬璇濇湳妯℃澘"
+        gen.reason = "基于话术模板"
         with patch(
             "app.services.outreach_campaign_service.SpeechRecommendationService.generate_outreach_email",
             new=AsyncMock(return_value=gen),
@@ -768,7 +768,7 @@ async def test_preview_shows_no_knowledge_message():
             preview = await OutreachCampaignService.preview_campaign(
                 db, product_id=1, campaign_id=campaign.id
             )
-        assert "鏈紩鐢ㄧ煡璇嗗簱" in preview.items[0].reason
+        assert "未引用知识库" in preview.items[0].reason
 
 
 @pytest.mark.asyncio
@@ -900,7 +900,7 @@ async def test_preview_single_ai_failure_does_not_500():
         by_id = {item.influencer_id: item for item in preview.items}
         assert by_id[ok.id].can_queue is True
         assert by_id[bad.id].can_queue is False
-        assert "鐢熸垚澶辫触" in (by_id[bad.id].skip_reason or "")
+        assert "生成失败" in (by_id[bad.id].skip_reason or "")
 
 
 @pytest.mark.asyncio
@@ -908,12 +908,12 @@ async def test_list_campaigns_includes_real_draft_queue_and_reply_stats():
     suffix = _suffix()
     async with async_session_factory() as db:
         first = await _create_influencer(
-            db, suffix=f"stats_a_{suffix}", email=f"stats_a_{suffix}@example.com"
+            db, suffix=f"stats_a_{suffix}", email=f"stats_a_{suffix}@creator-mail.net"
         )
         second = await _create_influencer(
             db,
             suffix=f"stats_b_{suffix}",
-            email=f"stats_b_{suffix}@example.com",
+            email=f"stats_b_{suffix}@creator-mail.net",
         )
         skipped = await _create_influencer(db, suffix=f"stats_skip_{suffix}", email=None)
         await db.commit()
@@ -952,7 +952,7 @@ async def test_list_campaigns_includes_real_draft_queue_and_reply_stats():
                 product_id=1,
                 product_influencer_id=second.id,
                 campaign_id=campaign.id,
-                from_address=f"stats_b_{suffix}@example.com",
+                from_address=f"stats_b_{suffix}@creator-mail.net",
                 to_address="sales@example.com",
                 subject="Re: Subject for second",
                 body="Interested in collaboration",
@@ -985,14 +985,14 @@ async def test_campaign_reply_board_lists_replied_unreplied_failed_and_skipped_r
         replied = await _create_influencer(
             db,
             suffix=f"reply_{suffix}",
-            email=f"reply_{suffix}@example.com",
+            email=f"reply_{suffix}@creator-mail.net",
             follow_status="interested",
         )
         unreplied = await _create_influencer(
-            db, suffix=f"unreply_{suffix}", email=f"unreply_{suffix}@example.com"
+            db, suffix=f"unreply_{suffix}", email=f"unreply_{suffix}@creator-mail.net"
         )
         failed = await _create_influencer(
-            db, suffix=f"fail_{suffix}", email=f"fail_{suffix}@example.com"
+            db, suffix=f"fail_{suffix}", email=f"fail_{suffix}@creator-mail.net"
         )
         skipped = await _create_influencer(db, suffix=f"skip_{suffix}", email=None)
         await db.commit()
@@ -1028,12 +1028,12 @@ async def test_campaign_reply_board_lists_replied_unreplied_failed_and_skipped_r
                 product_id=1,
                 product_influencer_id=replied.id,
                 campaign_id=campaign.id,
-                from_address=f"reply_{suffix}@example.com",
+                from_address=f"reply_{suffix}@creator-mail.net",
                 to_address="sales@example.com",
                 subject="Re: Hello",
                 body="Yes, interested",
                 snippet="Yes, interested",
-                match_method="message_id",
+                match_method="message_header",
                 source="webhook",
                 received_at=datetime.now(UTC),
             )
@@ -1050,14 +1050,14 @@ async def test_campaign_reply_board_lists_replied_unreplied_failed_and_skipped_r
         assert board.unreplied_count == 2
         by_id = {item.influencer_id: item for item in board.items}
         assert by_id[replied.id].reply_status == "interested"
-        assert by_id[replied.id].match_method == "message_id"
+        assert by_id[replied.id].match_method == "message_header"
         assert by_id[replied.id].reply_snippet == "Yes, interested"
         assert by_id[unreplied.id].reply_status == "unreplied"
         assert by_id[unreplied.id].send_status == "sent"
         assert by_id[failed.id].reply_status == "unreplied"
         assert by_id[failed.id].send_status == "failed"
         assert by_id[skipped.id].reply_status == "skipped"
-        assert by_id[skipped.id].skip_reason == "缂哄皯閭"
+        assert by_id[skipped.id].skip_reason == "缺少邮箱"
 
 
 @pytest.mark.asyncio
@@ -1565,7 +1565,7 @@ async def test_generate_and_send_campaign_one_click_generates_queues_and_sends_u
 async def test_one_click_workbench_summary_uses_real_campaign_queue_and_reply_tables():
     suffix = _suffix()
     async with async_session_factory() as db:
-        sent = await _create_influencer(db, suffix=f"wb_sent_{suffix}", email=f"wb_sent_{suffix}@example.com")
+        sent = await _create_influencer(db, suffix=f"wb_sent_{suffix}", email=f"wb_sent_{suffix}@creator-mail.net")
         missing = await _create_influencer(db, suffix=f"wb_missing_{suffix}", email=None)
         await db.commit()
         ctx = TenantContext(user_id=1, workspace_id=1, product_id=1, is_admin=True)
@@ -1604,9 +1604,9 @@ async def test_one_click_workbench_summary_uses_real_campaign_queue_and_reply_ta
                 campaign_id=campaign.id,
                 message_id=f"reply-message-{suffix}",
                 in_reply_to=f"outbound-message-{suffix}",
-                match_method="message_id",
+                match_method="message_header",
                 source="imap",
-                from_address=f"wb_sent_{suffix}@example.com",
+                from_address=f"wb_sent_{suffix}@creator-mail.net",
                 to_address="sales@example.com",
                 subject="Re: Workbench subject",
                 body="I am interested",
@@ -1629,6 +1629,7 @@ async def test_one_click_workbench_summary_uses_real_campaign_queue_and_reply_ta
         reasons = {item.influencer_id: item.reason for item in summary.latest_results.items}
         assert statuses[sent.id] == "sent"
         assert statuses[missing.id] == "skipped"
-        assert reasons[missing.id] == "缂哄皯閭"
+        assert reasons[missing.id] == "缺少邮箱"
         assert summary.reply_followup.reply_count == 1
-        assert summary.reply_followup.items[0].match_method == "message_id"
+        reply_items = {item.influencer_id: item for item in summary.reply_followup.items}
+        assert reply_items[sent.id].match_method == "message_header"

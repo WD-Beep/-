@@ -163,7 +163,9 @@ def _platform_timeout_seconds(platform: str, *, competitor_mode: bool) -> int | 
     if competitor_mode:
         return max(30, settings.competitor_product_platform_timeout_seconds)
     if platform == "youtube":
-        return max(30, settings.youtube_discovery_max_duration_seconds)
+        provider_deadline = max(30, settings.youtube_discovery_max_duration_seconds)
+        provider_grace = max(30, settings.youtube_discovery_keyword_timeout_seconds)
+        return provider_deadline + provider_grace
     if platform == "facebook":
         return max(30, settings.facebook_discovery_max_duration_seconds)
     if platform == "tiktok":

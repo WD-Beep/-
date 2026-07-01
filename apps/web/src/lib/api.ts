@@ -655,6 +655,38 @@ export type CollectionTaskCandidateQuery = {
   page_size?: number;
 };
 
+export type CollectionTaskCandidateRecrawlResult = {
+  candidate_id: number;
+  task_id: number;
+  status: string;
+  attempted: boolean;
+  message: string | null;
+  global_influencer_id: number | null;
+  product_influencer_id: number | null;
+};
+
+export type CollectionTaskCandidateBatchRecrawlResult = {
+  task_id: number;
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  items: CollectionTaskCandidateRecrawlResult[];
+};
+
+export type CollectionTaskCandidateEmailEnrichmentResult = CollectionTaskCandidateRecrawlResult & {
+  email: string | null;
+};
+
+export type CollectionTaskCandidateBatchEmailEnrichmentResult = {
+  task_id: number;
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  items: CollectionTaskCandidateEmailEnrichmentResult[];
+};
+
 export type EmailSendResult = {
   success: boolean;
   message: string;
@@ -733,6 +765,7 @@ export type EmailReply = {
   message_id: string | null;
   in_reply_to: string | null;
   match_method: string | null;
+  match_confidence?: string | null;
   processing_status: "unprocessed" | "processed" | string;
   intent_status: "unprocessed" | "interested" | "follow_up" | "not_interested" | "processed" | "unmatched" | string;
   source: string;
@@ -741,6 +774,7 @@ export type EmailReply = {
   subject: string;
   body: string | null;
   snippet: string | null;
+  raw_headers?: Record<string, unknown> | null;
   received_at: string;
   handled_at: string | null;
   manual_note: string | null;
@@ -761,6 +795,25 @@ export type EmailReplyBulkDeleteResult = {
   deleted_count: number;
   deleted_ids: number[];
   missing_ids: number[];
+};
+
+export type EmailReplySendResponsePayload = {
+  body: string;
+  subject?: string | null;
+  use_ai_draft?: boolean;
+  mark_processed?: boolean;
+};
+
+export type EmailReplySendResponseResult = {
+  sent: boolean;
+  message_id: string | null;
+  reply_id: number;
+  product_influencer_id: number | null;
+  campaign_id: number | null;
+  sent_at: string | null;
+  delivery_provider: string | null;
+  warning?: string | null;
+  error?: string | null;
 };
 
 export type SmtpStatus = {
@@ -1362,6 +1415,74 @@ export async function fetchCollectionTaskCandidates(
   return response.json();
 }
 
+export async function recrawlCollectionTaskCandidate(
+  taskId: number,
+  candidateId: number,
+): Promise<CollectionTaskCandidateRecrawlResult> {
+  const response = await apiFetch(
+    `${API_URL}/api/collection-tasks/${taskId}/candidates/${candidateId}/recrawl`,
+    { method: "POST" },
+    { timeoutMs: PREVIEW_FETCH_TIMEOUT_MS },
+  );
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function recrawlCollectionTaskFailedCandidates(
+  taskId: number,
+  payload: { concurrency?: number; limit?: number } = {},
+): Promise<CollectionTaskCandidateBatchRecrawlResult> {
+  const response = await apiFetch(
+    `${API_URL}/api/collection-tasks/${taskId}/candidates/recrawl-failed`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: PREVIEW_FETCH_TIMEOUT_MS },
+  );
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function enrichYoutubeCandidateEmail(
+  taskId: number,
+  candidateId: number,
+): Promise<CollectionTaskCandidateEmailEnrichmentResult> {
+  const response = await apiFetch(
+    `${API_URL}/api/collection-tasks/${taskId}/candidates/${candidateId}/enrich-youtube-email`,
+    { method: "POST" },
+    { timeoutMs: PREVIEW_FETCH_TIMEOUT_MS },
+  );
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function enrichYoutubeCandidateEmails(
+  taskId: number,
+  payload: { limit?: number } = {},
+): Promise<CollectionTaskCandidateBatchEmailEnrichmentResult> {
+  const response = await apiFetch(
+    `${API_URL}/api/collection-tasks/${taskId}/candidates/enrich-youtube-emails`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: PREVIEW_FETCH_TIMEOUT_MS },
+  );
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
 export type CollectionTaskDeleteResult = {
   action: "deleted" | "archived";
   task_id: number;
@@ -1682,6 +1803,21 @@ export async function updateEmailReply(
 ): Promise<EmailReply> {
   const response = await apiFetch(`${API_URL}/api/email-inbound/replies/${replyId}`, {
     method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function sendEmailReplyResponse(
+  replyId: number,
+  payload: EmailReplySendResponsePayload,
+): Promise<EmailReplySendResponseResult> {
+  const response = await apiFetch(`${API_URL}/api/email-replies/${replyId}/send-response`, {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });

@@ -190,6 +190,89 @@ def _profile_from_pages_item(item: dict, *, input_url: str) -> PlatformCandidate
     )
 
 
+def _is_facebook_reel_url(url: str | None) -> bool:
+    text = (url or "").lower()
+    return "facebook.com" in text and ("/reel/" in text or "/reels/" in text)
+
+
+def _is_facebook_post_url(url: str | None) -> bool:
+    text = (url or "").lower()
+    if "facebook.com" not in text:
+        return False
+    return any(marker in text for marker in ("/posts/", "/videos/", "/watch/", "story_fbid=", "/permalink/"))
+
+
+def _profile_from_content_item(
+    item: dict,
+    *,
+    input_url: str,
+    actor_id: str,
+    discovery_type: str,
+) -> PlatformCandidateProfile | None:
+    author = item.get("author") if isinstance(item.get("author"), dict) else {}
+    page = item.get("page") if isinstance(item.get("page"), dict) else {}
+    owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+    source = author or page or owner
+
+    url = (
+        item.get("pageUrl")
+        or item.get("facebookUrl")
+        or item.get("authorUrl")
+        or source.get("url")
+        or source.get("profileUrl")
+        or source.get("facebookUrl")
+        or ""
+    )
+    if isinstance(url, str):
+        url = url.strip()
+    if not url or not _is_supported_page_url(url):
+        return None
+
+    username = (
+        _username_from_page_url(url)
+        or str(source.get("username") or source.get("name") or source.get("id") or "").strip()
+    )
+    if not username:
+        return None
+
+    followers = (
+        _count_value(source.get("followers"))
+        or _count_value(item.get("followers"))
+        or _count_value(source.get("likes"))
+    )
+    caption = item.get("text") or item.get("caption") or item.get("message") or item.get("description")
+    post_url = item.get("url") or item.get("postUrl") or item.get("facebookUrl") or input_url
+
+    return PlatformCandidateProfile(
+        platform="facebook",
+        username=username,
+        profile_url=url,
+        display_name=source.get("name") or source.get("title") or item.get("pageName"),
+        avatar_url=source.get("profilePicUrl") or source.get("profilePictureUrl") or source.get("avatar"),
+        bio=source.get("description") or source.get("about"),
+        followers_count=followers,
+        website=source.get("website") if isinstance(source.get("website"), str) else None,
+        email=source.get("email") if isinstance(source.get("email"), str) else None,
+        recent_post_titles=[caption] if isinstance(caption, str) and caption else [],
+        recent_post_urls=[post_url] if isinstance(post_url, str) and post_url else [],
+        source_url=post_url if isinstance(post_url, str) else input_url,
+        source_post_url=post_url if isinstance(post_url, str) else input_url,
+        source_input_url=input_url,
+        source_caption=caption if isinstance(caption, str) else None,
+        source_type="input_url",
+        source_discovery_type=discovery_type,
+        source_meta={
+            "provider": "apify",
+            "actor": actor_id,
+            "input_url": input_url,
+            "source_post_url": post_url if isinstance(post_url, str) else input_url,
+            "source_caption": caption if isinstance(caption, str) else None,
+            "post_id": item.get("postId") or item.get("id"),
+            "page_id": source.get("id") or item.get("pageId"),
+        },
+    )
+
+
 def _merge_profile_details(
     base: PlatformCandidateProfile,
     detail: PlatformCandidateProfile,
@@ -236,6 +319,9 @@ class FacebookApifyProvider:
                 endpoints=[
                     settings.apify_facebook_search_actor_id,
                     settings.apify_facebook_pages_actor_id,
+                    settings.apify_facebook_posts_actor_id,
+                    settings.apify_facebook_comments_actor_id,
+                    settings.apify_facebook_reels_actor_id,
                 ],
             )
         return PlatformCapability(
@@ -246,6 +332,9 @@ class FacebookApifyProvider:
             endpoints=[
                 settings.apify_facebook_search_actor_id,
                 settings.apify_facebook_pages_actor_id,
+                settings.apify_facebook_posts_actor_id,
+                settings.apify_facebook_comments_actor_id,
+                settings.apify_facebook_reels_actor_id,
             ],
         )
 
@@ -347,7 +436,7 @@ class FacebookApifyProvider:
                         timeout=apify_timeout,
                         max_retries=settings.apify_facebook_max_retries,
                     ),
-                    timeout=keyword_timeout + 5,
+                    timeout=keyword_timeout,
                 )
             except asyncio.TimeoutError:
                 local_slow = True
@@ -461,13 +550,20 @@ class FacebookApifyProvider:
             if provider_unavailable_state:
                 break
 
-        if input_urls:
+        page_input_urls = [
+            url for url in input_urls if not _is_facebook_reel_url(url) and not _is_facebook_post_url(url)
+        ]
+        content_input_urls = [
+            url for url in input_urls if _is_facebook_reel_url(url) or _is_facebook_post_url(url)
+        ]
+
+        if page_input_urls:
             started = time.perf_counter()
             try:
                 items = await asyncio.wait_for(
                     run_actor_sync(
                         settings.apify_facebook_pages_actor_id,
-                        {"startUrls": [{"url": url} for url in input_urls[:limit]]},
+                        {"startUrls": [{"url": url} for url in page_input_urls[:limit]]},
                         timeout=apify_timeout,
                         max_retries=settings.apify_facebook_max_retries,
                     ),
@@ -478,7 +574,7 @@ class FacebookApifyProvider:
                     for item in items
                     if isinstance(item, dict)
                 }
-                for url in input_urls:
+                for url in page_input_urls:
                     item = by_url.get(url.lower().rstrip("/"))
                     if not isinstance(item, dict):
                         for key, candidate in by_url.items():
@@ -516,6 +612,43 @@ class FacebookApifyProvider:
                     }
                     _append_error(errors, "actor-memory-limit-exceeded: Apify 内存额度已满/并发 actor 过多")
                 _append_error(errors, f"Facebook Page URL 导入: {detail}")
+
+        if content_input_urls:
+            for url in content_input_urls[:limit]:
+                actor_id = settings.apify_facebook_reels_actor_id if _is_facebook_reel_url(url) else settings.apify_facebook_posts_actor_id
+                discovery_type = "reel_author" if _is_facebook_reel_url(url) else "post_author"
+                try:
+                    items = await asyncio.wait_for(
+                        run_actor_sync(
+                            actor_id,
+                            {"startUrls": [{"url": url}], "maxItems": 1, "resultsLimit": 1},
+                            timeout=apify_timeout,
+                            max_retries=settings.apify_facebook_max_retries,
+                        ),
+                        timeout=keyword_timeout + 5,
+                    )
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        profile = _profile_from_content_item(
+                            item,
+                            input_url=url,
+                            actor_id=actor_id,
+                            discovery_type=discovery_type,
+                        )
+                        if profile:
+                            profiles.append(profile)
+                    profiles = dedupe_profiles(profiles)
+                except asyncio.TimeoutError:
+                    slow_api = True
+                    _append_error(errors, f"Facebook Apify content URL import timeout: {url}")
+                except ApifyError as exc:
+                    detail = str(exc).strip() or "Apify request failed"
+                    if _is_timeout_error(detail):
+                        slow_api = True
+                    if "(429)" in detail or "429" in detail:
+                        rate_limit_count += 1
+                    _append_error(errors, f"Facebook content URL import {url}: {detail}")
 
         deduped = dedupe_profiles(profiles)[:limit]
         hydration_targets = [profile for profile in deduped if _needs_profile_hydration(profile)]
@@ -668,7 +801,12 @@ class FacebookApifyProvider:
         from app.services.collect_errors import filter_fatal_discovery_errors
 
         fatal_errors = filter_fatal_discovery_errors(errors)
-        api_calls = keywords_completed + len(hydration_targets) + (1 if input_urls else 0)
+        api_calls = (
+            keywords_completed
+            + len(hydration_targets)
+            + (1 if page_input_urls else 0)
+            + len(content_input_urls[:limit])
+        )
         empty_success = not deduped and not items and not fatal_errors
         return PlatformDiscoveryResult(
             platform="facebook",

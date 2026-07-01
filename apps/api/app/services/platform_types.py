@@ -180,6 +180,8 @@ class PlatformCandidateProfile:
     source_url: str | None = None
     source_post_url: str | None = None
     source_input_url: str | None = None
+    source_caption: str | None = None
+    source_hashtag: str | None = None
     source_type: str | None = None
     source_discovery_type: str | None = None
     source_meta: dict[str, Any] = field(default_factory=dict)

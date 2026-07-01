@@ -61,6 +61,7 @@ class EmailReplyRead(ORMModel):
     subject: str
     body: str | None
     snippet: str | None
+    raw_headers: dict | None = None
     received_at: datetime
     handled_at: datetime | None = None
     manual_note: str | None = None
@@ -75,6 +76,25 @@ class EmailReplyUpdateRequest(BaseModel):
     )
     processing_status: str | None = Field(default=None, pattern="^(unprocessed|processed)$")
     manual_note: str | None = Field(default=None, max_length=2000)
+
+
+class EmailReplySendResponseRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=20000)
+    subject: str | None = Field(default=None, max_length=500)
+    use_ai_draft: bool = False
+    mark_processed: bool = True
+
+
+class EmailReplySendResponseResult(BaseModel):
+    sent: bool
+    message_id: str | None = None
+    reply_id: int
+    product_influencer_id: int | None = None
+    campaign_id: int | None = None
+    sent_at: datetime | None = None
+    delivery_provider: str | None = None
+    warning: str | None = None
+    error: str | None = None
 
 
 class EmailReplyBulkDeleteRequest(BaseModel):
@@ -100,6 +120,7 @@ class EmailReplyIngestResult(BaseModel):
     email_log_id: int | None = None
     campaign_id: int | None = None
     match_method: str | None = None
+    match_confidence: str | None = None
     follow_status: str | None = None
     message: str
 

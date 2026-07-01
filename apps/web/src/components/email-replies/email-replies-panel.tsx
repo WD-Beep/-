@@ -16,6 +16,7 @@ import {
   fetchInfluencers,
   fetchOutreachCampaigns,
   pollImapInbox,
+  sendEmailReplyResponse,
   updateEmailReply,
   type EmailReply,
   type Influencer,
@@ -25,9 +26,13 @@ import {
   filterEmailRepliesForCenter,
   getSelectableReplyIds,
   getEmailReplyIntentLabel,
+  getEmailReplyInfluencerDisplay,
+  getEmailReplyMatchCandidates,
+  buildEmailReplyResponseDraft,
   getEmailReplyProcessingLabel,
   type EmailReplyCenterView,
 } from "@/lib/email-reply-helpers";
+import { ALL_PRODUCTS_ID } from "@/lib/product-context";
 
 const PAGE_SIZE = 100;
 
@@ -55,8 +60,20 @@ function influencerLabel(influencer: Influencer): string {
   return `${influencer.display_name || influencer.username || influencer.id} · ${influencer.final_email || influencer.business_email || influencer.public_email || influencer.email || "无邮箱"}`;
 }
 
+function candidateLabel(candidate: { display_name?: string | null; username?: string | null; email?: string | null }): string {
+  const name = candidate.display_name || candidate.username || "疑似红人";
+  return candidate.email ? `${name} · ${candidate.email}` : name;
+}
+
+function isGenericReplyAddress(value: string | null | undefined): boolean {
+  const email = (value || "").toLowerCase().trim();
+  const local = email.split("@", 1)[0];
+  return ["support", "contact", "hello", "info", "service", "noreply", "no-reply"].includes(local);
+}
+
 export function EmailRepliesPanel() {
   const productId = useActiveProductId();
+  const requiresProduct = productId === ALL_PRODUCTS_ID;
   const searchParams = useSearchParams();
   const initialCampaignId = Number(searchParams.get("campaign_id"));
   const [replies, setReplies] = useState<EmailReply[]>([]);
@@ -69,8 +86,11 @@ export function EmailRepliesPanel() {
   const [expanded, setExpanded] = useState<EmailReply | null>(null);
   const [selectedInfluencerId, setSelectedInfluencerId] = useState("");
   const [selectedCampaignId, setSelectedCampaignId] = useState("");
+  const [responseBody, setResponseBody] = useState("");
+  const [responseDraftGenerated, setResponseDraftGenerated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [actionId, setActionId] = useState<number | null>(null);
+  const [sendingResponse, setSendingResponse] = useState(false);
   const [polling, setPolling] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [selectedReplyIds, setSelectedReplyIds] = useState<Set<number>>(() => new Set());
@@ -78,6 +98,14 @@ export function EmailRepliesPanel() {
   const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    if (requiresProduct) {
+      setReplies([]);
+      setInfluencers([]);
+      setCampaigns([]);
+      setSelectedReplyIds(new Set());
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -95,13 +123,9 @@ export function EmailRepliesPanel() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [requiresProduct]);
 
   useEffect(() => {
-    if (productId === null) {
-      queueMicrotask(() => setLoading(false));
-      return;
-    }
     queueMicrotask(() => {
       void load();
     });
@@ -131,6 +155,10 @@ export function EmailRepliesPanel() {
     visibleReplyIds.length > 0 && selectedVisibleIds.length === visibleReplyIds.length;
 
   async function handlePoll() {
+    if (requiresProduct) {
+      setError("请先选择具体产品后再收取红人回复");
+      return;
+    }
     setPolling(true);
     setError(null);
     setNotice(null);
@@ -178,6 +206,65 @@ export function EmailRepliesPanel() {
     });
   }
 
+  function openReplyDetail(reply: EmailReply) {
+    setExpanded(reply);
+    setResponseBody("");
+    setResponseDraftGenerated(false);
+  }
+
+  function openReplyComposer(reply: EmailReply) {
+    setExpanded(reply);
+    const influencer = reply.product_influencer_id ? influencerMap.get(reply.product_influencer_id) : null;
+    setResponseBody(
+      buildEmailReplyResponseDraft({
+        influencerName: influencer?.display_name || influencer?.username || null,
+        intentStatus: reply.intent_status,
+      }),
+    );
+    setResponseDraftGenerated(true);
+  }
+
+  function handleGenerateResponseDraft(reply: EmailReply) {
+    const influencer = reply.product_influencer_id ? influencerMap.get(reply.product_influencer_id) : null;
+    setResponseBody(
+      buildEmailReplyResponseDraft({
+        influencerName: influencer?.display_name || influencer?.username || null,
+        intentStatus: reply.intent_status,
+      }),
+    );
+    setResponseDraftGenerated(true);
+  }
+
+  async function handleSendResponse(reply: EmailReply) {
+    if (!responseBody.trim()) {
+      setError("请先填写回复正文");
+      return;
+    }
+    setSendingResponse(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await sendEmailReplyResponse(reply.id, {
+        body: responseBody,
+        use_ai_draft: responseDraftGenerated,
+        mark_processed: true,
+      });
+      if (!result.sent) {
+        setError(result.error || "发送回复失败");
+        return;
+      }
+      setNotice("回复已发送，邮箱服务已接受发送");
+      await load();
+      setExpanded(null);
+      setResponseBody("");
+      setResponseDraftGenerated(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "发送回复失败");
+    } finally {
+      setSendingResponse(false);
+    }
+  }
+
   function toggleReplySelection(replyId: number, checked: boolean) {
     setSelectedReplyIds((current) => {
       const next = new Set(current);
@@ -205,6 +292,10 @@ export function EmailRepliesPanel() {
   }
 
   async function handleBulkDelete() {
+    if (requiresProduct) {
+      setError("请先选择具体产品后再删除回复");
+      return;
+    }
     const ids = selectedVisibleIds;
     if (ids.length === 0) {
       setError("请先勾选要删除的回复");
@@ -234,11 +325,11 @@ export function EmailRepliesPanel() {
       description="集中查看红人邮件回复，处理未读线索和未匹配邮件。"
       actions={
         <>
-          <Button variant="outline" onClick={() => void load()} disabled={loading}>
+          <Button variant="outline" onClick={() => void load()} disabled={requiresProduct || loading}>
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
             刷新
           </Button>
-          <Button onClick={() => void handlePoll()} disabled={polling}>
+          <Button onClick={() => void handlePoll()} disabled={requiresProduct || polling}>
             {polling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Inbox className="h-4 w-4" />}
             收取未读回复
           </Button>
@@ -248,6 +339,9 @@ export function EmailRepliesPanel() {
       <div className="space-y-4">
         {error ? <ErrorAlert message={error} onRetry={() => void load()} /> : null}
         {notice ? <SuccessAlert message={notice} /> : null}
+        {requiresProduct ? (
+          <ErrorAlert message="请先在左侧选择具体产品后再查看和处理红人回复。" />
+        ) : null}
 
         <section className="ops-panel p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -268,7 +362,7 @@ export function EmailRepliesPanel() {
                 size="sm"
                 variant="destructive"
                 onClick={() => void handleBulkDelete()}
-                disabled={deleting || selectedVisibleIds.length === 0}
+                disabled={requiresProduct || deleting || selectedVisibleIds.length === 0}
               >
                 {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
                 删除已选{selectedVisibleIds.length > 0 ? ` ${selectedVisibleIds.length}` : ""}
@@ -290,7 +384,9 @@ export function EmailRepliesPanel() {
         </section>
 
         <section className="ops-panel overflow-hidden">
-          {loading ? (
+          {requiresProduct ? (
+            <EmptyState title="请选择具体产品" description="红人回复按产品隔离展示，选择产品后即可收取、查看和回复邮件。" />
+          ) : loading ? (
             <div className="flex items-center gap-2 p-6 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" /> 正在加载回复...
             </div>
@@ -321,6 +417,7 @@ export function EmailRepliesPanel() {
                   {visibleReplies.map((reply) => {
                     const influencer = reply.product_influencer_id ? influencerMap.get(reply.product_influencer_id) : null;
                     const campaign = reply.campaign_id ? campaignMap.get(reply.campaign_id) : null;
+                    const matchCandidates = getEmailReplyMatchCandidates(reply);
                     return (
                       <tr key={reply.id} className="border-b align-top last:border-0">
                         <td className="px-4 py-3">
@@ -335,13 +432,36 @@ export function EmailRepliesPanel() {
                           <div className="font-medium">
                             {influencer ? (
                               <Link className="hover:underline" href={`/influencers/${influencer.id}`}>
-                                {influencer.display_name || `@${influencer.username}`}
+                                {getEmailReplyInfluencerDisplay(reply, influencer)}
                               </Link>
+                            ) : matchCandidates.length > 0 ? (
+                              <span className="text-amber-700">疑似匹配：{candidateLabel(matchCandidates[0])}</span>
                             ) : (
-                              <span className="text-amber-700">未匹配红人</span>
+                              <span className="text-amber-700">未自动关联</span>
                             )}
                           </div>
                           <div className="mt-1 break-all text-xs text-muted-foreground">{reply.from_address}</div>
+                          {!influencer && matchCandidates.length > 0 ? (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                              {matchCandidates.slice(0, 3).map((candidate) => (
+                                <Button
+                                  key={candidate.product_influencer_id}
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={actionId === reply.id}
+                                  onClick={() =>
+                                    void patchReply(reply, {
+                                      product_influencer_id: candidate.product_influencer_id,
+                                      campaign_id: candidate.campaign_id ?? undefined,
+                                      intent_status: reply.intent_status === "unmatched" ? "unprocessed" : reply.intent_status,
+                                    })
+                                  }
+                                >
+                                  确认关联
+                                </Button>
+                              ))}
+                            </div>
+                          ) : null}
                         </td>
                         <td className="max-w-[320px] px-4 py-3">
                           <div className="font-medium">{truncate(reply.subject || "(无标题)", 90)}</div>
@@ -371,8 +491,11 @@ export function EmailRepliesPanel() {
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex flex-wrap gap-1.5">
-                            <Button size="sm" variant="outline" onClick={() => setExpanded(reply)}>
+                            <Button size="sm" variant="outline" onClick={() => openReplyDetail(reply)}>
                               查看
+                            </Button>
+                            <Button size="sm" variant="outline" onClick={() => openReplyComposer(reply)}>
+                              回复
                             </Button>
                             <Button
                               size="sm"
@@ -420,8 +543,8 @@ export function EmailRepliesPanel() {
 
       {expanded ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="max-h-[88vh] w-full max-w-3xl overflow-y-auto rounded-lg border bg-background p-5 shadow-xl">
-            <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border bg-background shadow-xl">
+            <div className="flex shrink-0 flex-wrap items-start justify-between gap-3 border-b px-6 py-4">
               <div>
                 <h2 className="text-lg font-semibold">{expanded.subject || "(无标题)"}</h2>
                 <p className="mt-1 break-all text-sm text-muted-foreground">
@@ -433,46 +556,104 @@ export function EmailRepliesPanel() {
               </Button>
             </div>
 
-            <pre className="mt-4 max-h-[360px] whitespace-pre-wrap rounded-md border bg-muted/20 p-4 text-sm leading-6">
-              {expanded.body || expanded.snippet || "没有正文内容"}
-            </pre>
-
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              <label className="space-y-1 text-sm">
-                <span className="font-medium">手动关联红人</span>
-                <select
-                  className="h-9 w-full rounded-md border bg-background px-3"
-                  value={selectedInfluencerId}
-                  onChange={(event) => setSelectedInfluencerId(event.target.value)}
-                >
-                  <option value="">选择红人</option>
-                  {influencers.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {influencerLabel(item)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="space-y-1 text-sm">
-                <span className="font-medium">手动关联活动</span>
-                <select
-                  className="h-9 w-full rounded-md border bg-background px-3"
-                  value={selectedCampaignId}
-                  onChange={(event) => setSelectedCampaignId(event.target.value)}
-                >
-                  <option value="">不关联活动</option>
-                  {campaigns.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+            <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+              <pre className="max-h-[52vh] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/20 p-4 text-sm leading-6">
+                {expanded.body || expanded.snippet || "没有正文内容"}
+              </pre>
+              <div className="mt-4 space-y-3 rounded-md border bg-muted/10 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-semibold">回复红人</h3>
+                    <p className="mt-1 break-all text-xs text-muted-foreground">
+                      {expanded.product_influencer_id
+                        ? getEmailReplyInfluencerDisplay(expanded, influencerMap.get(expanded.product_influencer_id))
+                        : "当前未自动关联红人，建议先关联后发送。"}
+                      {" · "}
+                      {expanded.from_address}
+                      {expanded.campaign_id && campaignMap.get(expanded.campaign_id)
+                        ? ` · ${campaignMap.get(expanded.campaign_id)?.name}`
+                        : ""}
+                    </p>
+                  </div>
+                  {isGenericReplyAddress(expanded.from_address) ? (
+                    <Badge variant="warning">这是通用邮箱，请确认对方身份</Badge>
+                  ) : null}
+                </div>
+                {!expanded.product_influencer_id ? (
+                  <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    当前未自动关联红人，建议先关联后发送。unmatched_reply_identity_warning
+                  </div>
+                ) : null}
+                <textarea
+                  className="min-h-36 w-full resize-y rounded-md border bg-background p-3 text-sm leading-6"
+                  value={responseBody}
+                  onChange={(event) => {
+                    setResponseBody(event.target.value);
+                    setResponseDraftGenerated(false);
+                  }}
+                  placeholder="编辑要发送给红人的回复内容"
+                />
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => handleGenerateResponseDraft(expanded)}
+                    disabled={sendingResponse}
+                  >
+                    生成回复话术
+                  </Button>
+                  <Button
+                    type="button"
+                    onClick={() => void handleSendResponse(expanded)}
+                    disabled={sendingResponse || !responseBody.trim()}
+                  >
+                    {sendingResponse ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                    发送回复
+                  </Button>
+                </div>
+              </div>
             </div>
-            <div className="mt-4 flex justify-end">
-              <Button onClick={() => void handleManualLink(expanded)} disabled={actionId === expanded.id}>
-                保存关联
-              </Button>
+
+            <div className="shrink-0 border-t bg-background px-6 py-4">
+              <div className="grid min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
+                <label className="space-y-1 text-sm">
+                  <span className="font-medium">手动关联红人</span>
+                  <select
+                    className="h-9 w-full rounded-md border bg-background px-3"
+                    value={selectedInfluencerId}
+                    onChange={(event) => setSelectedInfluencerId(event.target.value)}
+                  >
+                    <option value="">选择红人</option>
+                    {influencers.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {influencerLabel(item)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="space-y-1 text-sm">
+                  <span className="font-medium">手动关联活动</span>
+                  <select
+                    className="h-9 w-full rounded-md border bg-background px-3"
+                    value={selectedCampaignId}
+                    onChange={(event) => setSelectedCampaignId(event.target.value)}
+                  >
+                    <option value="">不关联活动</option>
+                    {campaigns.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <Button
+                  className="h-9 whitespace-nowrap"
+                  onClick={() => void handleManualLink(expanded)}
+                  disabled={actionId === expanded.id}
+                >
+                  保存关联
+                </Button>
+              </div>
             </div>
           </div>
         </div>

@@ -7,6 +7,9 @@ import {
   filterEmailRepliesForCenter,
   getSelectableReplyIds,
   getEmailReplyIntentLabel,
+  getEmailReplyInfluencerDisplay,
+  getEmailReplyMatchCandidates,
+  buildEmailReplyResponseDraft,
   type EmailReplyCenterItem,
 } from "../src/lib/email-reply-helpers.ts";
 
@@ -61,4 +64,97 @@ test("reply center status labels use sales-friendly wording", () => {
   assert.equal(getEmailReplyIntentLabel("not_interested"), "无意向");
   assert.equal(getEmailReplyIntentLabel("processed"), "已处理");
   assert.equal(getEmailReplyIntentLabel("unmatched"), "未匹配");
+});
+test("reply center displays matched influencer name and email", () => {
+  const label = getEmailReplyInfluencerDisplay(
+    { ...baseReply, product_influencer_id: 101 },
+    {
+      id: 101,
+      username: "kayla",
+      display_name: "Kayla",
+      final_email: "kayla@example.com",
+      business_email: null,
+      public_email: null,
+      email: null,
+    },
+  );
+
+  assert.equal(label, "Kayla · kayla@example.com");
+});
+
+test("reply center uses clearer unmatched copy when no influencer is linked", () => {
+  const label = getEmailReplyInfluencerDisplay({ ...baseReply, product_influencer_id: null }, null);
+
+  assert.equal(label, "未自动关联");
+});
+
+test("reply center exposes low-confidence candidates from reply diagnostics", () => {
+  const candidates = getEmailReplyMatchCandidates({
+    ...baseReply,
+    product_influencer_id: null,
+    raw_headers: {
+      reply_match: {
+        status: "candidate",
+        candidates: [
+          { product_influencer_id: 201, campaign_id: 33, display_name: "Kayla", email: "kayla@example.com" },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(candidates, [
+    { product_influencer_id: 201, campaign_id: 33, display_name: "Kayla", email: "kayla@example.com" },
+  ]);
+});
+
+test("reply panel offers candidate confirmation through the update API and refreshes", async () => {
+  const source = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/components/email-replies/email-replies-panel.tsx", import.meta.url), "utf8"),
+  );
+
+  assert.match(source, /getEmailReplyMatchCandidates/);
+  assert.match(source, /product_influencer_id:\s*candidate\.product_influencer_id/);
+  assert.match(source, /campaign_id:\s*candidate\.campaign_id\s*\?\?\s*undefined/);
+  assert.match(source, /await load\(\)/);
+});
+
+test("reply response draft changes by intent status", () => {
+  const interested = buildEmailReplyResponseDraft({
+    influencerName: "Kayla",
+    intentStatus: "interested",
+  });
+  const followUp = buildEmailReplyResponseDraft({
+    influencerName: "Kayla",
+    intentStatus: "follow_up",
+  });
+
+  assert.match(interested, /Hi Kayla/);
+  assert.match(interested, /share more details/);
+  assert.match(followUp, /following up/i);
+});
+
+test("reply panel exposes response composer, send API, warning, and refresh behavior", async () => {
+  const source = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/components/email-replies/email-replies-panel.tsx", import.meta.url), "utf8"),
+  );
+  const apiSource = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/lib/api.ts", import.meta.url), "utf8"),
+  );
+
+  assert.match(source, /textarea/);
+  assert.match(source, /buildEmailReplyResponseDraft/);
+  assert.match(source, /sendEmailReplyResponse/);
+  assert.match(source, /unmatched_reply_identity_warning/);
+  assert.match(source, /await load\(\)/);
+  assert.match(apiSource, /email-replies\/\$\{replyId\}\/send-response/);
+});
+
+test("reply panel exposes direct row reply action for sales users", async () => {
+  const source = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/components/email-replies/email-replies-panel.tsx", import.meta.url), "utf8"),
+  );
+
+  assert.match(source, /openReplyComposer/);
+  assert.match(source, />\s*回复\s*</);
+  assert.match(source, /onClick=\{\(\) => openReplyComposer\(reply\)\}/);
 });

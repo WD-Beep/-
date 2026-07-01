@@ -14,6 +14,8 @@ from app.schemas.email_reply import (
     EmailReplyIngestBatchResponse,
     EmailReplyIngestResult,
     EmailReplyRead,
+    EmailReplySendResponseRequest,
+    EmailReplySendResponseResult,
     EmailReplySummary,
     EmailReplyUpdateRequest,
     InboundEmailStatus,
@@ -23,6 +25,7 @@ from app.services.email_reply_service import EmailReplyService
 from app.services.tenant_scope import ALL_PRODUCTS_ID
 
 router = APIRouter(prefix="/email-inbound", tags=["email-inbound"])
+email_replies_router = APIRouter(prefix="/email-replies", tags=["email-replies"])
 
 
 def _require_product_scope(ctx: TenantContext) -> int:
@@ -153,6 +156,48 @@ async def update_email_reply(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+async def _send_email_reply_response(
+    reply_id: int,
+    payload: EmailReplySendResponseRequest,
+    db: AsyncSession,
+    ctx: TenantContext,
+) -> EmailReplySendResponseResult:
+    product_id = _require_product_scope(ctx)
+    try:
+        return await EmailReplyService.send_response(
+            db,
+            product_id=product_id,
+            user_id=ctx.user_id,
+            reply_id=reply_id,
+            body=payload.body,
+            subject=payload.subject,
+            use_ai_draft=payload.use_ai_draft,
+            mark_processed=payload.mark_processed,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/replies/{reply_id}/send-response", response_model=EmailReplySendResponseResult)
+async def send_email_reply_response(
+    reply_id: int,
+    payload: EmailReplySendResponseRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> EmailReplySendResponseResult:
+    return await _send_email_reply_response(reply_id, payload, db, ctx)
+
+
+@email_replies_router.post("/{reply_id}/send-response", response_model=EmailReplySendResponseResult)
+async def send_email_reply_response_alias(
+    reply_id: int,
+    payload: EmailReplySendResponseRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> EmailReplySendResponseResult:
+    return await _send_email_reply_response(reply_id, payload, db, ctx)
 
 
 @router.post("/replies/bulk-delete", response_model=EmailReplyBulkDeleteResponse)
