@@ -109,6 +109,12 @@ class OutreachCampaignPreviewItem(BaseModel):
     template_title: str = ""
     can_queue: bool = False
     skip_reason: str | None = None
+    draft_status: str = "pending_review"
+    is_high_value: bool = False
+    opened_at: datetime | None = None
+    approved_at: datetime | None = None
+    queued_at: datetime | None = None
+    approval_block_reason: str | None = None
 
 
 class OutreachCampaignPreviewResponse(BaseModel):
@@ -140,6 +146,22 @@ class OutreachCampaignQueueRequest(BaseModel):
 
 class OutreachCampaignQueueResponse(BaseModel):
     queued: int
+    skipped: int
+    message: str
+
+
+class OutreachCampaignDraftUpdateRequest(BaseModel):
+    subject: str | None = Field(default=None, min_length=1, max_length=500)
+    body: str | None = Field(default=None, min_length=1, max_length=20000)
+
+
+class OutreachCampaignBulkApproveRequest(BaseModel):
+    confirm: bool = False
+    influencer_ids: list[int] | None = Field(default=None, max_length=1000)
+
+
+class OutreachCampaignBulkApproveResponse(BaseModel):
+    approved: int
     skipped: int
     message: str
 

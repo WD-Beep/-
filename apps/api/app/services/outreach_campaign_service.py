@@ -22,7 +22,10 @@ from app.schemas.knowledge import MatchedKnowledgeItem
 from app.schemas.outreach_campaign import (
     AutoCampaignProcessLogItem,
     AutoCampaignProcessResult,
+    OutreachCampaignBulkApproveRequest,
+    OutreachCampaignBulkApproveResponse,
     OutreachCampaignCreateRequest,
+    OutreachCampaignDraftUpdateRequest,
     OutreachCampaignGenerateAndSendResponse,
     OutreachOneClickWorkbenchResponse,
     OutreachCampaignPreviewItem,
@@ -48,6 +51,7 @@ from app.services.outreach_send_queue_service import OutreachSendQueueService, _
 from app.services.outreach_recipient import outreach_recipient_skip_reason
 from app.services.product_influencer_service import ProductInfluencerService
 from app.services.speech_recommendation_service import SpeechRecommendationService
+from app.services.value_tier import classify_value_tier
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +83,14 @@ INTERESTED_REPLY_STATUSES = frozenset({"interested", "quoted", "cooperating", "c
 TERMINAL_CAMPAIGN_STATUSES = frozenset({"cancelled", "completed"})
 AUTO_SEND_ACTIVE_STATUSES = frozenset({"running", "ready"})
 MAX_CAMPAIGN_RECIPIENTS = 1000
+DRAFT_PENDING_REVIEW = "pending_review"
+DRAFT_MODIFIED = "modified"
+DRAFT_APPROVED = "approved"
+DRAFT_SKIPPED = "skipped"
+DRAFT_QUEUED = "queued"
+DRAFT_SENT = "sent"
+DRAFT_FAILED = "failed"
+HIGH_VALUE_APPROVAL_BLOCK = "high_value_requires_open"
 
 
 def _coerce_knowledge_section(value: object | None) -> str | None:
@@ -126,6 +138,44 @@ def _preview_failure_item(
         recipient=recipient,
         can_queue=False,
         skip_reason=reason,
+        draft_status=DRAFT_SKIPPED,
+    )
+
+
+def _is_high_value_product_influencer(
+    *,
+    product_row: ProductInfluencer,
+    global_row: GlobalInfluencerProfile,
+) -> bool:
+    merged = merged_influencer_for_ai(product_row, global_row)
+    tier, _label, _reason = classify_value_tier(merged)
+    return tier != "skip"
+
+
+def _draft_item_from_recipient(
+    rec: OutreachCampaignRecipient,
+    *,
+    username: str,
+    display_name: str | None,
+) -> OutreachCampaignPreviewItem:
+    return OutreachCampaignPreviewItem(
+        influencer_id=rec.product_influencer_id,
+        username=username,
+        display_name=display_name,
+        recipient=rec.recipient,
+        subject=rec.subject or "",
+        body=rec.body or "",
+        reason=rec.reason or "",
+        matched_knowledge=_normalize_matched_knowledge(rec.matched_knowledge or []),
+        template_title=rec.template_title or "",
+        can_queue=bool(rec.can_queue),
+        skip_reason=rec.skip_reason,
+        draft_status=rec.draft_status or DRAFT_PENDING_REVIEW,
+        is_high_value=bool(rec.is_high_value),
+        opened_at=rec.opened_at,
+        approved_at=rec.approved_at,
+        queued_at=rec.queued_at,
+        approval_block_reason=rec.approval_block_reason,
     )
 
 
@@ -790,12 +840,19 @@ class OutreachCampaignService:
                     items.append(item)
                     rec.can_queue = False
                     rec.skip_reason = item.skip_reason
+                    rec.draft_status = DRAFT_SKIPPED
+                    rec.approval_block_reason = None
                     rec.previewed_at = now
                     continue
 
                 product_row, global_row = pair
                 merged = merged_influencer_for_ai(product_row, global_row)
                 recipient = resolve_influencer_email(merged)
+                is_high_value = _is_high_value_product_influencer(
+                    product_row=product_row,
+                    global_row=global_row,
+                )
+                rec.is_high_value = is_high_value
 
                 try:
                     skip_reason = await OutreachCampaignService._evaluate_skip(
@@ -823,6 +880,8 @@ class OutreachCampaignService:
                     rec.recipient = recipient
                     rec.can_queue = False
                     rec.skip_reason = skip_reason
+                    rec.draft_status = DRAFT_SKIPPED
+                    rec.approval_block_reason = None
                     rec.previewed_at = now
                     items.append(item)
                     continue
@@ -881,6 +940,8 @@ class OutreachCampaignService:
                         rec.recipient = recipient
                         rec.can_queue = False
                         rec.skip_reason = item.skip_reason
+                        rec.draft_status = DRAFT_SKIPPED
+                        rec.approval_block_reason = None
                         rec.previewed_at = now
                         items.append(item)
                         continue
@@ -927,6 +988,9 @@ class OutreachCampaignService:
                     template_title=item_template_title,
                     can_queue=can_queue,
                     skip_reason=item_skip_reason,
+                    draft_status=DRAFT_PENDING_REVIEW if can_queue else DRAFT_SKIPPED,
+                    is_high_value=is_high_value,
+                    approval_block_reason=HIGH_VALUE_APPROVAL_BLOCK if can_queue and is_high_value else None,
                 )
                 rec.recipient = recipient
                 rec.subject = subject or None
@@ -936,6 +1000,10 @@ class OutreachCampaignService:
                 rec.matched_knowledge = [m.model_dump() for m in matched]
                 rec.can_queue = item.can_queue
                 rec.skip_reason = item_skip_reason
+                rec.draft_status = item.draft_status
+                rec.approval_block_reason = item.approval_block_reason
+                rec.approved_at = None
+                rec.queued_at = None
                 rec.previewed_at = now
                 if item.can_queue:
                     can_queue_count += 1
@@ -954,6 +1022,8 @@ class OutreachCampaignService:
                 )
                 rec.can_queue = False
                 rec.skip_reason = reason
+                rec.draft_status = DRAFT_SKIPPED
+                rec.approval_block_reason = None
                 rec.previewed_at = now
                 items.append(item)
 
@@ -1000,22 +1070,7 @@ class OutreachCampaignService:
                 username = str(rec.product_influencer_id)
                 display_name = None
 
-            matched = _normalize_matched_knowledge(rec.matched_knowledge or [])
-            items.append(
-                OutreachCampaignPreviewItem(
-                    influencer_id=rec.product_influencer_id,
-                    username=username,
-                    display_name=display_name,
-                    recipient=rec.recipient,
-                    subject=rec.subject or "",
-                    body=rec.body or "",
-                    reason=rec.reason or "",
-                    matched_knowledge=matched,
-                    template_title=rec.template_title or "",
-                    can_queue=bool(rec.can_queue),
-                    skip_reason=rec.skip_reason,
-                )
-            )
+            items.append(_draft_item_from_recipient(rec, username=username, display_name=display_name))
 
         can_queue_count = sum(1 for item in items if item.can_queue)
         return OutreachCampaignRecipientListResponse(
@@ -1024,6 +1079,251 @@ class OutreachCampaignService:
             total=len(items),
             can_queue_count=can_queue_count,
             skip_count=len(items) - can_queue_count,
+        )
+
+    @staticmethod
+    async def _get_campaign_recipient(
+        db: AsyncSession,
+        *,
+        product_id: int,
+        campaign_id: int,
+        influencer_id: int,
+    ) -> tuple[OutreachEmailCampaign, OutreachCampaignRecipient, GlobalInfluencerProfile | None]:
+        campaign = await OutreachCampaignService._get_campaign(
+            db, campaign_id=campaign_id, product_id=product_id
+        )
+        rec = await db.scalar(
+            select(OutreachCampaignRecipient).where(
+                OutreachCampaignRecipient.campaign_id == campaign.id,
+                OutreachCampaignRecipient.product_influencer_id == influencer_id,
+            )
+        )
+        if not rec:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="草稿不存在")
+        pair = await ProductInfluencerService.get_product_influencer(
+            db, product_id=product_id, record_id=influencer_id
+        )
+        return campaign, rec, pair[1] if pair else None
+
+    @staticmethod
+    def _recipient_response(
+        rec: OutreachCampaignRecipient,
+        *,
+        global_row: GlobalInfluencerProfile | None,
+    ) -> OutreachCampaignPreviewItem:
+        return _draft_item_from_recipient(
+            rec,
+            username=(global_row.username if global_row else None) or str(rec.product_influencer_id),
+            display_name=global_row.display_name if global_row else None,
+        )
+
+    @staticmethod
+    async def open_campaign_draft(
+        db: AsyncSession,
+        *,
+        product_id: int,
+        campaign_id: int,
+        influencer_id: int,
+    ) -> OutreachCampaignPreviewItem:
+        _campaign, rec, global_row = await OutreachCampaignService._get_campaign_recipient(
+            db,
+            product_id=product_id,
+            campaign_id=campaign_id,
+            influencer_id=influencer_id,
+        )
+        if not rec.opened_at:
+            rec.opened_at = datetime.now(UTC)
+        if rec.is_high_value and rec.can_queue and rec.draft_status in {DRAFT_PENDING_REVIEW, DRAFT_MODIFIED}:
+            rec.approval_block_reason = None
+        await db.commit()
+        return OutreachCampaignService._recipient_response(rec, global_row=global_row)
+
+    @staticmethod
+    async def update_campaign_draft(
+        db: AsyncSession,
+        *,
+        product_id: int,
+        campaign_id: int,
+        influencer_id: int,
+        payload: OutreachCampaignDraftUpdateRequest,
+    ) -> OutreachCampaignPreviewItem:
+        _campaign, rec, global_row = await OutreachCampaignService._get_campaign_recipient(
+            db,
+            product_id=product_id,
+            campaign_id=campaign_id,
+            influencer_id=influencer_id,
+        )
+        if rec.draft_status in {DRAFT_QUEUED, DRAFT_SENT}:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="已入队或已发送草稿不能修改")
+        if payload.subject is not None:
+            rec.subject = payload.subject.strip()
+        if payload.body is not None:
+            rec.body = payload.body.strip()
+        rec.can_queue = bool((rec.subject or "").strip() and (rec.body or "").strip() and rec.recipient)
+        rec.skip_reason = None if rec.can_queue else "邮件标题或正文为空，无法批准"
+        rec.draft_status = DRAFT_MODIFIED if rec.can_queue else DRAFT_SKIPPED
+        rec.approved_at = None
+        rec.approval_block_reason = HIGH_VALUE_APPROVAL_BLOCK if rec.is_high_value and not rec.opened_at and rec.can_queue else None
+        await db.commit()
+        return OutreachCampaignService._recipient_response(rec, global_row=global_row)
+
+    @staticmethod
+    async def regenerate_campaign_draft(
+        db: AsyncSession,
+        *,
+        product_id: int,
+        campaign_id: int,
+        influencer_id: int,
+    ) -> OutreachCampaignPreviewItem:
+        campaign, rec, global_row = await OutreachCampaignService._get_campaign_recipient(
+            db,
+            product_id=product_id,
+            campaign_id=campaign_id,
+            influencer_id=influencer_id,
+        )
+        pair = await ProductInfluencerService.get_product_influencer(
+            db, product_id=product_id, record_id=influencer_id
+        )
+        if not pair:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="红人不存在")
+        product_row, global_row = pair
+        merged = merged_influencer_for_ai(product_row, global_row)
+        recipient = resolve_influencer_email(merged)
+        skip_reason = await OutreachCampaignService._evaluate_skip(
+            db, campaign=campaign, product_row=product_row, recipient=recipient
+        )
+        if skip_reason:
+            rec.recipient = recipient
+            rec.can_queue = False
+            rec.skip_reason = skip_reason
+            rec.draft_status = DRAFT_SKIPPED
+            rec.approval_block_reason = None
+            rec.approved_at = None
+            rec.skipped_at = datetime.now(UTC)
+            await db.commit()
+            return OutreachCampaignService._recipient_response(rec, global_row=global_row)
+
+        generation = await SpeechRecommendationService.generate_outreach_email(
+            db,
+            product_id=product_id,
+            global_row=global_row,
+            product_row=product_row,
+            selected_script_ids=[campaign.message_template_id] if campaign.message_template_id else None,
+            knowledge_base_id=campaign.knowledge_base_id,
+        )
+        rec.recipient = recipient
+        rec.subject = generation.subject.strip()
+        rec.body = generation.body.strip()
+        rec.reason = generation.reason
+        rec.template_title = generation.recommended_script_title
+        rec.matched_knowledge = [m.model_dump() for m in _normalize_matched_knowledge(generation.matched_knowledge)]
+        rec.can_queue = bool(rec.subject and rec.body)
+        rec.skip_reason = None if rec.can_queue else "邮件标题或正文为空，无法批准"
+        rec.draft_status = DRAFT_MODIFIED if rec.can_queue else DRAFT_SKIPPED
+        rec.is_high_value = _is_high_value_product_influencer(product_row=product_row, global_row=global_row)
+        rec.approved_at = None
+        rec.approval_block_reason = HIGH_VALUE_APPROVAL_BLOCK if rec.is_high_value and not rec.opened_at and rec.can_queue else None
+        await db.commit()
+        return OutreachCampaignService._recipient_response(rec, global_row=global_row)
+
+    @staticmethod
+    async def approve_campaign_draft(
+        db: AsyncSession,
+        *,
+        product_id: int,
+        campaign_id: int,
+        influencer_id: int,
+    ) -> OutreachCampaignPreviewItem:
+        _campaign, rec, global_row = await OutreachCampaignService._get_campaign_recipient(
+            db,
+            product_id=product_id,
+            campaign_id=campaign_id,
+            influencer_id=influencer_id,
+        )
+        if rec.draft_status in {DRAFT_QUEUED, DRAFT_SENT}:
+            return OutreachCampaignService._recipient_response(rec, global_row=global_row)
+        if not rec.can_queue or not (rec.subject or "").strip() or not (rec.body or "").strip():
+            rec.draft_status = DRAFT_SKIPPED
+            rec.skip_reason = rec.skip_reason or "草稿缺少标题或正文"
+            await db.commit()
+            return OutreachCampaignService._recipient_response(rec, global_row=global_row)
+        if rec.is_high_value and not rec.opened_at:
+            rec.approval_block_reason = HIGH_VALUE_APPROVAL_BLOCK
+            await db.commit()
+            return OutreachCampaignService._recipient_response(rec, global_row=global_row)
+        rec.draft_status = DRAFT_APPROVED
+        rec.approved_at = datetime.now(UTC)
+        rec.approval_block_reason = None
+        await db.commit()
+        return OutreachCampaignService._recipient_response(rec, global_row=global_row)
+
+    @staticmethod
+    async def skip_campaign_draft(
+        db: AsyncSession,
+        *,
+        product_id: int,
+        campaign_id: int,
+        influencer_id: int,
+    ) -> OutreachCampaignPreviewItem:
+        _campaign, rec, global_row = await OutreachCampaignService._get_campaign_recipient(
+            db,
+            product_id=product_id,
+            campaign_id=campaign_id,
+            influencer_id=influencer_id,
+        )
+        rec.draft_status = DRAFT_SKIPPED
+        rec.can_queue = False
+        rec.skip_reason = rec.skip_reason or "业务员跳过"
+        rec.skipped_at = datetime.now(UTC)
+        rec.approval_block_reason = None
+        await db.commit()
+        return OutreachCampaignService._recipient_response(rec, global_row=global_row)
+
+    @staticmethod
+    async def bulk_approve_campaign_drafts(
+        db: AsyncSession,
+        *,
+        product_id: int,
+        campaign_id: int,
+        payload: OutreachCampaignBulkApproveRequest,
+    ) -> OutreachCampaignBulkApproveResponse:
+        if not payload.confirm:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="批量批准前必须确认")
+        campaign = await OutreachCampaignService._get_campaign(
+            db, campaign_id=campaign_id, product_id=product_id
+        )
+        filter_ids = set(payload.influencer_ids or [])
+        recipients = (
+            await db.scalars(
+                select(OutreachCampaignRecipient).where(
+                    OutreachCampaignRecipient.campaign_id == campaign.id
+                )
+            )
+        ).all()
+        approved = skipped = 0
+        now = datetime.now(UTC)
+        for rec in recipients:
+            if filter_ids and rec.product_influencer_id not in filter_ids:
+                continue
+            if rec.draft_status not in {DRAFT_PENDING_REVIEW, DRAFT_MODIFIED}:
+                skipped += 1
+                continue
+            if not rec.can_queue or not (rec.subject or "").strip() or not (rec.body or "").strip():
+                skipped += 1
+                continue
+            if rec.is_high_value and not rec.opened_at:
+                rec.approval_block_reason = HIGH_VALUE_APPROVAL_BLOCK
+                skipped += 1
+                continue
+            rec.draft_status = DRAFT_APPROVED
+            rec.approved_at = now
+            rec.approval_block_reason = None
+            approved += 1
+        await db.commit()
+        return OutreachCampaignBulkApproveResponse(
+            approved=approved,
+            skipped=skipped,
+            message=f"已批准 {approved} 条草稿，跳过 {skipped} 条",
         )
 
     @staticmethod
@@ -1188,6 +1488,9 @@ class OutreachCampaignService:
             if rec.queue_item_id:
                 skipped += 1
                 continue
+            if rec.draft_status != DRAFT_APPROVED:
+                skipped += 1
+                continue
             subject = (rec.subject or "").strip()
             body = (rec.body or "").strip()
             if not rec.can_queue or not subject or not body or not rec.recipient:
@@ -1246,6 +1549,7 @@ class OutreachCampaignService:
             await db.flush()
             rec.queue_item_id = queue_row.id
             rec.queued_at = now
+            rec.draft_status = DRAFT_QUEUED
             queued += 1
 
         campaign.queued_count = int(
@@ -1319,6 +1623,19 @@ class OutreachCampaignService:
             db,
             product_id=product_id,
             campaign_id=campaign_id,
+        )
+        return OutreachCampaignGenerateAndSendResponse(
+            campaign_id=campaign_id,
+            preview=preview,
+            queued=0,
+            queue_skipped=preview.total,
+            processed=0,
+            sent=0,
+            failed=0,
+            skipped=preview.skip_count,
+            daily_limit=0,
+            sent_today=0,
+            message="已生成邮件草稿，尚未发送。请先审核、修改并批准草稿，再发送已批准邮件。",
         )
         queue_result = await OutreachCampaignService.queue_campaign(
             db,

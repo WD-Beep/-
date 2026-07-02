@@ -69,6 +69,7 @@ export function buildScheduledOutreachQueuePayload(input: {
       subject: string | null;
       body: string | null;
       can_queue: boolean;
+      draft_status?: string;
       matched_knowledge?: MatchedKnowledgeItem[];
       reason?: string | null;
     }>;
@@ -84,7 +85,10 @@ export function buildScheduledOutreachQueuePayload(input: {
   return {
     campaign_id: input.campaignId,
     items: input.preview.items
-      .filter((item) => item.can_queue && item.recipient && item.subject && item.body)
+      .filter((item) => {
+        const approved = item.draft_status ? item.draft_status === "approved" : item.can_queue;
+        return approved && item.can_queue && item.recipient && item.subject && item.body;
+      })
       .map((item) => ({
         product_influencer_id: item.influencer_id,
         recipient: item.recipient as string,
@@ -115,6 +119,46 @@ export type OneClickSendMode = "now" | "scheduled";
 export type OneClickContentSource = "manual" | "template" | "ai";
 export type OneClickQueueStatus = "not_queued" | "ready_to_send" | "waiting" | "sending" | "completed" | "failed";
 export type OneClickPrimaryActionKind = "preview" | "send" | "queue" | "progress" | "retry";
+
+export const OUTREACH_DRAFT_STATUS_LABELS: Record<string, string> = {
+  pending_review: "待审核",
+  modified: "已修改",
+  approved: "已批准",
+  skipped: "已跳过",
+  queued: "已入队",
+  sent: "已发送",
+  failed: "发送失败",
+};
+
+export function getOutreachDraftStatusLabel(status: string | null | undefined): string {
+  if (!status) return OUTREACH_DRAFT_STATUS_LABELS.pending_review;
+  return OUTREACH_DRAFT_STATUS_LABELS[status] ?? status;
+}
+
+export function canApproveOutreachDraft(item: {
+  can_queue: boolean;
+  draft_status?: string | null;
+  is_high_value?: boolean;
+  opened_at?: string | null;
+  subject?: string | null;
+  body?: string | null;
+}): boolean {
+  if (!item.can_queue) return false;
+  if (!item.subject?.trim() || !item.body?.trim()) return false;
+  if (item.draft_status === "approved" || item.draft_status === "queued" || item.draft_status === "sent") return false;
+  if (item.is_high_value && !item.opened_at) return false;
+  return true;
+}
+
+export function countApprovedOutreachDrafts(
+  items: Array<{ draft_status?: string | null; can_queue?: boolean }>,
+): number {
+  return items.filter((item) => item.draft_status === "approved" && item.can_queue !== false).length;
+}
+
+export function buildApprovedDraftSendConfirmMessage(count: number): string {
+  return `本次将发送 ${count} 封已批准邮件。确认后邮件会进入发送队列，并按发送间隔、每日上限和发送时间窗口执行。`;
+}
 
 export type OneClickQueueCampaignInput = {
   status: string;

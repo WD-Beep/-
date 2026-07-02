@@ -776,6 +776,7 @@ export type EmailReply = {
   snippet: string | null;
   raw_headers?: Record<string, unknown> | null;
   received_at: string;
+  viewed_at: string | null;
   handled_at: string | null;
   manual_note: string | null;
 };
@@ -789,6 +790,7 @@ export type EmailReplySummary = {
 export type EmailReplyWorkCount = {
   unprocessed_count: number;
   unmatched_count: number;
+  unviewed_count: number;
 };
 
 export type EmailReplyBulkDeleteResult = {
@@ -1804,6 +1806,7 @@ export async function updateEmailReply(
     intent_status?: string | null;
     processing_status?: string | null;
     manual_note?: string | null;
+    mark_viewed?: boolean | null;
   },
 ): Promise<EmailReply> {
   const response = await apiFetch(`${API_URL}/api/email-inbound/replies/${replyId}`, {
@@ -2848,6 +2851,12 @@ export type OutreachCampaignPreviewItem = {
   template_title: string;
   can_queue: boolean;
   skip_reason: string | null;
+  draft_status: string;
+  is_high_value: boolean;
+  opened_at: string | null;
+  approved_at: string | null;
+  queued_at: string | null;
+  approval_block_reason: string | null;
 };
 
 export type OutreachCampaignPreviewResponse = {
@@ -2865,6 +2874,12 @@ export type OutreachCampaignPreviewPayload = {
 };
 
 export type OutreachCampaignRecipientListResponse = OutreachCampaignPreviewResponse;
+
+export type OutreachCampaignBulkApproveResponse = {
+  approved: number;
+  skipped: number;
+  message: string;
+};
 
 export type OutreachCampaignGenerateAndSendResponse = {
   campaign_id: number;
@@ -3070,6 +3085,88 @@ export async function fetchOutreachCampaignRecipients(
   const response = await apiFetch(`${API_URL}/api/outreach-campaigns/${campaignId}/recipients`, {
     cache: "no-store",
   });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function openOutreachCampaignDraft(
+  campaignId: number,
+  influencerId: number,
+): Promise<OutreachCampaignPreviewItem> {
+  const response = await apiFetch(
+    `${API_URL}/api/outreach-campaigns/${campaignId}/recipients/${influencerId}/open`,
+    { method: "POST" },
+  );
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function updateOutreachCampaignDraft(
+  campaignId: number,
+  influencerId: number,
+  payload: { subject?: string; body?: string },
+): Promise<OutreachCampaignPreviewItem> {
+  const response = await apiFetch(
+    `${API_URL}/api/outreach-campaigns/${campaignId}/recipients/${influencerId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function regenerateOutreachCampaignDraft(
+  campaignId: number,
+  influencerId: number,
+): Promise<OutreachCampaignPreviewItem> {
+  const response = await apiFetch(
+    `${LONG_RUNNING_API_URL}/api/outreach-campaigns/${campaignId}/recipients/${influencerId}/regenerate`,
+    { method: "POST" },
+    { timeoutMs: PREVIEW_FETCH_TIMEOUT_MS },
+  );
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function approveOutreachCampaignDraft(
+  campaignId: number,
+  influencerId: number,
+): Promise<OutreachCampaignPreviewItem> {
+  const response = await apiFetch(
+    `${API_URL}/api/outreach-campaigns/${campaignId}/recipients/${influencerId}/approve`,
+    { method: "POST" },
+  );
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function skipOutreachCampaignDraft(
+  campaignId: number,
+  influencerId: number,
+): Promise<OutreachCampaignPreviewItem> {
+  const response = await apiFetch(
+    `${API_URL}/api/outreach-campaigns/${campaignId}/recipients/${influencerId}/skip`,
+    { method: "POST" },
+  );
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function bulkApproveOutreachCampaignDrafts(
+  campaignId: number,
+  payload: { confirm: boolean; influencer_ids?: number[] },
+): Promise<OutreachCampaignBulkApproveResponse> {
+  const response = await apiFetch(
+    `${API_URL}/api/outreach-campaigns/${campaignId}/recipients/bulk-approve`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }

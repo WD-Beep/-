@@ -144,7 +144,8 @@ test("reply panel exposes response composer, send API, warning, and refresh beha
   assert.match(source, /textarea/);
   assert.match(source, /buildEmailReplyResponseDraft/);
   assert.match(source, /sendEmailReplyResponse/);
-  assert.match(source, /unmatched_reply_identity_warning/);
+  assert.match(source, /当前未自动关联红人/);
+  assert.match(source, /这是通用邮箱，请确认对方身份/);
   assert.match(source, /await load\(\)/);
   assert.match(apiSource, /email-replies\/\$\{replyId\}\/send-response/);
 });
@@ -156,5 +157,24 @@ test("reply panel exposes direct row reply action for sales users", async () => 
 
   assert.match(source, /openReplyComposer/);
   assert.match(source, />\s*回复\s*</);
-  assert.match(source, /onClick=\{\(\) => openReplyComposer\(reply\)\}/);
+  assert.match(source, /onClick=\{\(\) => void openReplyComposer\(reply\)\}/);
+});
+
+test("reply panel marks a reply viewed before clearing the navigation badge", async () => {
+  const source = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/components/email-replies/email-replies-panel.tsx", import.meta.url), "utf8"),
+  );
+  const sidebarSource = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/components/layout/sidebar.tsx", import.meta.url), "utf8"),
+  );
+  const apiSource = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/lib/api.ts", import.meta.url), "utf8"),
+  );
+
+  assert.match(source, /markReplyViewed/);
+  assert.match(source, /mark_viewed:\s*true/);
+  assert.match(source, /email-replies:work-count-changed/);
+  assert.match(source, /reply\.viewed_at/);
+  assert.match(sidebarSource, /summary\.unviewed_count/);
+  assert.match(apiSource, /viewed_at:\s*string \| null/);
 });

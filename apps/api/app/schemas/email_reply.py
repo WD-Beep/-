@@ -63,6 +63,7 @@ class EmailReplyRead(ORMModel):
     snippet: str | None
     raw_headers: dict | None = None
     received_at: datetime
+    viewed_at: datetime | None = None
     handled_at: datetime | None = None
     manual_note: str | None = None
 
@@ -76,6 +77,7 @@ class EmailReplyUpdateRequest(BaseModel):
     )
     processing_status: str | None = Field(default=None, pattern="^(unprocessed|processed)$")
     manual_note: str | None = Field(default=None, max_length=2000)
+    mark_viewed: bool | None = None
 
 
 class EmailReplySendResponseRequest(BaseModel):
@@ -110,6 +112,7 @@ class EmailReplyBulkDeleteResponse(BaseModel):
 class EmailReplyCountSummary(BaseModel):
     unprocessed_count: int
     unmatched_count: int
+    unviewed_count: int = 0
 
 
 class EmailReplyIngestResult(BaseModel):

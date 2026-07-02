@@ -123,13 +123,14 @@ async def get_email_reply_work_count(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> EmailReplyCountSummary:
-    unprocessed_count, unmatched_count = await EmailReplyService.count_reply_work(
+    unprocessed_count, unmatched_count, unviewed_count = await EmailReplyService.count_reply_work(
         db,
         product_id=scoped_product_id(ctx.product_id),
     )
     return EmailReplyCountSummary(
         unprocessed_count=unprocessed_count,
         unmatched_count=unmatched_count,
+        unviewed_count=unviewed_count,
     )
 
 
@@ -151,6 +152,7 @@ async def update_email_reply(
             intent_status=payload.intent_status,
             processing_status=payload.processing_status,
             manual_note=payload.manual_note,
+            mark_viewed=payload.mark_viewed,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

@@ -184,6 +184,14 @@ export function EmailRepliesPanel() {
     }
   }
 
+  async function markReplyViewed(reply: EmailReply): Promise<EmailReply> {
+    if (reply.viewed_at || requiresProduct) return reply;
+    const updated = await updateEmailReply(reply.id, { mark_viewed: true });
+    setReplies((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+    window.dispatchEvent(new Event("email-replies:work-count-changed"));
+    return updated;
+  }
+
   async function handleManualLink(reply: EmailReply) {
     const influencerId = Number(selectedInfluencerId);
     const campaignId = selectedCampaignId ? Number(selectedCampaignId) : undefined;
@@ -198,19 +206,21 @@ export function EmailRepliesPanel() {
     });
   }
 
-  function openReplyDetail(reply: EmailReply) {
-    setExpanded(reply);
+  async function openReplyDetail(reply: EmailReply) {
+    const target = await markReplyViewed(reply);
+    setExpanded(target);
     setResponseBody("");
     setResponseDraftGenerated(false);
   }
 
-  function openReplyComposer(reply: EmailReply) {
-    setExpanded(reply);
-    const influencer = reply.product_influencer_id ? influencerMap.get(reply.product_influencer_id) : null;
+  async function openReplyComposer(reply: EmailReply) {
+    const target = await markReplyViewed(reply);
+    setExpanded(target);
+    const influencer = target.product_influencer_id ? influencerMap.get(target.product_influencer_id) : null;
     setResponseBody(
       buildEmailReplyResponseDraft({
         influencerName: influencer?.display_name || influencer?.username || null,
-        intentStatus: reply.intent_status,
+        intentStatus: target.intent_status,
       }),
     );
     setResponseDraftGenerated(true);
@@ -409,7 +419,10 @@ export function EmailRepliesPanel() {
                     const campaign = reply.campaign_id ? campaignMap.get(reply.campaign_id) : null;
                     const matchCandidates = getEmailReplyMatchCandidates(reply);
                     return (
-                      <tr key={reply.id} className="border-b align-top last:border-0">
+                      <tr
+                        key={reply.id}
+                        className={`border-b align-top last:border-0 ${reply.viewed_at ? "" : "bg-rose-50/45"}`}
+                      >
                         <td className="px-4 py-3">
                           <input
                             type="checkbox"
@@ -419,7 +432,13 @@ export function EmailRepliesPanel() {
                           />
                         </td>
                         <td className="px-4 py-3">
-                          <div className="font-medium">
+                          <div className="flex items-center gap-2 font-medium">
+                            {!reply.viewed_at ? (
+                              <span
+                                className="h-2.5 w-2.5 shrink-0 rounded-full bg-rose-500 shadow-[0_0_0_3px_rgba(244,63,94,0.12)]"
+                                title="业务员还未查看这封回复"
+                              />
+                            ) : null}
                             {influencer ? (
                               <Link className="hover:underline" href={`/influencers/${influencer.id}`}>
                                 {getEmailReplyInfluencerDisplay(reply, influencer)}
@@ -481,10 +500,10 @@ export function EmailRepliesPanel() {
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex flex-wrap gap-1.5">
-                            <Button size="sm" variant="outline" onClick={() => openReplyDetail(reply)}>
+                            <Button size="sm" variant={reply.viewed_at ? "outline" : "default"} onClick={() => void openReplyDetail(reply)}>
                               查看
                             </Button>
-                            <Button size="sm" variant="outline" onClick={() => openReplyComposer(reply)}>
+                            <Button size="sm" variant="outline" onClick={() => void openReplyComposer(reply)}>
                               回复
                             </Button>
                             <Button

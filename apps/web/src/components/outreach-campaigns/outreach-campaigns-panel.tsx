@@ -25,10 +25,12 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   createOutreachCampaign,
+  bulkApproveOutreachCampaignDrafts,
   fetchOutreachWorkbench,
   fetchMessageTemplates,
   processOutreachCampaign,
   previewOutreachCampaign,
+  queueOutreachCampaign,
   scheduleOutreachSendQueue,
   type MessageTemplate,
   type OutreachCampaignCreatePayload,
@@ -44,13 +46,16 @@ import {
   buildLocalDateTime,
   buildOneClickCampaignName,
   buildOutreachCampaignPayload,
+  buildApprovedDraftSendConfirmMessage,
   buildPreviewResultMessage,
   buildScheduledQueueSuccessMessage,
   buildScheduledOutreachQueuePayload,
   buildSkipReasonBreakdown,
+  countApprovedOutreachDrafts,
   deriveOneClickQueueStatusFromCampaign,
   estimateCampaignEndTime,
   formatOneClickDateTime,
+  getOutreachDraftStatusLabel,
   getOneClickContentSourceLabel,
   getOneClickQueueStatusLabel,
   getOneClickPrimaryDisabledReason,
@@ -216,7 +221,10 @@ export function OutreachCampaignsPanel() {
     sourceCount: effectiveSendLimit,
     fallbackCount: effectiveSendLimit,
   });
-  const sendCount = preview?.can_queue_count ?? Math.min(effectiveSendLimit, estimatedSourceCount || workbench?.available_recipient_count || 0);
+  const approvedDraftCount = preview ? countApprovedOutreachDrafts(preview.items) : 0;
+  const sendCount = preview
+    ? approvedDraftCount
+    : Math.min(effectiveSendLimit, estimatedSourceCount || workbench?.available_recipient_count || 0);
   const skipBreakdown = preview ? buildSkipReasonBreakdown(preview.items) : { sent: 0, blacklisted: 0, invalid: 0, replied: 0, other: 0 };
   const scheduledAt = sendMode === "now" ? new Date() : buildLocalDateTime(scheduledDate, scheduledTime);
   const estimatedEndAt =
@@ -363,21 +371,16 @@ export function OutreachCampaignsPanel() {
     preview: OutreachCampaignPreviewResponse;
     startAt: Date;
   }) {
-    const payload = buildScheduledOutreachQueuePayload({
-      campaignId: input.campaignId,
-      preview: input.preview,
-      startAt: input.startAt,
-      intervalMinutes: Number(intervalMinutes) || 6,
-      dailyLimit: effectiveDailyLimit || effectiveSendLimit || 1,
-      hourlyLimit: Number(hourlyLimit) || 10,
-      sendWindowStart: skipNight ? windowStart : "00:00",
-      sendWindowEnd: skipNight ? windowEnd : "23:59",
-      allowResend: false,
-    });
-    if (payload.items.length === 0) {
-      throw new Error("没有邮件发出。所有收件人都被规则跳过，请查看跳过原因。");
+    const approvedIds = input.preview.items
+      .filter((item) => item.draft_status === "approved" && item.can_queue)
+      .map((item) => item.influencer_id);
+    if (approvedIds.length === 0) {
+      throw new Error("没有已批准草稿。请先审核并批准草稿，再发送。");
     }
-    return scheduleOutreachSendQueue(payload);
+    return queueOutreachCampaign(input.campaignId, {
+      confirm: true,
+      influencer_ids: approvedIds,
+    });
   }
 
   function disabledReasonFor(action: ActionKind): string | null {
@@ -518,6 +521,101 @@ export function OutreachCampaignsPanel() {
         ? "生成中..."
         : "发送中..."
       : primaryAction.label;
+  async function runReviewedAction(action: ActionKind) {
+    const reason = disabledReasonFor(action);
+    if (reason) {
+      setError(reason);
+      return;
+    }
+    if ((action === "send" || action === "queue") && !window.confirm(buildApprovedDraftSendConfirmMessage(sendCount))) {
+      return;
+    }
+
+    setBusyAction(action);
+    setError(null);
+    setMessage(null);
+    setLastFailureReason(null);
+    try {
+      const generated = await ensurePreview();
+      const actionPreview = generated.preview;
+      if (action === "preview") {
+        setQueueStatus(actionPreview.can_queue_count > 0 ? "ready_to_send" : "failed");
+        setMessage(
+          buildPreviewResultMessage({
+            total: actionPreview.total,
+            canQueueCount: actionPreview.can_queue_count,
+            skipCount: actionPreview.skip_count,
+          }),
+        );
+      } else if (action === "save") {
+        setMessage("草稿已保存，邮件尚未发出。请审核并批准草稿后再发送。");
+      } else {
+        const approvedCount = countApprovedOutreachDrafts(actionPreview.items);
+        if (approvedCount <= 0) {
+          setQueueStatus("failed");
+          throw new Error("没有已批准草稿。请先审核并批准草稿，再发送。");
+        }
+        const queued = await queuePreviewItems({
+          campaignId: generated.campaignId,
+          preview: actionPreview,
+          startAt: action === "send" ? new Date() : buildLocalDateTime(scheduledDate, scheduledTime) ?? new Date(),
+        });
+        if (action === "send") {
+          setQueueStatus("sending");
+          setMessage(buildImmediateSendStartedMessage());
+          const processed = await processOutreachCampaign(generated.campaignId);
+          const skipped = actionPreview.skip_count + processed.skipped + queued.skipped;
+          setQueueStatus(processed.failed > 0 && processed.sent === 0 ? "failed" : "completed");
+          const resultMessage = buildImmediateSendResultMessage({
+            sent: processed.sent,
+            failed: processed.failed,
+            skipped,
+          });
+          if (processed.failed > 0 && processed.sent === 0) {
+            setError(resultMessage);
+            setLastFailureReason(resultMessage);
+          } else {
+            setMessage(resultMessage);
+            if (processed.failed > 0) setLastFailureReason(resultMessage);
+          }
+        } else {
+          setQueueStatus("waiting");
+          setMessage(`已将 ${queued.queued} 封已批准邮件加入发送队列，跳过 ${queued.skipped} 封。`);
+        }
+      }
+      await load({ syncLatestCampaign: true });
+    } catch (err) {
+      const nextError = translateErrorMessage(err instanceof Error ? err.message : "操作失败");
+      setQueueStatus("failed");
+      setLastFailureReason(nextError);
+      setError(nextError);
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  void runAction;
+
+  async function bulkApproveCurrentPreview() {
+    if (!previewCampaignId || !preview) {
+      setError("请先生成草稿预览。");
+      return;
+    }
+    setBusyAction("save");
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await bulkApproveOutreachCampaignDrafts(previewCampaignId, { confirm: true });
+      const updated = await previewOutreachCampaign(previewCampaignId);
+      setPreview(updated);
+      setMessage(`${result.message}。高价值红人需要先打开草稿详情后手动批准。`);
+    } catch (err) {
+      setError(translateErrorMessage(err instanceof Error ? err.message : "批量批准失败"));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   const previewItems = preview?.items.slice(0, 5) ?? [];
   const currentStatusLabel =
     busyAction === "preview"
@@ -613,7 +711,7 @@ export function OutreachCampaignsPanel() {
                         去红人库选择
                       </Link>
                     </Button>
-                    <Button variant="outline" onClick={() => void runAction("preview")} disabled={busyAction !== null}>
+                    <Button variant="outline" onClick={() => void runReviewedAction("preview")} disabled={busyAction !== null}>
                       {busyAction === "preview" ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                       重新检查
                     </Button>
@@ -851,6 +949,19 @@ export function OutreachCampaignsPanel() {
               <CardContent className="campaign-step-content">
                 {previewItems.length > 0 ? (
                   <div className="space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                      <span className="text-slate-600">
+                        已批准 {approvedDraftCount} 封。高价值红人必须打开草稿详情确认后才能批准。
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void bulkApproveCurrentPreview()}
+                        disabled={busyAction !== null}
+                      >
+                        批量批准普通草稿
+                      </Button>
+                    </div>
                     {previewItems.map((item) => (
                       <div key={item.influencer_id} className="campaign-preview-item">
                         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -861,7 +972,12 @@ export function OutreachCampaignsPanel() {
                             </div>
                             <div className="mt-1 text-sm text-slate-700">{item.subject || "未生成标题"}</div>
                           </div>
-                          <Badge variant={item.can_queue ? "success" : "warning"}>{item.can_queue ? "可发送" : "跳过"}</Badge>
+                          <div className="flex flex-wrap gap-2">
+                            {item.is_high_value ? <Badge variant="warning">高价值</Badge> : null}
+                            <Badge variant={item.draft_status === "approved" ? "success" : item.can_queue ? "secondary" : "warning"}>
+                              {getOutreachDraftStatusLabel(item.draft_status)}
+                            </Badge>
+                          </div>
                         </div>
                         <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-sm leading-6 text-slate-600">
                           {item.body || humanizeOutreachFailureReason(item.skip_reason || item.reason)}
@@ -963,14 +1079,14 @@ export function OutreachCampaignsPanel() {
 
                 <div className="campaign-action-stack grid gap-2">
                   <div className="campaign-secondary-actions">
-                    <Button variant="ghost" onClick={() => void runAction("save")} disabled={Boolean(saveDisabledReason) || busyAction !== null}>
+                    <Button variant="ghost" onClick={() => void runReviewedAction("save")} disabled={Boolean(saveDisabledReason) || busyAction !== null}>
                       保存草稿
                     </Button>
                     <Button
                       variant="outline"
                       onClick={() => {
                         setSendMode("scheduled");
-                        void runAction("queue");
+                        void runReviewedAction("queue");
                       }}
                       disabled={Boolean(scheduleDisabledReason) || busyAction !== null}
                     >
@@ -981,7 +1097,7 @@ export function OutreachCampaignsPanel() {
                   <Button
                     onClick={() => {
                       if (primaryAction.action === "send") setSendMode("now");
-                      void runAction(primaryAction.action);
+                      void runReviewedAction(primaryAction.action);
                     }}
                     disabled={Boolean(primaryDisabledReason) || busyAction !== null}
                   >

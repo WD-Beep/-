@@ -218,7 +218,7 @@ export function Sidebar() {
     };
   }, []);
 
-  useEffect(() => {
+  const refreshReplyBadge = useCallback(() => {
     let cancelled = false;
     if (productId === null || productId === ALL_PRODUCTS_ID) {
       queueMicrotask(() => {
@@ -231,7 +231,7 @@ export function Sidebar() {
     queueMicrotask(() => {
       void fetchEmailReplyWorkCount()
         .then((summary) => {
-          if (!cancelled) setUnprocessedReplyCount(summary.unprocessed_count);
+          if (!cancelled) setUnprocessedReplyCount(summary.unviewed_count ?? summary.unprocessed_count);
         })
         .catch(() => {
           if (!cancelled) setUnprocessedReplyCount(0);
@@ -241,6 +241,16 @@ export function Sidebar() {
       cancelled = true;
     };
   }, [productId]);
+
+  useEffect(() => refreshReplyBadge(), [refreshReplyBadge]);
+
+  useEffect(() => {
+    const handler = () => {
+      refreshReplyBadge();
+    };
+    window.addEventListener("email-replies:work-count-changed", handler);
+    return () => window.removeEventListener("email-replies:work-count-changed", handler);
+  }, [refreshReplyBadge]);
 
   function openSidebar() {
     if (collapseTimer.current) {

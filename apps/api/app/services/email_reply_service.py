@@ -664,8 +664,19 @@ class EmailReplyService:
         return [EmailReplyRead.model_validate(row) for row in rows], total
 
     @staticmethod
-    async def count_reply_work(db: AsyncSession, *, product_id: int | None) -> tuple[int, int]:
+    async def count_reply_work(db: AsyncSession, *, product_id: int | None) -> tuple[int, int, int]:
         product_filters = [] if product_id is None else [EmailReply.product_id == product_id]
+        unviewed_count = int(
+            await db.scalar(
+                select(func.count())
+                .select_from(EmailReply)
+                .where(
+                    *product_filters,
+                    EmailReply.viewed_at.is_(None),
+                )
+            )
+            or 0
+        )
         unprocessed_count = int(
             await db.scalar(
                 select(func.count())
@@ -686,7 +697,7 @@ class EmailReplyService:
             )
             or 0
         )
-        return unprocessed_count, unmatched_count
+        return unprocessed_count, unmatched_count, unviewed_count
 
     @staticmethod
     async def update_reply(
@@ -699,11 +710,16 @@ class EmailReplyService:
         intent_status: str | None = None,
         processing_status: str | None = None,
         manual_note: str | None = None,
+        mark_viewed: bool | None = None,
     ) -> EmailReplyRead:
         reply = await db.get(EmailReply, reply_id)
         if not reply or reply.product_id != product_id:
             raise ValueError("没有找到这封回复")
 
+        sync_lead_status = any(
+            value is not None
+            for value in (product_influencer_id, campaign_id, intent_status, processing_status)
+        )
         product_row: ProductInfluencer | None = None
         if product_influencer_id is not None:
             product_row = await db.get(ProductInfluencer, product_influencer_id)
@@ -739,10 +755,12 @@ class EmailReplyService:
             reply.handled_at = datetime.now(UTC) if processing_status == "processed" else None
         if manual_note is not None:
             reply.manual_note = manual_note
+        if mark_viewed is True and reply.viewed_at is None:
+            reply.viewed_at = datetime.now(UTC)
 
-        if product_row is None and reply.product_influencer_id is not None:
+        if sync_lead_status and product_row is None and reply.product_influencer_id is not None:
             product_row = await db.get(ProductInfluencer, reply.product_influencer_id)
-        if product_row is not None:
+        if sync_lead_status and product_row is not None:
             updated = await InfluencerLeadService.mark_product_email_replied(
                 db,
                 product_row,

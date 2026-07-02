@@ -4,7 +4,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.deps.tenant import TenantContext, get_tenant_context
 from app.schemas.outreach_campaign import (
+    OutreachCampaignBulkApproveRequest,
+    OutreachCampaignBulkApproveResponse,
     OutreachCampaignCreateRequest,
+    OutreachCampaignDraftUpdateRequest,
     OutreachCampaignGenerateAndSendResponse,
     OutreachCampaignPreviewRequest,
     OutreachCampaignPreviewResponse,
@@ -14,6 +17,7 @@ from app.schemas.outreach_campaign import (
     OutreachCampaignRead,
     OutreachCampaignRecipientListResponse,
     OutreachCampaignReplyBoardResponse,
+    OutreachCampaignPreviewItem,
     OutreachOneClickWorkbenchResponse,
     OutreachCampaignUpdateRequest,
 )
@@ -96,6 +100,89 @@ async def list_outreach_campaign_recipients(
     product_id = _require_product_scope(ctx)
     return await OutreachCampaignService.list_campaign_recipients(
         db, product_id=product_id, campaign_id=campaign_id
+    )
+
+
+@router.post("/{campaign_id}/recipients/bulk-approve", response_model=OutreachCampaignBulkApproveResponse)
+async def bulk_approve_outreach_campaign_drafts(
+    campaign_id: int,
+    payload: OutreachCampaignBulkApproveRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> OutreachCampaignBulkApproveResponse:
+    product_id = _require_product_scope(ctx)
+    return await OutreachCampaignService.bulk_approve_campaign_drafts(
+        db, product_id=product_id, campaign_id=campaign_id, payload=payload
+    )
+
+
+@router.post("/{campaign_id}/recipients/{influencer_id}/open", response_model=OutreachCampaignPreviewItem)
+async def open_outreach_campaign_draft(
+    campaign_id: int,
+    influencer_id: int,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> OutreachCampaignPreviewItem:
+    product_id = _require_product_scope(ctx)
+    return await OutreachCampaignService.open_campaign_draft(
+        db, product_id=product_id, campaign_id=campaign_id, influencer_id=influencer_id
+    )
+
+
+@router.patch("/{campaign_id}/recipients/{influencer_id}", response_model=OutreachCampaignPreviewItem)
+async def update_outreach_campaign_draft(
+    campaign_id: int,
+    influencer_id: int,
+    payload: OutreachCampaignDraftUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> OutreachCampaignPreviewItem:
+    product_id = _require_product_scope(ctx)
+    return await OutreachCampaignService.update_campaign_draft(
+        db,
+        product_id=product_id,
+        campaign_id=campaign_id,
+        influencer_id=influencer_id,
+        payload=payload,
+    )
+
+
+@router.post("/{campaign_id}/recipients/{influencer_id}/regenerate", response_model=OutreachCampaignPreviewItem)
+async def regenerate_outreach_campaign_draft(
+    campaign_id: int,
+    influencer_id: int,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> OutreachCampaignPreviewItem:
+    product_id = _require_product_scope(ctx)
+    return await OutreachCampaignService.regenerate_campaign_draft(
+        db, product_id=product_id, campaign_id=campaign_id, influencer_id=influencer_id
+    )
+
+
+@router.post("/{campaign_id}/recipients/{influencer_id}/approve", response_model=OutreachCampaignPreviewItem)
+async def approve_outreach_campaign_draft(
+    campaign_id: int,
+    influencer_id: int,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> OutreachCampaignPreviewItem:
+    product_id = _require_product_scope(ctx)
+    return await OutreachCampaignService.approve_campaign_draft(
+        db, product_id=product_id, campaign_id=campaign_id, influencer_id=influencer_id
+    )
+
+
+@router.post("/{campaign_id}/recipients/{influencer_id}/skip", response_model=OutreachCampaignPreviewItem)
+async def skip_outreach_campaign_draft(
+    campaign_id: int,
+    influencer_id: int,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> OutreachCampaignPreviewItem:
+    product_id = _require_product_scope(ctx)
+    return await OutreachCampaignService.skip_campaign_draft(
+        db, product_id=product_id, campaign_id=campaign_id, influencer_id=influencer_id
     )
 
 

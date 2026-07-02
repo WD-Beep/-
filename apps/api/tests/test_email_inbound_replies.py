@@ -708,14 +708,32 @@ async def test_reply_work_count_only_counts_matched_influencer_replies_for_badge
         assert matched.status == "ingested"
         assert unmatched.status == "ingested"
 
-        unprocessed_count, unmatched_count = await EmailReplyService.count_reply_work(
+        unprocessed_count, unmatched_count, unviewed_count = await EmailReplyService.count_reply_work(
             db,
             product_id=product_id,
         )
 
         assert unprocessed_count == 1
         assert unmatched_count == 1
+        assert unviewed_count == 2
 
+        marked = await EmailReplyService.update_reply(
+            db,
+            product_id=product_id,
+            reply_id=matched.reply_id,
+            mark_viewed=True,
+        )
+
+        assert marked.viewed_at is not None
+
+        unprocessed_count, unmatched_count, unviewed_count = await EmailReplyService.count_reply_work(
+            db,
+            product_id=product_id,
+        )
+
+        assert unprocessed_count == 1
+        assert unmatched_count == 1
+        assert unviewed_count == 1
 
 @pytest.mark.asyncio
 async def test_reply_status_filter_and_manual_link_marks_influencer_replied():

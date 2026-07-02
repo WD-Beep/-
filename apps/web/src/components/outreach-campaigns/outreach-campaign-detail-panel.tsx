@@ -14,6 +14,11 @@ import {
   fetchOutreachCampaignRecipients,
   fetchOutreachCampaignReplyBoard,
   fetchOutreachCampaigns,
+  openOutreachCampaignDraft,
+  approveOutreachCampaignDraft,
+  skipOutreachCampaignDraft,
+  regenerateOutreachCampaignDraft,
+  updateOutreachCampaignDraft,
   type OutreachCampaign,
   type OutreachCampaignPreviewItem,
   type OutreachCampaignReplyBoard,
@@ -25,6 +30,7 @@ import {
   buildCampaignStatsLine,
   buildSkipReasonSummary,
   getCampaignPhaseLabel,
+  getOutreachDraftStatusLabel,
   getReplyStatusLabel,
   isCampaignFullySkipped,
 } from "@/lib/outreach-campaign-helpers";
@@ -48,6 +54,10 @@ type DetailRow = {
   matched_knowledge: OutreachCampaignPreviewItem["matched_knowledge"];
   can_queue: boolean;
   skip_reason: string | null;
+  draft_status: string;
+  is_high_value: boolean;
+  opened_at: string | null;
+  approval_block_reason: string | null;
   send_status: string;
   reply_status: string;
   reply_time: string | null;
@@ -102,6 +112,10 @@ function mergeRows(
       matched_knowledge: item.matched_knowledge,
       can_queue: item.can_queue,
       skip_reason: item.skip_reason ?? reply?.skip_reason ?? null,
+      draft_status: item.draft_status,
+      is_high_value: item.is_high_value,
+      opened_at: item.opened_at,
+      approval_block_reason: item.approval_block_reason,
       send_status: reply?.send_status ?? (item.skip_reason ? "skipped" : item.can_queue ? "not_queued" : "skipped"),
       reply_status: reply?.reply_status ?? (item.skip_reason ? "skipped" : "unreplied"),
       reply_time: reply?.reply_time ?? null,
@@ -123,6 +137,7 @@ export function OutreachCampaignDetailPanel({ campaignId }: { campaignId: number
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [busyInfluencerId, setBusyInfluencerId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -144,6 +159,38 @@ export function OutreachCampaignDetailPanel({ campaignId }: { campaignId: number
       setLoading(false);
     }
   }, [campaignId]);
+
+  const runDraftAction = useCallback(
+    async (influencerId: number, action: "open" | "approve" | "skip" | "regenerate" | "edit") => {
+      setBusyInfluencerId(influencerId);
+      setError(null);
+      try {
+        if (action === "open") {
+          await openOutreachCampaignDraft(campaignId, influencerId);
+          setExpandedId(influencerId);
+        } else if (action === "approve") {
+          await approveOutreachCampaignDraft(campaignId, influencerId);
+        } else if (action === "skip") {
+          await skipOutreachCampaignDraft(campaignId, influencerId);
+        } else if (action === "regenerate") {
+          await regenerateOutreachCampaignDraft(campaignId, influencerId);
+        } else {
+          const current = recipients.find((row) => row.influencer_id === influencerId);
+          const subject = window.prompt("编辑邮件标题", current?.subject || "");
+          if (subject === null) return;
+          const body = window.prompt("编辑邮件正文", current?.body || "");
+          if (body === null) return;
+          await updateOutreachCampaignDraft(campaignId, influencerId, { subject, body });
+        }
+        await load();
+      } catch (err) {
+        setError(translateErrorMessage(err instanceof Error ? err.message : "草稿操作失败"));
+      } finally {
+        setBusyInfluencerId(null);
+      }
+    },
+    [campaignId, load, recipients],
+  );
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -294,8 +341,13 @@ export function OutreachCampaignDetailPanel({ campaignId }: { campaignId: number
                           </td>
                           <td className="py-2 pr-3">{row.recipient || "-"}</td>
                           <td className="py-2 pr-3">
-                            <div>{sendStatusLabel(row.send_status)}</div>
-                            <div className="text-xs text-muted-foreground">{getReplyStatusLabel(row.reply_status)}</div>
+                            <div>{getOutreachDraftStatusLabel(row.draft_status)}</div>
+                            <div className="text-xs text-muted-foreground">
+                              {sendStatusLabel(row.send_status)} / {getReplyStatusLabel(row.reply_status)}
+                            </div>
+                            {row.is_high_value && row.approval_block_reason ? (
+                              <div className="mt-1 text-xs text-amber-700">高价值，需打开确认</div>
+                            ) : null}
                           </td>
                           <td className="max-w-[220px] py-2 pr-3">{truncate(row.subject || "-", 80)}</td>
                           <td className="max-w-[220px] py-2 pr-3 text-xs text-muted-foreground">
@@ -312,9 +364,47 @@ export function OutreachCampaignDetailPanel({ campaignId }: { campaignId: number
                             )}
                           </td>
                           <td className="py-2">
-                            <Button size="sm" variant="outline" onClick={() => setExpandedId(row.influencer_id)}>
-                              查看邮件内容
-                            </Button>
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void runDraftAction(row.influencer_id, "open")}
+                                disabled={busyInfluencerId === row.influencer_id}
+                              >
+                                打开
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void runDraftAction(row.influencer_id, "edit")}
+                                disabled={busyInfluencerId === row.influencer_id || row.draft_status === "queued" || row.draft_status === "sent"}
+                              >
+                                编辑
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void runDraftAction(row.influencer_id, "regenerate")}
+                                disabled={busyInfluencerId === row.influencer_id || row.draft_status === "queued" || row.draft_status === "sent"}
+                              >
+                                重生成
+                              </Button>
+                              <Button
+                                size="sm"
+                                onClick={() => void runDraftAction(row.influencer_id, "approve")}
+                                disabled={busyInfluencerId === row.influencer_id || row.draft_status === "approved" || row.draft_status === "queued" || row.draft_status === "sent"}
+                              >
+                                批准
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void runDraftAction(row.influencer_id, "skip")}
+                                disabled={busyInfluencerId === row.influencer_id || row.draft_status === "queued" || row.draft_status === "sent"}
+                              >
+                                跳过
+                              </Button>
+                            </div>
                           </td>
                         </tr>
                       ))}

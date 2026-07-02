@@ -25,7 +25,13 @@ class OutreachCampaignRecipient(Base):
     matched_knowledge: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     can_queue: Mapped[bool] = mapped_column(Boolean, default=False)
     skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    draft_status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending_review", server_default="pending_review", index=True)
+    is_high_value: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    approval_block_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     previewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    skipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     queue_item_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("outreach_send_queue.id", ondelete="SET NULL"), nullable=True
