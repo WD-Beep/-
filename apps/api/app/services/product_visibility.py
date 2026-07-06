@@ -23,6 +23,7 @@ _TEST_KEYWORDS = (
 
 _SEED_SLUGS = {item["slug"] for item in BRAND_PRODUCT_SEEDS}
 _SYSTEM_SLUGS = {"default"}
+_TEST_PREFIXES = ("codex-", "qa-", "monthlyprodect", "monthly-product")
 
 
 class ProductLike(Protocol):
@@ -54,7 +55,7 @@ def looks_like_test_product(*, name: str, slug: str, brand: str | None = None) -
     if _HASH_SUFFIX_RE.search(name) or _HASH_SUFFIX_RE.search(slug):
         return True
 
-    if slug.startswith("test-product") or slug.startswith("dup-slug-"):
+    if slug.startswith(("test-product", "dup-slug-")) or slug.startswith(_TEST_PREFIXES):
         return True
 
     return False

@@ -32,7 +32,9 @@ import {
   previewOutreachCampaign,
   queueOutreachCampaign,
   scheduleOutreachSendQueue,
+  sendManualOutreachEmail,
   type MessageTemplate,
+  type ManualOutreachSendMode,
   type OutreachCampaignCreatePayload,
   type OutreachCampaignPreviewResponse,
   type OutreachOneClickWorkbench,
@@ -44,11 +46,14 @@ import {
   buildImmediateSendResultMessage,
   buildImmediateSendStartedMessage,
   buildLocalDateTime,
+  buildManualOutreachConfirmMessage,
+  buildManualOutreachPayload,
   buildOneClickCampaignName,
   buildOutreachCampaignPayload,
   buildApprovedDraftSendConfirmMessage,
   buildPreviewResultMessage,
   buildScheduledQueueSuccessMessage,
+  buildScheduledSendCompletionMessage,
   buildScheduledOutreachQueuePayload,
   buildSkipReasonBreakdown,
   countApprovedOutreachDrafts,
@@ -57,14 +62,16 @@ import {
   formatOneClickDateTime,
   getOutreachDraftStatusLabel,
   getOneClickContentSourceLabel,
-  getOneClickQueueStatusLabel,
+  getOneClickCurrentStatusLabel,
   getOneClickPrimaryDisabledReason,
   humanizeOutreachFailureReason,
+  parseManualOutreachRecipients,
   resolveOneClickSendLimit,
   type OneClickContentSource,
   type OneClickPrimaryActionKind,
   type OneClickQueueStatus,
 } from "@/lib/outreach-campaign-helpers";
+import { outreachWorkbenchStatusLabel } from "@/lib/outreach-workbench-view";
 import { ALL_PRODUCTS_ID } from "@/lib/product-context";
 
 type SourceMode = "filters" | "selected";
@@ -85,13 +92,6 @@ function todayInputValue(): string {
 function timeInputValue(minutesFromNow = 30): string {
   const next = new Date(Date.now() + minutesFromNow * 60 * 1000);
   return `${String(next.getHours()).padStart(2, "0")}:${String(next.getMinutes()).padStart(2, "0")}`;
-}
-
-function statusLabel(status: string): string {
-  if (status === "normal") return "正常";
-  if (status === "not_configured") return "未配置";
-  if (status === "error") return "异常";
-  return status;
 }
 
 function statusVariant(status: string): "success" | "warning" | "destructive" | "secondary" {
@@ -197,6 +197,15 @@ export function OutreachCampaignsPanel() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [queueStatus, setQueueStatus] = useState<OneClickQueueStatus>("not_queued");
   const [lastFailureReason, setLastFailureReason] = useState<string | null>(null);
+  const [manualTestRecipients, setManualTestRecipients] = useState("");
+  const [manualTestSubject, setManualTestSubject] = useState("");
+  const [manualTestBody, setManualTestBody] = useState("");
+  const [manualTestMode, setManualTestMode] = useState<ManualOutreachSendMode>("now");
+  const [manualTestDate, setManualTestDate] = useState(todayInputValue);
+  const [manualTestTime, setManualTestTime] = useState(timeInputValue);
+  const [manualTestBusy, setManualTestBusy] = useState(false);
+  const [manualTestOpen, setManualTestOpen] = useState(false);
+  const [manualTestResult, setManualTestResult] = useState<string | null>(null);
 
   const requiresProduct = productId === ALL_PRODUCTS_ID;
   const selectedCount = prefillIds.length;
@@ -227,6 +236,9 @@ export function OutreachCampaignsPanel() {
     : Math.min(effectiveSendLimit, estimatedSourceCount || workbench?.available_recipient_count || 0);
   const skipBreakdown = preview ? buildSkipReasonBreakdown(preview.items) : { sent: 0, blacklisted: 0, invalid: 0, replied: 0, other: 0 };
   const scheduledAt = sendMode === "now" ? new Date() : buildLocalDateTime(scheduledDate, scheduledTime);
+  const manualParsedRecipients = parseManualOutreachRecipients(manualTestRecipients);
+  const manualScheduledAt =
+    manualTestMode === "scheduled" ? buildLocalDateTime(manualTestDate, manualTestTime) : null;
   const estimatedEndAt =
     scheduledAt && sendCount > 0
       ? estimateCampaignEndTime({
@@ -240,6 +252,18 @@ export function OutreachCampaignsPanel() {
     preview && preview.can_queue_count > 0 && queueStatus === "completed"
       ? "ready_to_send"
       : queueStatus;
+  const aiStatusText = outreachWorkbenchStatusLabel({
+    status: workbench?.ai_generation.status,
+    loading,
+    hasWorkbench: Boolean(workbench),
+    hasError: Boolean(error),
+  });
+  const smtpStatusText = outreachWorkbenchStatusLabel({
+    status: workbench?.smtp.status,
+    loading,
+    hasWorkbench: Boolean(workbench),
+    hasError: Boolean(error),
+  });
 
   const load = useCallback(async (options: { syncLatestCampaign?: boolean } = {}) => {
     setError(null);
@@ -616,17 +640,98 @@ export function OutreachCampaignsPanel() {
     }
   }
 
+  async function runManualTestSend() {
+    setError(null);
+    setManualTestResult(null);
+    if (requiresProduct) {
+      setError("请先选择具体产品/品牌");
+      return;
+    }
+    if (manualParsedRecipients.valid.length === 0) {
+      setError("请先填写至少 1 个有效收件邮箱");
+      return;
+    }
+    if (manualParsedRecipients.invalid.length > 0) {
+      setError(`有 ${manualParsedRecipients.invalid.length} 个邮箱格式不正确，请先修改`);
+      return;
+    }
+    if (manualParsedRecipients.overLimit) {
+      setError("自定义测试发送一次最多支持 10 个收件邮箱");
+      return;
+    }
+    if (!manualTestSubject.trim()) {
+      setError("请先填写测试邮件主题");
+      return;
+    }
+    if (!manualTestBody.trim()) {
+      setError("请先填写测试邮件正文");
+      return;
+    }
+    if (manualTestMode === "scheduled" && !manualScheduledAt) {
+      setError("请先选择定时发送日期和时间");
+      return;
+    }
+    if (!smtpReady) {
+      setError("邮件没有发出。原因：SMTP 未配置，请先在设置中配置发件邮箱。");
+      return;
+    }
+    if (!window.confirm(buildManualOutreachConfirmMessage(manualParsedRecipients.valid.length, manualTestMode))) {
+      return;
+    }
+
+    setManualTestBusy(true);
+    try {
+      const payload = buildManualOutreachPayload({
+        recipientsText: manualTestRecipients,
+        subject: manualTestSubject,
+        body: manualTestBody,
+        sendMode: manualTestMode,
+        scheduledAt: manualScheduledAt,
+      });
+      const result = await sendManualOutreachEmail(payload);
+      setManualTestResult(result.message);
+      await load({ syncLatestCampaign: false });
+    } catch (err) {
+      setError(translateErrorMessage(err instanceof Error ? err.message : "自定义测试邮件发送失败"));
+    } finally {
+      setManualTestBusy(false);
+    }
+  }
+
   const previewItems = preview?.items.slice(0, 5) ?? [];
-  const currentStatusLabel =
-    busyAction === "preview"
-      ? "生成中"
-      : busyAction === "send"
-        ? "发送中"
-        : busyAction === "queue"
-          ? "创建定时中"
-          : copyMode === "ai" && hasPreview && effectiveQueueStatus === "ready_to_send"
-            ? "待确认"
-            : getOneClickQueueStatusLabel(effectiveQueueStatus);
+  const isFullySkippedPreview = Boolean(
+    preview &&
+      preview.total > 0 &&
+      preview.can_queue_count === 0 &&
+      preview.skip_count >= preview.total,
+  );
+  const scheduledCompletionMessage =
+    workbench?.latest_campaign && workbench.latest_campaign.queued_count > 0
+    ? buildScheduledSendCompletionMessage({
+        queuedCount: workbench.latest_campaign.queued_count,
+        sentCount: workbench.latest_campaign.sent_count,
+        failedCount: workbench.latest_campaign.failed_count,
+      })
+    : null;
+  const currentStatusLabel = getOneClickCurrentStatusLabel({
+    busyAction,
+    copyMode,
+    hasPreview,
+    queueStatus: effectiveQueueStatus,
+    preview,
+  });
+  const currentStatusTone =
+    effectiveQueueStatus === "failed"
+      ? "destructive"
+      : isFullySkippedPreview
+        ? "warning"
+        : effectiveQueueStatus === "completed"
+          ? "success"
+          : effectiveQueueStatus === "not_queued"
+            ? "secondary"
+            : "warning";
+  const currentStatusBadgeVariant =
+    currentStatusTone === "secondary" ? "outline" : currentStatusTone;
 
   return (
     <AdminShell
@@ -635,39 +740,148 @@ export function OutreachCampaignsPanel() {
     >
       {requiresProduct ? <ErrorAlert message="请先在左侧选择具体产品/品牌" className="mb-4" /> : null}
       {error ? <ErrorAlert message={error} className="mb-4" /> : null}
+      {!message && !error && scheduledCompletionMessage ? (
+        <SuccessAlert message={scheduledCompletionMessage} className="mb-4" />
+      ) : null}
       {message ? <SuccessAlert message={message} className="mb-4" /> : null}
 
       <div className="campaign-workbench">
         <div className="campaign-status-strip">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="campaign-status-main">
             <div className="campaign-status-metrics">
               <MetricPill
                 label="AI 话术"
-                value={loading ? "检查中" : statusLabel(workbench?.ai_generation.status ?? "not_configured")}
+                value={aiStatusText}
                 status={statusVariant(workbench?.ai_generation.status ?? "not_configured")}
               />
               <MetricPill
                 label="SMTP"
-                value={loading ? "检查中" : statusLabel(workbench?.smtp.status ?? "not_configured")}
+                value={smtpStatusText}
                 status={statusVariant(workbench?.smtp.status ?? "not_configured")}
               />
               <MetricPill label="可发送邮箱" value={`${workbench?.available_recipient_count ?? 0} 个`} />
               <MetricPill
                 label="当前状态"
                 value={currentStatusLabel}
-                status={effectiveQueueStatus === "failed" ? "destructive" : effectiveQueueStatus === "completed" ? "success" : effectiveQueueStatus === "not_queued" ? "secondary" : "warning"}
+                status={currentStatusTone}
               />
               <MetricPill
                 label="发送方式"
                 value={sendModeLabel(sendMode)}
               />
             </div>
-            <Button variant="outline" onClick={() => void load()} disabled={loading}>
-              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-              刷新
-            </Button>
+            <div className="campaign-status-actions">
+              <div className="campaign-manual-test-summary">
+                <div>
+                  <div className="text-xs font-medium text-slate-500">SMTP</div>
+                  <div className="mt-0.5 text-sm font-semibold text-slate-900">{smtpStatusText}</div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-medium text-slate-500">{"\u6700\u8fd1\u6d4b\u8bd5"}</div>
+                  <div className="mt-0.5 truncate text-sm text-slate-600">{manualTestResult ?? "\u6682\u65e0"}</div>
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                onClick={() => setManualTestOpen((open) => !open)}
+                aria-expanded={manualTestOpen}
+              >
+                <Send className="h-4 w-4" />
+                {"\u6d4b\u8bd5\u53d1\u9001"}
+              </Button>
+              <Button variant="outline" onClick={() => void load()} disabled={loading}>
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                {"\u5237\u65b0"}
+              </Button>
+            </div>
           </div>
         </div>
+
+        {manualTestOpen ? (
+          <div className="campaign-manual-test-panel">
+            <div className="campaign-manual-test-grid">
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-slate-600">{"\u6536\u4ef6\u90ae\u7bb1\uff08\u6700\u591a 10 \u4e2a\uff0c\u53ef\u6362\u884c\u6216\u9017\u53f7\u5206\u9694\uff09"}</span>
+                <Textarea
+                  value={manualTestRecipients}
+                  onChange={(event) => {
+                    setManualTestRecipients(event.target.value);
+                    setManualTestResult(null);
+                  }}
+                  rows={2}
+                  placeholder={`creator@example.com\npartner@example.com`}
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-slate-600">{"\u90ae\u4ef6\u4e3b\u9898"}</span>
+                <Input
+                  value={manualTestSubject}
+                  onChange={(event) => setManualTestSubject(event.target.value)}
+                  placeholder={"\u6d4b\u8bd5\u5408\u4f5c\u90ae\u4ef6\u6807\u9898"}
+                />
+              </label>
+              <label className="space-y-1 campaign-manual-test-body">
+                <span className="text-xs font-medium text-slate-600">{"\u90ae\u4ef6\u6b63\u6587"}</span>
+                <Textarea
+                  value={manualTestBody}
+                  onChange={(event) => setManualTestBody(event.target.value)}
+                  rows={4}
+                  placeholder={"\u586b\u5199\u8981\u771f\u5b9e\u53d1\u9001\u7ed9\u8fd9\u4e9b\u90ae\u7bb1\u7684\u6b63\u6587"}
+                />
+              </label>
+            </div>
+
+            <div className="campaign-manual-test-controls">
+              <div className="campaign-segmented inline-grid grid-cols-2">
+                {(["now", "scheduled"] as ManualOutreachSendMode[]).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setManualTestMode(mode)}
+                    className={`h-9 rounded px-4 text-sm font-medium transition-colors ${
+                      manualTestMode === mode
+                        ? "bg-[hsl(210_30%_99%)] text-blue-700 shadow-sm"
+                        : "text-slate-600 hover:text-slate-950"
+                    }`}
+                  >
+                    {mode === "now" ? "\u7acb\u5373\u53d1\u9001" : "\u5b9a\u65f6\u53d1\u9001"}
+                  </button>
+                ))}
+              </div>
+              {manualTestMode === "scheduled" ? (
+                <div className="campaign-manual-test-time">
+                  <Input
+                    type="date"
+                    value={manualTestDate}
+                    onChange={(event) => setManualTestDate(event.target.value)}
+                  />
+                  <Input
+                    type="time"
+                    value={manualTestTime}
+                    onChange={(event) => setManualTestTime(event.target.value)}
+                  />
+                </div>
+              ) : null}
+              <Button onClick={() => void runManualTestSend()} disabled={manualTestBusy || requiresProduct}>
+                {manualTestBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                {manualTestMode === "now" ? "\u53d1\u9001\u6d4b\u8bd5\u90ae\u4ef6" : "\u52a0\u5165\u5b9a\u65f6\u6d4b\u8bd5"}
+              </Button>
+            </div>
+
+            <div className="campaign-hint-row campaign-manual-test-hint">
+              <span>{"\u6709\u6548\u90ae\u7bb1\uff1a"}{manualParsedRecipients.valid.length}</span>
+              <span>{"\u683c\u5f0f\u9519\u8bef\uff1a"}{manualParsedRecipients.invalid.length}</span>
+              <span>{manualParsedRecipients.overLimit ? "\u5df2\u8d85\u8fc7 10 \u4e2a\u4e0a\u9650" : "\u4e0a\u9650 10 \u4e2a"}</span>
+              {manualTestMode === "scheduled" ? (
+                <span>
+                  <CalendarClock className="mr-1 inline h-3.5 w-3.5" />
+                  {manualScheduledAt ? formatOneClickDateTime(manualScheduledAt) : "\u672a\u9009\u62e9\u65f6\u95f4"}
+                </span>
+              ) : null}
+            </div>
+            {manualTestResult ? <SuccessAlert message={manualTestResult} /> : null}
+          </div>
+        ) : null}
 
         <div className="campaign-layout-grid">
           <div className="campaign-main-flow">
@@ -1036,7 +1250,7 @@ export function OutreachCampaignsPanel() {
                   </div>
                   <div className="flex justify-between gap-3">
                     <span className="text-slate-500">SMTP 状态</span>
-                    <span className="font-medium">{statusLabel(workbench?.smtp.status ?? "not_configured")}</span>
+                    <span className="font-medium">{smtpStatusText}</span>
                   </div>
                   <div className="flex justify-between gap-3">
                     <span className="text-slate-500">预计发送数量</span>
@@ -1048,7 +1262,7 @@ export function OutreachCampaignsPanel() {
                   </div>
                   <div className="flex justify-between gap-3">
                     <span className="text-slate-500">当前状态</span>
-                    <Badge variant={effectiveQueueStatus === "failed" ? "destructive" : effectiveQueueStatus === "completed" ? "success" : effectiveQueueStatus === "not_queued" ? "outline" : "warning"}>
+                    <Badge variant={currentStatusBadgeVariant}>
                       {currentStatusLabel}
                     </Badge>
                   </div>
@@ -1074,6 +1288,11 @@ export function OutreachCampaignsPanel() {
                   <div className="campaign-inline-error flex gap-2 text-sm">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                     {lastFailureReason}
+                  </div>
+                ) : null}
+                {scheduledCompletionMessage ? (
+                  <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-800">
+                    {scheduledCompletionMessage}
                   </div>
                 ) : null}
 

@@ -107,6 +107,37 @@ const problemRows = [
   },
 ];
 
+const slowOrEmptyDiagnostics = [
+  {
+    title: "发现候选不等于已经入库",
+    detail:
+      "任务运行时会先发现候选、去重、补采主页，然后才过滤和入库。看到“发现 132、补采 91、入库 0”时，可能只是还停在发现或补采阶段，并不是最终没有数据。",
+  },
+  {
+    title: "电商类目路径会拖慢搜索",
+    detail:
+      "像“Beauty & Personal Care > Tools & Accessories > Bags & Cases > Travel Cases”这种完整类目路径，不像社媒用户会写的关键词。系统会扩展成多组关键词，多平台逐个搜索，容易慢、命中少或命中低相关账号。",
+  },
+  {
+    title: "多平台一起跑会更慢",
+    detail:
+      "YouTube、Instagram、Facebook 同时采集时，每个平台都要调用外部接口。Facebook / Apify 搜索经常单个关键词就耗时几十秒，建议先用单平台或两平台小批量验证。",
+  },
+  {
+    title: "粉丝和联系方式门槛会让结果变少",
+    detail:
+      "最低粉丝数、必须有联系方式、平台主页是否能补采成功，都会影响最终入库。Makeup Bag 历史任务里，大量候选因为粉丝低于门槛或主页详情缺失被过滤，所以会出现“发现不少但入库 0”。",
+  },
+];
+
+const makeupBagQuickFixes = [
+  "关键词改成自然搜索词：makeup bag、travel makeup bag、cosmetic bag、beauty travel organizer、makeup pouch。",
+  "先只选 Instagram + YouTube；Facebook 慢或无返回时，单独晚点再跑。",
+  "先跑 20 条小样本，确认候选质量后再扩大数量。",
+  "需要先建红人池时，把最低粉丝数降到 3,000 或 5,000，并暂时不强制要求联系方式。",
+  "评论区发现会增加耗时；追求速度时先关闭，等主搜索有效后再开启。",
+];
+
 const workflow = [
   "先在左侧选择正确产品，避免数据进错产品。",
   "优先准备 20 到 50 个主页链接，链接导入通常比关键词更稳定。",
@@ -221,6 +252,35 @@ export function CollectionGuidePanel() {
                 {weakInputs.map((item) => (
                   <div key={item} className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
                     {item}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <section className="ops-panel overflow-hidden">
+            <div className="border-b bg-slate-50/70 px-5 py-4">
+              <SectionTitle
+                icon={AlertTriangle}
+                title="为什么一直采集很慢，或者显示 0 入库"
+                description="先分清楚是外部平台慢、关键词不准、还没走到入库阶段，还是筛选条件太严格。不要反复运行同一个大任务。"
+              />
+            </div>
+            <div className="grid gap-3 p-4 lg:grid-cols-4">
+              {slowOrEmptyDiagnostics.map((item) => (
+                <article key={item.title} className="rounded-lg border bg-background p-4">
+                  <h3 className="text-sm font-semibold text-slate-950">{item.title}</h3>
+                  <p className="mt-2 text-sm leading-6 text-slate-600">{item.detail}</p>
+                </article>
+              ))}
+            </div>
+            <div className="border-t bg-slate-50/70 px-5 py-4">
+              <p className="text-sm font-semibold text-slate-950">Makeup Bag 类任务推荐这样调</p>
+              <div className="mt-3 grid gap-2 lg:grid-cols-2">
+                {makeupBagQuickFixes.map((item) => (
+                  <div key={item} className="flex gap-2 rounded-md bg-white px-3 py-2 text-sm leading-6 text-slate-700 ring-1 ring-slate-200">
+                    <CheckCircle2 className="mt-1 h-3.5 w-3.5 shrink-0 text-emerald-600" />
+                    <span>{item}</span>
                   </div>
                 ))}
               </div>

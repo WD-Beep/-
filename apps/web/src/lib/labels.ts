@@ -291,6 +291,7 @@ export const TASK_STATUS_LABELS: Record<
   { label: string; variant: "default" | "secondary" | "success" | "warning" | "destructive" }
 > = {
   pending: { label: "待运行", variant: "warning" },
+  queued: { label: "排队中", variant: "warning" },
   running: { label: "运行中", variant: "default" },
   completed: { label: "成功", variant: "success" },
   completed_with_results: { label: "有结果", variant: "success" },

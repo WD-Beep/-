@@ -1,5 +1,5 @@
-import { DashboardPanel } from "@/components/dashboard/dashboard-panel";
+import { OperationsHomePanel } from "@/components/dashboard/operations-home-panel";
 
 export default function DashboardPage() {
-  return <DashboardPanel />;
+  return <OperationsHomePanel />;
 }

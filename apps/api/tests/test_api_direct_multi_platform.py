@@ -1316,6 +1316,16 @@ def test_youtube_outer_platform_timeout_allows_provider_deadline_to_return(monke
     assert timeout > settings.youtube_discovery_max_duration_seconds
 
 
+def test_tiktok_outer_platform_timeout_allows_apify_abort_grace(monkeypatch):
+    from app.services.api_direct_provider import _platform_timeout_seconds
+
+    monkeypatch.setattr(settings, "apify_tiktok_timeout_seconds", 90)
+
+    timeout = _platform_timeout_seconds("tiktok", competitor_mode=False)
+
+    assert timeout == settings.apify_tiktok_timeout_seconds + 5
+
+
 def test_facebook_provider_routes_to_apify_when_configured():
     from app.services.api_direct_provider import _provider_cls, get_platform_capability
 

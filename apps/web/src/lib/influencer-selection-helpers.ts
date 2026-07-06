@@ -113,6 +113,30 @@ export function buildOutreachCampaignsUrl(options: {
   return qs ? `/outreach-campaigns?${qs}` : "/outreach-campaigns";
 }
 
+export function buildOutreachCampaignResultUrl(options: {
+  campaignId: number;
+  message: string;
+  ids?: number[];
+  selectAll?: boolean;
+  filters?: Omit<InfluencerListFilters, "page" | "pageSize">;
+  total?: number;
+}): string {
+  const params = new URLSearchParams();
+  params.set("highlight", String(options.campaignId));
+  params.set("message", options.message);
+  if (options.selectAll && options.filters) {
+    params.set("select_all", "1");
+    if (options.total != null) params.set("total", String(options.total));
+    const encoded = encodeFiltersForCampaign(options.filters);
+    for (const [key, value] of Object.entries(encoded)) {
+      params.set(key, String(value));
+    }
+  } else if (options.ids?.length) {
+    params.set("ids", options.ids.join(","));
+  }
+  return `/outreach-campaigns?${params.toString()}`;
+}
+
 export function buildOneClickCampaignName(now = new Date()): string {
   return `一键批量发送 ${now.toLocaleDateString("zh-CN")}`;
 }

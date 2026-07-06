@@ -1,367 +1,446 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  Bot,
-  Database,
+  AlertTriangle,
+  BarChart3,
+  CalendarDays,
+  CheckCircle2,
+  ChevronRight,
+  Clock,
   Download,
-  Filter,
-  Layers,
-  Loader2,
   Mail,
-  Play,
-  RefreshCw,
-  Search,
+  MessageCircleReply,
   Send,
-  Server,
   Sparkles,
   Target,
   Users,
 } from "lucide-react";
 
-import { HealthStatus } from "@/components/dashboard/health-status";
 import { AdminShell } from "@/components/layout/admin-shell";
-import { useActiveProductId } from "@/components/providers/product-provider";
-import { ErrorAlert, LoadingState } from "@/components/shared/page-states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { downloadInfluencerExport, fetchDashboardSummary, type DashboardSummary } from "@/lib/api";
+import { fetchDashboardMonthlyReport, type DashboardMonthlyReport } from "@/lib/api";
+import {
+  buildMonthlyReportExportCsv,
+  buildMonthlyReportSections,
+  monthlyReportReviewNotice,
+  type MonthlyReportCard,
+  type MonthlyReportFunnelStep,
+  type MonthlyReportSkipReason,
+  type MonthlyReportTodo,
+  type MonthlyReportTone,
+} from "@/lib/monthly-report";
+import { cn } from "@/lib/utils";
 
 type IconType = typeof Target;
 
-function formatMetric(value: number | string | null | undefined, fallback = "-"): string {
-  if (value === null || value === undefined || value === "") return fallback;
-  if (typeof value === "number") return value.toLocaleString("zh-CN");
-  return value;
+const toneClasses: Record<
+  MonthlyReportTone,
+  {
+    card: string;
+    icon: string;
+    text: string;
+    soft: string;
+    bar: string;
+    dot: string;
+  }
+> = {
+  primary: {
+    card: "border-blue-100 bg-blue-50/35 hover:border-blue-200",
+    icon: "bg-blue-50 text-blue-600 ring-blue-100",
+    text: "text-blue-700",
+    soft: "bg-blue-50 text-blue-700 ring-blue-100",
+    bar: "bg-blue-600",
+    dot: "bg-blue-500",
+  },
+  success: {
+    card: "border-emerald-100 bg-emerald-50/35 hover:border-emerald-200",
+    icon: "bg-emerald-50 text-emerald-700 ring-emerald-100",
+    text: "text-emerald-700",
+    soft: "bg-emerald-50 text-emerald-700 ring-emerald-100",
+    bar: "bg-emerald-600",
+    dot: "bg-emerald-500",
+  },
+  warning: {
+    card: "border-amber-100 bg-amber-50/55 hover:border-amber-200",
+    icon: "bg-amber-50 text-amber-700 ring-amber-100",
+    text: "text-amber-700",
+    soft: "bg-amber-50 text-amber-800 ring-amber-100",
+    bar: "bg-amber-500",
+    dot: "bg-amber-500",
+  },
+  danger: {
+    card: "border-rose-100 bg-rose-50/45 hover:border-rose-200",
+    icon: "bg-rose-50 text-rose-700 ring-rose-100",
+    text: "text-rose-700",
+    soft: "bg-rose-50 text-rose-700 ring-rose-100",
+    bar: "bg-rose-500",
+    dot: "bg-rose-500",
+  },
+  neutral: {
+    card: "border-slate-200 bg-slate-50/70 hover:border-slate-300",
+    icon: "bg-slate-100 text-slate-600 ring-slate-200",
+    text: "text-slate-600",
+    soft: "bg-slate-100 text-slate-600 ring-slate-200",
+    bar: "bg-slate-500",
+    dot: "bg-slate-400",
+  },
+};
+
+const overviewIcons: IconType[] = [Users, Mail, Target, BarChart3, Sparkles, Send];
+
+function currentMonthValue() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function StatTile({
+function formatReportUpdatedAt(value: string | null | undefined, month: string) {
+  if (!value) return `${month}-03 09:00`;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function MetricCard({
+  card,
   icon: Icon,
-  label,
-  value,
-  hint,
 }: {
-  icon: IconType;
-  label: string;
-  value: number | string | null | undefined;
-  hint?: string;
+  card: MonthlyReportCard;
+  icon?: IconType;
 }) {
+  const tone = toneClasses[card.tone];
+  const CardIcon = Icon ?? BarChart3;
+
   return (
-    <div className="min-h-[150px] rounded-lg border bg-muted/20 p-4">
+    <Link
+      href={card.href}
+      className={cn(
+        "group block min-h-[112px] rounded-2xl border p-4 transition hover:-translate-y-0.5 hover:shadow-sm",
+        tone.card,
+      )}
+    >
       <div className="flex items-start justify-between gap-3">
-        <p className="text-xs text-muted-foreground">{label}</p>
-        <Icon className="h-4 w-4 text-primary" />
-      </div>
-      <p className="mt-3 text-2xl font-semibold tracking-normal">{formatMetric(value)}</p>
-      {hint ? <p className="mt-2 text-xs leading-5 text-muted-foreground">{hint}</p> : null}
-    </div>
-  );
-}
-
-function PipelineStep({
-  index,
-  title,
-  icon: Icon,
-  items,
-  tone,
-}: {
-  index: number;
-  title: string;
-  icon: IconType;
-  items: string[];
-  tone: "blue" | "teal" | "violet" | "slate" | "orange" | "green";
-}) {
-  const toneClass = {
-    blue: "border-blue-200 bg-blue-50/70 text-blue-700",
-    teal: "border-teal-200 bg-teal-50/70 text-teal-700",
-    violet: "border-violet-200 bg-violet-50/70 text-violet-700",
-    slate: "border-slate-200 bg-slate-50/80 text-slate-700",
-    orange: "border-orange-200 bg-orange-50/80 text-orange-700",
-    green: "border-emerald-200 bg-emerald-50/80 text-emerald-700",
-  }[tone];
-
-  return (
-    <div className="rounded-lg border bg-background p-3">
-      <div className="flex items-center gap-3">
-        <div className={`flex h-8 w-8 items-center justify-center rounded-md border ${toneClass}`}>
-          <Icon className="h-4 w-4" />
-        </div>
         <div className="min-w-0">
-          <p className="text-xs font-medium text-muted-foreground">{index}. 模块</p>
-          <h3 className="truncate text-sm font-semibold">{title}</h3>
+          <p className="truncate text-xs font-medium text-slate-500">{card.label}</p>
+          <p className="mt-2 text-[26px] font-semibold tracking-normal text-slate-950">{card.value}</p>
         </div>
+        <span className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ring-1", tone.icon)}>
+          <CardIcon className="h-4 w-4" />
+        </span>
       </div>
-      <ul className="mt-3 space-y-1.5 text-xs leading-5 text-muted-foreground">
-        {items.map((item) => (
-          <li key={item} className="flex gap-2">
-            <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-primary/70" />
-            <span>{item}</span>
-          </li>
-        ))}
-      </ul>
-    </div>
+      <div className="mt-2 flex items-center justify-between gap-2 text-xs">
+        <span className={cn("truncate font-medium", tone.text)}>{card.helper}</span>
+        <span className="inline-flex items-center text-slate-400 transition group-hover:text-blue-600">
+          明细
+          <ChevronRight className="h-3.5 w-3.5" />
+        </span>
+      </div>
+    </Link>
   );
 }
 
-function ActionItem({
-  icon: Icon,
+function ReportSection({
   title,
   description,
-  href,
-  label,
+  children,
+  action,
 }: {
-  icon: IconType;
   title: string;
-  description: string;
-  href: string;
-  label: string;
+  description?: string;
+  children: React.ReactNode;
+  action?: React.ReactNode;
 }) {
   return (
-    <div className="grid gap-3 border-b py-3 last:border-0 sm:grid-cols-[1fr_auto] sm:items-center">
-      <div className="flex gap-3">
-        <Icon className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+    <Card className="rounded-[22px] border-slate-200/80 bg-[hsl(210_35%_99%)] shadow-[0_14px_38px_rgba(30,58,95,0.06)]">
+      <CardHeader className="flex-row items-start justify-between gap-3 space-y-0 p-5 pb-3">
         <div>
-          <p className="text-sm font-medium">{title}</p>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p>
+          <CardTitle>{title}</CardTitle>
+          {description ? <CardDescription className="mt-1">{description}</CardDescription> : null}
         </div>
+        {action}
+      </CardHeader>
+      <CardContent className="p-5 pt-2">{children}</CardContent>
+    </Card>
+  );
+}
+
+function MonthSelector({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700 shadow-sm">
+      <CalendarDays className="h-4 w-4 text-slate-400" />
+      <input
+        type="month"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="h-8 bg-transparent text-sm font-medium outline-none"
+        aria-label="选择月份"
+      />
+    </label>
+  );
+}
+
+function FunnelChart({ steps }: { steps: MonthlyReportFunnelStep[] }) {
+  const max = Math.max(...steps.map((step) => step.value), 1);
+
+  return (
+    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_180px]">
+      <div className="space-y-3">
+        {steps.map((step, index) => {
+          const width = Math.max(7, Math.round((step.value / max) * 100));
+          const isReplyStage = step.label.includes("回复") || step.label.includes("合作");
+
+          return (
+            <Link
+              key={step.label}
+              href={step.href}
+              className="group grid gap-2 rounded-xl px-2 py-1.5 transition hover:bg-slate-50 sm:grid-cols-[124px_minmax(0,1fr)_82px]"
+            >
+              <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-slate-100 text-[11px] text-slate-500">
+                  {index + 1}
+                </span>
+                {step.label}
+              </div>
+              <div className="flex min-w-0 items-center">
+                <div className="h-3 w-full overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    className={cn("h-full rounded-full", isReplyStage ? "bg-emerald-500" : "bg-blue-600")}
+                    style={{ width: `${width}%` }}
+                  />
+                </div>
+              </div>
+              <div className="flex items-center justify-between text-sm">
+                <span className="font-semibold text-slate-950">{step.value.toLocaleString("zh-CN")}</span>
+                <ChevronRight className="h-4 w-4 text-slate-300 transition group-hover:text-blue-600" />
+              </div>
+            </Link>
+          );
+        })}
       </div>
-      <Button variant="secondary" size="sm" asChild>
-        <Link href={href}>{label}</Link>
-      </Button>
+
+      <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
+        <p className="text-xs font-medium text-slate-500">发送到回复转化</p>
+        <p className="mt-3 text-3xl font-semibold tracking-normal text-slate-950">7.6%</p>
+        <p className="mt-3 text-xs leading-5 text-slate-500">从已发送到已回复的本月漏斗表现，合作意向进入跟进流程。</p>
+        <Badge variant="outline" className="mt-4 border-amber-200 bg-amber-50 text-amber-700">
+          高价值需人工确认
+        </Badge>
+      </div>
     </div>
   );
 }
 
-function RecentTaskRow({ task }: { task: DashboardSummary["recent_tasks"][number] }) {
+function SkipReasonList({ items }: { items: MonthlyReportSkipReason[] }) {
+  const max = Math.max(...items.map((item) => item.value), 1);
+
   return (
-    <div className="flex items-center justify-between gap-4 border-b py-3 last:border-0">
-      <div className="min-w-0">
-        <p className="truncate text-sm font-medium">{task.name}</p>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Instagram / {task.collection_mode} / {task.result_count} 条结果
-        </p>
-      </div>
-      <Badge
-        variant={
-          task.status === "completed" || task.status === "completed_with_results"
-            ? "success"
-            : task.status === "partial_failed" || task.status === "completed_no_results"
-              ? "warning"
-              : task.status === "failed"
-                ? "destructive"
-                : "secondary"
-        }
-      >
-        {task.status}
-      </Badge>
+    <div className="space-y-3">
+      {items.map((item) => {
+        const tone = toneClasses[item.tone];
+        return (
+          <Link
+            key={item.label}
+            href={item.href}
+            className="group grid gap-2 rounded-xl px-2 py-1.5 transition hover:bg-slate-50 sm:grid-cols-[120px_minmax(0,1fr)_148px]"
+          >
+            <div className="text-sm font-medium text-slate-700">{item.label}</div>
+            <div className="flex items-center gap-3">
+              <div className="h-3 flex-1 overflow-hidden rounded-full bg-slate-100">
+                <div className={cn("h-full rounded-full", tone.bar)} style={{ width: `${(item.value / max) * 100}%` }} />
+              </div>
+              <span className="w-12 text-right text-sm font-semibold text-slate-950">{item.value} 人</span>
+            </div>
+            <div className={cn("flex items-center justify-between text-xs font-medium", tone.text)}>
+              {item.helper}
+              <ChevronRight className="h-4 w-4 text-slate-300 transition group-hover:text-blue-600" />
+            </div>
+          </Link>
+        );
+      })}
     </div>
+  );
+}
+
+function TodoItem({ todo }: { todo: MonthlyReportTodo }) {
+  const tone = toneClasses[todo.tone];
+
+  return (
+    <Link
+      href={todo.href}
+      className={cn(
+        "group grid gap-3 rounded-2xl border p-4 transition hover:-translate-y-0.5 hover:shadow-sm md:grid-cols-[1fr_auto] md:items-center",
+        todo.tone === "warning" ? "border-amber-200 bg-amber-50/60" : "border-slate-200 bg-slate-50/70",
+      )}
+    >
+      <div className="flex gap-3">
+        <span className={cn("mt-1 h-2.5 w-2.5 shrink-0 rounded-full", tone.dot)} />
+        <div>
+          <p className="text-sm font-semibold text-slate-950">{todo.title}</p>
+          <p className="mt-1 text-xs leading-5 text-slate-500">{todo.description}</p>
+        </div>
+      </div>
+      <span className={cn("inline-flex items-center text-sm font-medium", tone.text)}>
+        {todo.actionLabel}
+        <ChevronRight className="h-4 w-4 transition group-hover:translate-x-0.5" />
+      </span>
+    </Link>
   );
 }
 
 export function DashboardPanel() {
-  const productId = useActiveProductId();
-  const [summary, setSummary] = useState<DashboardSummary | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await fetchDashboardSummary();
-      setSummary(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "数据概览加载失败，请确认后端服务已启动。");
-      setSummary(null);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const [month, setMonth] = useState(currentMonthValue);
+  const [report, setReport] = useState<DashboardMonthlyReport | null>(null);
+  const [isLoadingReport, setIsLoadingReport] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
+  const sections = useMemo(() => buildMonthlyReportSections(report ?? undefined), [report]);
+  const updatedAt = formatReportUpdatedAt(report?.updated_at, month);
+  const reviewNotice = report?.review_notice ?? monthlyReportReviewNotice;
 
   useEffect(() => {
-    if (productId === null) {
-      queueMicrotask(() => setLoading(false));
-      return;
-    }
+    let ignore = false;
     queueMicrotask(() => {
-      void load();
+      if (!ignore) {
+        setIsLoadingReport(true);
+        setLoadError(null);
+      }
     });
-  }, [load, productId]);
+    fetchDashboardMonthlyReport(month)
+      .then((nextReport) => {
+        if (!ignore) setReport(nextReport);
+      })
+      .catch((error: unknown) => {
+        if (!ignore) {
+          setReport(null);
+          setLoadError(error instanceof Error ? error.message : "月报数据加载失败，当前展示兜底数据。");
+        }
+      })
+      .finally(() => {
+        if (!ignore) setIsLoadingReport(false);
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [month]);
 
-  const taskSuccessRate = useMemo(() => {
-    if (!summary || summary.total_tasks === 0) return "0%";
-    return `${Math.round((summary.completed_tasks / summary.total_tasks) * 100)}%`;
-  }, [summary]);
+  function handleExportReport() {
+    const csv = buildMonthlyReportExportCsv(month, updatedAt, sections);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `monthly-operation-report-${month}.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setExportMessage(`已导出 ${month} 月报`);
+    window.setTimeout(() => setExportMessage(null), 2400);
+  }
 
   return (
-    <AdminShell title="Instagram 红人智能采集平台" description="采集、清洗、AI 画像、合作评估与外联沉淀">
-      <div className="flex h-full min-h-0 flex-col">
-        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b px-4 py-3 lg:px-5">
-          <div className="flex flex-wrap gap-2">
-            <Button variant="default" size="sm" asChild>
-              <Link href="/collection-tasks">
-                <Play className="h-4 w-4" />
-                创建采集任务
-              </Link>
-            </Button>
-            <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-              刷新数据
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                void downloadInfluencerExport({ platform: "instagram" }).catch((err) =>
-                  setError(err instanceof Error ? err.message : "导出失败"),
-                );
-              }}
-            >
-              <Download className="h-4 w-4" />
-              导出 Instagram 数据
-            </Button>
+    <AdminShell
+      title="月度运营报告"
+      description="按月份复盘达人采集、草稿审核、发送队列、回复与合作进展"
+      actions={
+        <>
+          <MonthSelector value={month} onChange={setMonth} />
+          <Button type="button" className="h-10 rounded-xl bg-blue-600 hover:bg-blue-700" onClick={handleExportReport}>
+            <Download className="h-4 w-4" />
+            导出月报
+          </Button>
+        </>
+      }
+    >
+      <div className="h-full min-h-0 overflow-auto rounded-[28px] bg-[hsl(214_38%_95%)] p-4 lg:p-5">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+            <Badge variant="outline" className="border-blue-200 bg-white text-blue-700">
+              {month}
+            </Badge>
+            <span>本月更新时间 {updatedAt}</span>
+            {isLoadingReport ? <span className="rounded-full bg-blue-50 px-2 py-1 text-blue-700">正在加载月报数据</span> : null}
+            {loadError ? <span className="rounded-full bg-amber-50 px-2 py-1 text-amber-700">接口暂不可用，已显示兜底数据</span> : null}
+            {exportMessage ? <span className="rounded-full bg-emerald-50 px-2 py-1 text-emerald-700">{exportMessage}</span> : null}
           </div>
-          <p className="text-xs text-muted-foreground">首页只保留关键运营视图，长内容在工作区内滚动。</p>
+          <div className="rounded-full bg-white px-3 py-1.5 text-xs text-slate-500 ring-1 ring-slate-200">
+            所有模块已按当前月份筛选
+          </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-auto p-4 lg:p-5">
-          {error ? <ErrorAlert message={error} className="mb-3" /> : null}
-
-          <section className="rounded-xl border bg-background shadow-sm">
-            <div className="border-b px-4 py-3">
-              <h2 className="text-base font-semibold">运营总览</h2>
-              <p className="mt-1 text-sm text-muted-foreground">优先看采集规模、触达能力、合作匹配和 ROI 预估。</p>
+        <div className="space-y-4">
+          <ReportSection title={sections.overview.title} description="关键运营指标，点击数据卡进入对应明细列表">
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+              {sections.overview.cards.map((card, index) => (
+                <MetricCard key={card.label} card={card} icon={overviewIcons[index]} />
+              ))}
             </div>
-            <div className="grid gap-3 p-3 md:grid-cols-2 xl:grid-cols-4">
-              <HealthStatus />
-              {loading && !summary ? (
-                <div className="md:col-span-1 xl:col-span-3">
-                  <LoadingState label="正在加载数据..." />
-                </div>
-              ) : summary ? (
-                <>
-                  <StatTile icon={Users} label="Instagram 达人" value={summary.instagram_influencers} hint={`总库 ${summary.total_influencers} 人`} />
-                  <StatTile icon={Mail} label="邮箱覆盖率" value={`${summary.email_coverage_rate}%`} hint={`${summary.contactable_count} 人可触达`} />
-                  <StatTile icon={Target} label="高匹配达人" value={summary.high_match_count} hint={`平均匹配 ${summary.average_product_fit ?? "-"} 分`} />
-                  <StatTile icon={Sparkles} label="ROI 预估均值" value={summary.average_roi_forecast ? `${summary.average_roi_forecast}x` : "-"} hint={`综合评分 ${summary.average_score ?? "-"} 分`} />
-                  <StatTile icon={Layers} label="采集任务" value={summary.total_tasks} hint={`${summary.active_tasks} 个进行中`} />
-                  <StatTile icon={Bot} label="任务完成率" value={taskSuccessRate} hint={`${summary.failed_tasks} 个失败`} />
-                  <StatTile icon={Send} label="邮件记录" value={summary.total_email_logs} hint={`${summary.sent_emails} 封已发送`} />
-                  <StatTile icon={Database} label="平台覆盖" value={summary.platforms.length} hint="当前聚焦 Instagram" />
-                </>
-              ) : (
-                <p className="p-4 text-sm text-muted-foreground">暂无统计数据</p>
-              )}
-            </div>
-          </section>
+          </ReportSection>
 
-          <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
-            <Card>
-              <CardHeader className="py-3">
-                <CardTitle className="text-base">系统数据流（Instagram 专用）</CardTitle>
-                <CardDescription>入口层 → 采集清洗 → AI 画像 → 数据中心 → 应用服务 → 输出行动</CardDescription>
-              </CardHeader>
-              <CardContent className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
-                <PipelineStep
-                  index={1}
-                  title="入口层"
-                  icon={Search}
-                  tone="blue"
-                  items={["主页 URL / 用户名批量", "Hashtag 自动发现", "链接导入批次", "任务调度入口"]}
-                />
-                <PipelineStep
-                  index={2}
-                  title="采集清洗层"
-                  icon={Filter}
-                  tone="teal"
-                  items={["Apify Instagram 采集", "去重与互动率过滤", "邮箱 / 外链提取", "异常任务标记"]}
-                />
-                <PipelineStep
-                  index={3}
-                  title="AI 画像层"
-                  icon={Bot}
-                  tone="orange"
-                  items={["Kimi 画像，失败降级 Mock", "综合评分与 Product Fit", "Travel Fit / 购买力 / 带货", "ROI 预估与合作建议"]}
-                />
-                <PipelineStep
-                  index={4}
-                  title="数据中心"
-                  icon={Database}
-                  tone="violet"
-                  items={["PostgreSQL 持久化", "红人库多维筛选", "评分理由与标签", "采集任务运行记录"]}
-                />
-                <PipelineStep
-                  index={5}
-                  title="应用服务层"
-                  icon={Server}
-                  tone="slate"
-                  items={["FastAPI 业务接口", "定时采集调度", "SMTP / Mailchimp 外联", "健康检查与配置状态"]}
-                />
-                <PipelineStep
-                  index={6}
-                  title="输出行动层"
-                  icon={Send}
-                  tone="green"
-                  items={["红人详情跟进", "Excel 名单导出", "邮件日志追踪", "高匹配达人优先触达"]}
-                />
-              </CardContent>
-            </Card>
+          <ReportSection
+            title={sections.outreachRecap.title}
+            description={reviewNotice}
+            action={
+              <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-700">
+                不在月报直接发送
+              </Badge>
+            }
+          >
+            <FunnelChart steps={sections.outreachRecap.funnel} />
+          </ReportSection>
 
-            <div className="grid gap-4">
-              <Card>
-                <CardHeader className="py-3">
-                  <CardTitle className="text-base">运营入口</CardTitle>
-                  <CardDescription>从采集到跟进的常用路径。</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <ActionItem
-                    icon={Play}
-                    title="创建 Instagram 采集"
-                    description="粘贴主页 URL 或输入 hashtag，采集后自动清洗并生成画像。"
-                    href="/collection-tasks"
-                    label="去创建"
-                  />
-                  <ActionItem
-                    icon={Users}
-                    title="筛选高匹配达人"
-                    description="按有邮箱、可联系、高匹配快速筛选，再进入详情查看合作建议。"
-                    href="/influencers"
-                    label="看红人库"
-                  />
-                  <ActionItem
-                    icon={Database}
-                    title="批量链接导入"
-                    description="适合已有一批 Instagram 链接时快速建批次并运行导入。"
-                    href="/link-import"
-                    label="去导入"
-                  />
-                  <ActionItem
-                    icon={Mail}
-                    title="查看外联记录"
-                    description="跟踪邮件发送状态、回复和二次跟进。"
-                    href="/outreach-records"
-                    label="看记录"
-                  />
-                </CardContent>
-              </Card>
+          <div className="grid gap-4 xl:grid-cols-2">
+            <ReportSection title={sections.draftQuality.title} description="关注草稿是否可批准，高价值红人需打开草稿详情确认">
+              <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                {sections.draftQuality.cards.map((card) => (
+                  <MetricCard key={card.label} card={card} icon={card.tone === "warning" ? AlertTriangle : CheckCircle2} />
+                ))}
+              </div>
+            </ReportSection>
 
-              <Card>
-                <CardHeader className="py-3">
-                  <CardTitle className="text-base">最近任务</CardTitle>
-                  <CardDescription>最近更新的采集任务。</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  {summary?.recent_tasks?.length ? (
-                    summary.recent_tasks.map((task) => <RecentTaskRow key={task.id} task={task} />)
-                  ) : (
-                    <p className="text-sm text-muted-foreground">暂无任务，先创建一个 Instagram 采集任务。</p>
-                  )}
-                </CardContent>
-              </Card>
-            </div>
+            <ReportSection title={sections.queuePerformance.title} description="展示入队、发送和失败结果，实际发送仍在发送队列执行">
+              <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                {sections.queuePerformance.cards.map((card) => (
+                  <MetricCard key={card.label} card={card} icon={card.tone === "danger" ? AlertTriangle : Clock} />
+                ))}
+              </div>
+            </ReportSection>
           </div>
+
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(360px,1fr)]">
+            <ReportSection title={sections.skipReasons.title} description="清楚说明没发出的原因，避免业务员误判">
+              <SkipReasonList items={sections.skipReasons.items} />
+            </ReportSection>
+
+            <ReportSection title={sections.replyProgress.title} description="从回复进入报价、寄样与合作推进">
+              <div className="grid gap-3 sm:grid-cols-2">
+                {sections.replyProgress.cards.map((card) => (
+                  <MetricCard key={card.label} card={card} icon={card.label === "已回复" ? MessageCircleReply : Mail} />
+                ))}
+              </div>
+            </ReportSection>
+          </div>
+
+          <ReportSection title="本月待办" description="复盘后的入口，帮助团队回到对应明细处理">
+            <div className="grid gap-3 xl:grid-cols-2">
+              {sections.todos.map((todo) => (
+                <TodoItem key={todo.title} todo={todo} />
+              ))}
+            </div>
+          </ReportSection>
         </div>
       </div>
     </AdminShell>

@@ -1,5 +1,6 @@
 import "./register-path-aliases.ts";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { resolveInfluencerEmail } from "../src/lib/outreach-email-helpers.ts";
@@ -16,8 +17,13 @@ import {
   buildLocalDateTime,
   buildSkipReasonBreakdown,
   buildScheduledQueueSuccessMessage,
+  buildScheduledSendCompletionMessage,
   buildImmediateSendResultMessage,
+  buildManualOutreachConfirmMessage,
+  buildManualOutreachPayload,
+  parseManualOutreachRecipients,
   getOneClickContentSourceLabel,
+  getOneClickCurrentStatusLabel,
   buildOneClickCampaignName,
   buildPreviewResultMessage,
   buildSkipReasonSummary,
@@ -52,6 +58,25 @@ import {
   filterCampaignDetailRows,
   paginateCampaignDetailRows,
 } from "../src/lib/outreach-campaign-detail-helpers.ts";
+
+test("manual outreach test UI stays as a collapsed status-strip tool", () => {
+  const source = readFileSync(
+    new URL("../src/components/outreach-campaigns/outreach-campaigns-panel.tsx", import.meta.url),
+    "utf8",
+  );
+  const statusStripIndex = source.indexOf("campaign-status-strip");
+  const manualSummaryIndex = source.indexOf("campaign-manual-test-summary");
+  const manualPanelIndex = source.indexOf("campaign-manual-test-panel");
+  const mainFlowIndex = source.indexOf("campaign-layout-grid");
+
+  assert.ok(statusStripIndex >= 0, "status strip should exist");
+  assert.ok(manualSummaryIndex > statusStripIndex, "manual test entry should live in the status strip");
+  assert.ok(manualPanelIndex > manualSummaryIndex, "manual test form should render as an expandable panel");
+  assert.ok(manualPanelIndex < mainFlowIndex, "manual test panel should not interrupt the main campaign flow");
+  assert.ok(source.includes("manualTestOpen ?"), "manual test form should be collapsed by default");
+  assert.ok(source.includes("rows={2}"), "recipient textarea should stay compact");
+  assert.ok(source.includes("rows={4}"), "body textarea should stay compact");
+});
 
 test("resolveInfluencerEmail priority final > business > public > email", () => {
   assert.equal(
@@ -89,6 +114,49 @@ test("resolveInfluencerEmail priority final > business > public > email", () => 
       email: "legacy@example.com",
     }),
     "legacy@example.com",
+  );
+});
+
+test("manual outreach recipients parse lines commas and semicolons with limit", () => {
+  const parsed = parseManualOutreachRecipients("a@example.com, b@example.com\nc@example.com; bad-value");
+  assert.deepEqual(parsed.valid, ["a@example.com", "b@example.com", "c@example.com"]);
+  assert.deepEqual(parsed.invalid, ["bad-value"]);
+  assert.equal(parsed.overLimit, false);
+
+  const over = parseManualOutreachRecipients(
+    Array.from({ length: 11 }, (_, index) => `creator${index}@example.com`).join("\n"),
+  );
+  assert.equal(over.valid.length, 10);
+  assert.equal(over.overLimit, true);
+});
+
+test("manual outreach payload and confirmation distinguish immediate and scheduled sends", () => {
+  const nowPayload = buildManualOutreachPayload({
+    recipientsText: "creator@example.com",
+    subject: "Hello",
+    body: "Body",
+    sendMode: "now",
+  });
+  assert.deepEqual(nowPayload, {
+    recipients: ["creator@example.com"],
+    subject: "Hello",
+    body: "Body",
+    send_mode: "now",
+  });
+  assert.equal(buildManualOutreachConfirmMessage(1, "now"), "本次将立即发送 1 封自定义测试邮件。确认发送？");
+
+  const scheduled = new Date("2026-07-03T10:30:00.000Z");
+  const scheduledPayload = buildManualOutreachPayload({
+    recipientsText: "creator@example.com",
+    subject: "Hello",
+    body: "Body",
+    sendMode: "scheduled",
+    scheduledAt: scheduled,
+  });
+  assert.equal(scheduledPayload.scheduled_at, "2026-07-03T10:30:00.000Z");
+  assert.equal(
+    buildManualOutreachConfirmMessage(3, "scheduled"),
+    "本次将定时发送 3 封自定义测试邮件。到时间后会自动发送，确认入队？",
   );
 });
 
@@ -435,6 +503,7 @@ test("deriveOneClickQueueStatusFromCampaign does not mark duplicate-only campaig
 test("one click workbench queue messages do not imply mail was sent", () => {
   assert.equal(getOneClickQueueStatusLabel("not_queued"), "未发送");
   assert.equal(getOneClickQueueStatusLabel("waiting"), "已定时");
+  assert.equal(getOneClickQueueStatusLabel("completed"), "已完成");
   assert.match(
     buildScheduledQueueSuccessMessage({
       createdCount: 12,
@@ -442,6 +511,29 @@ test("one click workbench queue messages do not imply mail was sent", () => {
       startAt: new Date("2026-06-27T17:30:00+08:00"),
     }),
     /不需要再手动点/,
+  );
+});
+
+test("one click current status distinguishes all-skipped batches from sent mail", () => {
+  assert.equal(
+    getOneClickCurrentStatusLabel({
+      busyAction: null,
+      copyMode: "manual",
+      hasPreview: true,
+      queueStatus: "completed",
+      preview: { total: 3, can_queue_count: 0, skip_count: 3 },
+    }),
+    "本批无可发送",
+  );
+  assert.equal(
+    getOneClickCurrentStatusLabel({
+      busyAction: null,
+      copyMode: "manual",
+      hasPreview: true,
+      queueStatus: "completed",
+      preview: { total: 3, can_queue_count: 2, skip_count: 1 },
+    }),
+    "已完成",
   );
 });
 
@@ -461,6 +553,33 @@ test("one click workbench messages explain direct send and scheduled send clearl
       startAt: new Date("2026-06-29T17:30:00+08:00"),
     }),
     /^已设置定时发送：/,
+  );
+});
+
+test("scheduled send completion message tells sales when mail actually went out", () => {
+  assert.equal(
+    buildScheduledSendCompletionMessage({
+      queuedCount: 12,
+      sentCount: 12,
+      failedCount: 0,
+    }),
+    "定时发送已完成，发送成功：已发出 12 封邮件。",
+  );
+  assert.equal(
+    buildScheduledSendCompletionMessage({
+      queuedCount: 12,
+      sentCount: 10,
+      failedCount: 2,
+    }),
+    "定时发送已完成，发送成功 10 封，失败 2 封。请到发送队列查看失败原因。",
+  );
+  assert.equal(
+    buildScheduledSendCompletionMessage({
+      queuedCount: 12,
+      sentCount: 0,
+      failedCount: 0,
+    }),
+    null,
   );
 });
 

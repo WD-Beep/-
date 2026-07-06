@@ -12,7 +12,9 @@ export function buildOutreachRecordsUrl(view: EmailLogView): string {
 }
 
 export type EmailLogReplySummary = {
+  id?: number | null;
   snippet?: string | null;
+  body?: string | null;
   received_at?: string | null;
 };
 
@@ -60,6 +62,17 @@ export function filterEmailLogsByView(logs: EmailLogListItem[], view: EmailLogVi
     return logs.filter((log) => log.status === "sent" && !log.reply && !log.has_replied);
   }
   return logs;
+}
+
+export function getEmailLogReplyActions(log: EmailLogListItem): {
+  canViewReply: boolean;
+  canSendResponse: boolean;
+} {
+  const hasReplyRecord = Boolean(log.reply?.id);
+  return {
+    canViewReply: hasReplyRecord,
+    canSendResponse: hasReplyRecord,
+  };
 }
 
 export function getEmailLogViewTabs(summary: EmailLogSummary): Array<{

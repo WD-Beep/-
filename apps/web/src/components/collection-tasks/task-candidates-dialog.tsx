@@ -239,20 +239,29 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
   const [recrawlingBatch, setRecrawlingBatch] = useState(false);
   const [enrichingEmailCandidateId, setEnrichingEmailCandidateId] = useState<number | null>(null);
   const [enrichingEmailBatch, setEnrichingEmailBatch] = useState(false);
+  const taskId = task?.id;
+  const taskResultCount = task?.inserted_count ?? task?.result_count ?? 0;
 
   useEffect(() => {
-    if (!open || !task) {
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      if (!open || !taskId) {
+        setFiltersReady(false);
+        return;
+      }
       setFiltersReady(false);
-      return;
-    }
-    setFiltersReady(false);
-    setExportError(null);
-    setRecrawlError(null);
-    setStatsMismatch(null);
-    setPage(1);
-    setStatusFilter((task.inserted_count ?? task.result_count ?? 0) > 0 ? "inserted" : "");
-    setFiltersReady(true);
-  }, [open, task?.id]);
+      setExportError(null);
+      setRecrawlError(null);
+      setStatsMismatch(null);
+      setPage(1);
+      setStatusFilter(taskResultCount > 0 ? "inserted" : "");
+      setFiltersReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, taskId, taskResultCount]);
 
   const buildCandidateQuery = useCallback((pageNumber = page) => {
     const minFollowers = minFollowersFilter.trim() ? Number(minFollowersFilter) : undefined;

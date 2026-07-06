@@ -1,6 +1,9 @@
+import asyncio
+
 import pytest
 
 from app.collectors.base import CollectedInfluencer
+from app.core.config import settings
 from app.services.apify_instagram import ProfileScrapeResult
 from app.services.cross_platform_instagram_enrichment import enrich_profiles_with_instagram_email
 from app.services.high_value_filter import CONTACT_FOUND
@@ -259,3 +262,38 @@ async def test_enrichment_failure_keeps_candidate_state_and_records_diagnostic()
     assert profile.email is None
     assert profile.source_meta["instagram_contact_confidence"] == "high"
     assert "provider unavailable" in profile.source_meta["instagram_contact_error"]
+
+
+@pytest.mark.asyncio
+async def test_instagram_email_enrichment_respects_attempt_limit(monkeypatch):
+    monkeypatch.setattr(settings, "collection_cross_platform_instagram_enrichment_limit", 2)
+    profiles = [
+        _profile(username=f"creator{i}", profile_url=f"https://www.tiktok.com/@creator{i}", platform="tiktok")
+        for i in range(5)
+    ]
+    calls = []
+
+    async def scrape(urls, **kwargs):
+        calls.append(urls)
+        return ProfileScrapeResult(profiles=[])
+
+    items = await enrich_profiles_with_instagram_email(profiles, scrape_func=scrape)
+
+    assert len(items) == 5
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_instagram_email_enrichment_timeout_is_best_effort(monkeypatch):
+    monkeypatch.setattr(settings, "collection_cross_platform_instagram_enrichment_limit", 1)
+    monkeypatch.setattr(settings, "collection_cross_platform_instagram_enrichment_timeout_seconds", 1)
+    profile = _profile(username="slowcreator", profile_url="https://www.tiktok.com/@slowcreator", platform="tiktok")
+
+    async def scrape(urls, **kwargs):
+        await asyncio.sleep(2)
+        return ProfileScrapeResult(profiles=[_ig(username="slowcreator", email="slow@brand.co")])
+
+    items = await enrich_profiles_with_instagram_email([profile], scrape_func=scrape)
+
+    assert items[0].final_email is None
+    assert "instagram_contact_error" in profile.source_meta

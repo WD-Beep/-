@@ -1,5 +1,7 @@
 """collection_funnel 目标合格数摘要。"""
 
+from types import SimpleNamespace
+
 from app.models.enums import CollectionTaskStatus
 from app.services.collection_funnel import (
     CollectionFunnelStats,
@@ -7,7 +9,7 @@ from app.services.collection_funnel import (
     build_running_discovery_summary,
     build_status_summary,
 )
-from app.services.collection_targets import RATE_LIMIT_STOP_REASON
+from app.services.collection_targets import RATE_LIMIT_STOP_REASON, max_overfetch_rounds_for_task
 
 
 def test_status_summary_explains_target_shortfall():
@@ -66,6 +68,18 @@ def test_build_running_discovery_summary_zero_discovered_explains_reason():
     assert "目标 10" in text
     assert "可能原因" in text
     assert "Apify" in text or "API" in text
+
+
+def test_slow_apify_platforms_skip_extra_overfetch_rounds():
+    for platform in ("tiktok", "youtube", "facebook"):
+        task = SimpleNamespace(
+            platform=platform,
+            platforms=[platform],
+            discovery_limit=20,
+            collection_mode="discovery",
+        )
+
+        assert max_overfetch_rounds_for_task(task) == 1
 
 
 def test_status_summary_zero_insert_explains_filters():

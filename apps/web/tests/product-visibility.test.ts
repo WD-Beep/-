@@ -49,6 +49,25 @@ test("filterVisibleTenantProducts keeps real products only", () => {
   );
 });
 
+test("looksLikeTestProduct hides generated QA and monthly products", () => {
+  assert.equal(
+    looksLikeTestProduct({ name: "codex-acceptance-b2fd186e product", slug: "codex-acceptance-b2fd186e" }),
+    true,
+  );
+  assert.equal(
+    looksLikeTestProduct({ name: "qa-run-4eae8bec product", slug: "qa-run-4eae8bec-product" }),
+    true,
+  );
+  assert.equal(
+    looksLikeTestProduct({ name: "monthlyprodect report product", slug: "monthlyprodect-report-product" }),
+    true,
+  );
+  assert.equal(
+    looksLikeTestProduct({ name: "monthly-product report product", slug: "monthly-product-report-product" }),
+    true,
+  );
+});
+
 test("prepareTenantProductOptions sorts default first", () => {
   const items = [
     product({ id: 2, name: "珺临", slug: "junlin-epedal24", brand: "EPEDAL24", display_order: 1 }),

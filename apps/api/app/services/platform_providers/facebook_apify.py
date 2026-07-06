@@ -436,7 +436,7 @@ class FacebookApifyProvider:
                         timeout=apify_timeout,
                         max_retries=settings.apify_facebook_max_retries,
                     ),
-                    timeout=keyword_timeout,
+                    timeout=keyword_timeout + 5,
                 )
             except asyncio.TimeoutError:
                 local_slow = True
@@ -487,6 +487,7 @@ class FacebookApifyProvider:
             return keyword, local_profiles, local_errors, local_rate_limits, local_slow
 
         keywords_completed = 0
+        timeout_skipped_keywords_count = 0
         for chunk_start in range(0, len(keywords), concurrency):
             if time.perf_counter() >= deadline:
                 _append_error(
@@ -522,6 +523,8 @@ class FacebookApifyProvider:
                 _keyword, local_profiles, local_errors, local_rate_limits, local_slow = outcome
                 rate_limit_count += local_rate_limits
                 slow_api = slow_api or local_slow
+                if local_slow:
+                    timeout_skipped_keywords_count += 1
                 errors.extend(local_errors)
                 if any(_is_memory_limit_error(err) for err in local_errors):
                     provider_unavailable_state = {
@@ -543,6 +546,7 @@ class FacebookApifyProvider:
                     current_keyword=_keyword,
                     keywords_completed=keywords_completed,
                     keywords_total=len(keywords),
+                    timeout_skipped_keywords_count=timeout_skipped_keywords_count,
                     timing_note=local_errors[-1] if local_errors else None,
                 )
                 if len(profiles) >= limit:
@@ -663,6 +667,7 @@ class FacebookApifyProvider:
             provider="apify",
             keywords_completed=keywords_completed,
             keywords_total=len(keywords),
+            timeout_skipped_keywords_count=timeout_skipped_keywords_count,
             profiles_hydrating_total=len(hydration_targets),
             profiles_hydrating_completed=0,
         )
@@ -724,6 +729,7 @@ class FacebookApifyProvider:
                     provider="apify",
                     keywords_completed=keywords_completed,
                     keywords_total=len(keywords),
+                    timeout_skipped_keywords_count=timeout_skipped_keywords_count,
                     profiles_hydrating_total=len(hydration_targets),
                     profiles_hydrating_completed=hydrated_count,
                     current_profile_url=chunk[0].profile_url if chunk else None,
@@ -792,6 +798,7 @@ class FacebookApifyProvider:
             provider="apify",
             keywords_completed=keywords_completed,
             keywords_total=len(keywords),
+            timeout_skipped_keywords_count=timeout_skipped_keywords_count,
             profiles_hydrating_total=len(hydration_targets),
             profiles_hydrating_completed=hydrated_count,
         )

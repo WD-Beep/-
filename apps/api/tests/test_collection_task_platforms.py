@@ -137,6 +137,21 @@ def test_update_platforms_only():
     assert task.platforms == ["youtube", "tiktok"]
 
 
+def test_update_keyword_task_allows_empty_input_urls():
+    task = CollectionTaskUpdate(
+        collection_mode=CollectionMode.DISCOVERY,
+        platform="tiktok",
+        platforms=["tiktok"],
+        keywords=["makeup bag"],
+        input_urls=[],
+        filter_include_keywords=["brand deal", "collab"],
+        filter_exclude_keywords=["giveaway", "fan page"],
+    )
+    assert task.input_urls == []
+    assert task.filter_include_keywords == ["brand deal", "collab"]
+    assert task.filter_exclude_keywords == ["giveaway", "fan page"]
+
+
 def test_update_legacy_platform_only():
     task = CollectionTaskUpdate(platform="youtube")
     assert task.platform == "youtube"

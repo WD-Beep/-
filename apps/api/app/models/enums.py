@@ -4,6 +4,7 @@ import enum
 class CollectionTaskStatus(str, enum.Enum):
     DRAFT = "draft"
     PENDING = "pending"
+    QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
     COMPLETED_WITH_RESULTS = "completed_with_results"

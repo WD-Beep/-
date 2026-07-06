@@ -166,6 +166,10 @@ from app.services.task_run_progress import (
 )
 
 
+class CollectionRunCapacityError(RuntimeError):
+    """Raised when the in-process collection run capacity has no free slot."""
+
+
 class CollectionRunnerService:
     @staticmethod
     def get_active_collection_task_ids() -> set[int]:
@@ -219,7 +223,7 @@ class CollectionRunnerService:
             capacity = CollectionRunnerService.collection_run_capacity()
             if len(_active_collection_task_ids) >= capacity:
                 other_id = next(iter(_active_collection_task_ids))
-                raise ValueError(
+                raise CollectionRunCapacityError(
                     f"已有 {len(_active_collection_task_ids)} 个任务在采集中（上限 {capacity}），"
                     f"请等待任务 {other_id} 完成后再运行"
                 )

@@ -10,6 +10,7 @@ import {
   INFLUENCER_ONE_CLICK_EMAIL_BUTTON_LABEL,
   buildOneClickCampaignName,
   buildOneClickCampaignPayload,
+  buildOutreachCampaignResultUrl,
   buildOutreachCampaignsUrl,
   resolveBulkDeleteSelection,
   resolveBulkOutreachSelection,
@@ -64,6 +65,36 @@ test("influencerFilterQueryParams includes exclude_terminal_statuses", () => {
 test("buildOutreachCampaignsUrl without selection has no ids", () => {
   const url = buildOutreachCampaignsUrl({});
   assert.equal(url, "/outreach-campaigns");
+});
+
+test("buildOutreachCampaignResultUrl preserves checked recipients after one-click send", () => {
+  const url = buildOutreachCampaignResultUrl({
+    campaignId: 500,
+    message: "已一键生成并发送",
+    ids: [3, 7, 9],
+  });
+
+  assert.match(url, /^\/outreach-campaigns\?/);
+  assert.match(url, /highlight=500/);
+  assert.match(url, /ids=3%2C7%2C9/);
+  assert.doesNotMatch(url, /select_all=1/);
+});
+
+test("buildOutreachCampaignResultUrl preserves filter-all recipients after one-click send", () => {
+  const url = buildOutreachCampaignResultUrl({
+    campaignId: 501,
+    message: "已一键生成并发送",
+    selectAll: true,
+    total: 158,
+    filters: { platform: "instagram", hasEmail: true },
+  });
+
+  assert.match(url, /highlight=501/);
+  assert.match(url, /select_all=1/);
+  assert.match(url, /total=158/);
+  assert.match(url, /platform=instagram/);
+  assert.match(url, /has_email=true/);
+  assert.doesNotMatch(url, /ids=/);
 });
 
 test("resolveBulkOutreachSelection keeps partial page selection scoped to checked rows", () => {

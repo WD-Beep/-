@@ -11,8 +11,9 @@ from app.core.config import settings
 from app.db.session import async_session_factory
 from app.models.collection_task import CollectionTask
 from app.models.enums import CollectionTaskStatus
-from app.services.collection_runner import CollectionRunnerService
+from app.services.collection_runner import CollectionRunCapacityError, CollectionRunnerService
 from app.services.collection_task import CollectionTaskService
+from app.services.collection_queue import CollectionQueueService, QUEUE_REASON_GLOBAL_FULL
 
 logger = logging.getLogger(__name__)
 
@@ -87,10 +88,12 @@ async def run_imap_reply_poll() -> None:
 
 async def run_outreach_send_queue_due_processor() -> None:
     """APScheduler callback: process scheduled outreach emails that are due."""
+    from app.services.manual_outreach_email_service import process_due_manual_outreach_emails
     from app.services.outreach_send_scheduler import process_due_email_queue
 
     try:
         result = await process_due_email_queue(limit=20)
+        manual_result = await process_due_manual_outreach_emails(limit=20)
         if result.processed:
             logger.info(
                 "Outreach send queue processed=%s sent=%s failed=%s skipped=%s",
@@ -98,6 +101,13 @@ async def run_outreach_send_queue_due_processor() -> None:
                 result.sent,
                 result.failed,
                 result.skipped,
+            )
+        if manual_result.processed:
+            logger.info(
+                "Manual outreach test queue processed=%s sent=%s failed=%s",
+                manual_result.processed,
+                manual_result.sent,
+                manual_result.failed,
             )
     except Exception as exc:
         logger.exception("Scheduled outreach send queue processing failed: %s", exc)
@@ -154,36 +164,30 @@ async def run_scheduled_collection(task_id: int) -> None:
         if task.status == CollectionTaskStatus.RUNNING.value:
             logger.warning("Task_id=%s already running, skip scheduled run", task_id)
             return
-
-        blocking_task = await CollectionTaskService.get_blocking_running_task(db, exclude_id=task_id)
-        if blocking_task is not None:
-            logger.warning(
-                "Scheduled task_id=%s skipped: task_id=%s (%s) is running",
-                task_id,
-                blocking_task.id,
-                blocking_task.name,
-            )
+        if task.status == CollectionTaskStatus.QUEUED.value:
+            logger.info("Task_id=%s already queued, skip duplicate scheduled run", task_id)
             return
 
-        if CollectionRunnerService.has_active_collection_run():
-            active_ids = CollectionRunnerService.get_active_collection_task_ids()
-            if task_id not in active_ids:
-                active_id = CollectionRunnerService.get_active_collection_task_id()
-                logger.warning(
-                    "Scheduled task_id=%s skipped: in-process collection at capacity (%s active, task_id=%s)",
-                    task_id,
-                    len(active_ids),
-                    active_id,
-                )
-                return
+        result_status = await CollectionQueueService.queue_or_start(db, task, resume=False)
+        if result_status == CollectionTaskStatus.QUEUED:
+            logger.info("Scheduled task_id=%s queued by collection concurrency control", task_id)
+            return
 
         try:
-            await CollectionRunnerService.run_task(db, task)
+            await CollectionRunnerService.run_task(db, task, allow_running=True)
             logger.info("Scheduled collection completed for task_id=%s", task_id)
-        except ValueError as exc:
+        except CollectionRunCapacityError as exc:
+            await CollectionQueueService.restore_task_to_queue(
+                db,
+                task,
+                reasons=[QUEUE_REASON_GLOBAL_FULL],
+                resume=False,
+            )
             logger.warning("Scheduled collection skipped for task_id=%s: %s", task_id, exc)
         except Exception as exc:
             logger.exception("Scheduled collection failed for task_id=%s: %s", task_id, exc)
+        finally:
+            await CollectionQueueService.dispatch_queued_tasks()
 
     await SchedulerManager.sync_next_run_at(task_id)
 

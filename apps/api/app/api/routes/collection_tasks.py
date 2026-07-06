@@ -50,21 +50,14 @@ from app.schemas.scheduler import SchedulerRefreshResponse
 from app.scheduler import refresh_scheduler
 from app.schemas.platform_capabilities import PlatformCapabilitiesResponse, PlatformCapabilityRead
 from app.services.api_direct_provider import list_platform_capabilities
-from app.services.collection_runner import CollectionRunnerService
+from app.services.collection_runner import CollectionRunCapacityError, CollectionRunnerService
 from app.services.collection_task import CollectionTaskService
+from app.services.collection_queue import CollectionQueueService
+from app.services.collection_queue import QUEUE_REASON_GLOBAL_FULL
 from app.services.email import EmailService
-from app.services.task_run_progress import STAGE_DISCOVERY, reset_run_progress
 
 router = APIRouter(prefix="/collection-tasks", tags=["collection-tasks"])
 logger = logging.getLogger(__name__)
-
-
-def _collection_start_message(task) -> str:
-    platforms = [str(p).lower() for p in (getattr(task, "platforms", None) or []) if p]
-    if not platforms and getattr(task, "platform", None):
-        platforms = [str(task.platform).lower()]
-    platform_names = ", ".join(dict.fromkeys(platforms)) or "配置的平台"
-    return f"采集任务已开始，正在从 {platform_names} 发现候选作者并补采主页"
 
 
 def _run_result_snapshot(task, *, message: str | None = None) -> CollectionRunResult:
@@ -100,8 +93,18 @@ async def _run_collection_task_in_background(task_id: int, *, resume: bool = Fal
             return
         try:
             await CollectionRunnerService.run_task(bg_db, task, allow_running=True, resume=resume)
+        except CollectionRunCapacityError as exc:
+            logger.warning("Background collection task %s returned to queue: %s", task_id, exc)
+            await CollectionQueueService.restore_task_to_queue(
+                bg_db,
+                task,
+                reasons=[QUEUE_REASON_GLOBAL_FULL],
+                resume=resume,
+            )
         except Exception as exc:
             logger.exception("Background collection task %s failed: %s", task_id, exc)
+        finally:
+            await CollectionQueueService.dispatch_queued_tasks()
 
 
 @router.get("/platform-capabilities", response_model=PlatformCapabilitiesResponse)
@@ -569,18 +572,12 @@ async def enrich_link_seed_profiles(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="当前任务不包含 LTK/ShopMy/Pinterest 链接，无需 seed 补全",
         )
-    blocking_task = await CollectionTaskService.get_blocking_running_task(db, exclude_id=task_id)
-    if blocking_task is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"已有采集任务运行中（{blocking_task.name}），请稍后再试",
-        )
-    task.status = CollectionTaskStatus.RUNNING.value
-    task.current_stage = STAGE_DISCOVERY
-    task.status_summary = "正在补采社媒资料（Instagram/TikTok/YouTube 反查）"
-    reset_run_progress(task)
-    await db.commit()
-    background_tasks.add_task(_run_collection_task_in_background, task_id, resume=True)
+    result_status = await CollectionQueueService.queue_or_start(db, task, resume=True)
+    if result_status == CollectionTaskStatus.RUNNING:
+        task.status_summary = "正在补采社媒资料（Instagram/TikTok/YouTube 反查）"
+        await db.commit()
+        await db.refresh(task)
+        background_tasks.add_task(_run_collection_task_in_background, task_id, resume=True)
     return _run_result_snapshot(task, message=task.status_summary)
 
 
@@ -594,13 +591,8 @@ async def bulk_run_collection_tasks(
     """在并发上限内批量启动未完成任务（其余需等待空位后再运行）。"""
     product_id = require_write_product_id(ctx)
     capacity = CollectionRunnerService.collection_run_capacity()
-    await CollectionRunnerService.reconcile_in_process_runs(db)
-    in_process = CollectionRunnerService.active_collection_run_count()
-    db_active = await CollectionTaskService.count_active_running_tasks(db)
-    active_count = max(in_process, db_active)
-    slots = max(0, capacity - active_count)
-
     started_ids: list[int] = []
+    queued_ids: list[int] = []
     skipped_ids: list[int] = []
     skipped_reasons: dict[str, str] = {}
 
@@ -616,57 +608,34 @@ async def bulk_run_collection_tasks(
             skipped_ids.append(task_id)
             skipped_reasons[str(task_id)] = "already_running"
             continue
-        if slots <= 0 and not CollectionRunnerService.is_task_active_in_process(task_id):
-            skipped_ids.append(task_id)
-            skipped_reasons[str(task_id)] = "capacity_full"
+        if task.status == CollectionTaskStatus.QUEUED.value:
+            queued_ids.append(task_id)
+            skipped_reasons[str(task_id)] = "already_queued"
             continue
-        blocking = await CollectionTaskService.get_blocking_running_task(db, exclude_id=task_id)
-        if blocking is not None and not CollectionRunnerService.is_task_active_in_process(task_id):
-            skipped_ids.append(task_id)
-            skipped_reasons[str(task_id)] = "capacity_full"
-            continue
-        if (
-            CollectionRunnerService.has_active_collection_run()
-            and not CollectionRunnerService.is_task_active_in_process(task_id)
-        ):
-            skipped_ids.append(task_id)
-            skipped_reasons[str(task_id)] = "capacity_full"
-            continue
-
         resume = task.status == CollectionTaskStatus.RUNNING.value and stale_running
-        task.status = CollectionTaskStatus.RUNNING.value
-        task.error_message = None
-        task.last_error = None
-        if resume:
-            task.current_stage = task.current_stage or STAGE_DISCOVERY
+        result_status = await CollectionQueueService.queue_or_start(db, task, resume=resume)
+        if result_status == CollectionTaskStatus.RUNNING:
+            background_tasks.add_task(_run_collection_task_in_background, task.id, resume=resume)
+            started_ids.append(task_id)
         else:
-            reset_run_progress(task)
-        task.status_summary = (
-            "检测到上次运行中断，将从 checkpoint 继续采集（跳过已完成项）"
-            if resume
-            else _collection_start_message(task)
-        )
-        await db.commit()
-        background_tasks.add_task(_run_collection_task_in_background, task.id, resume=resume)
-        started_ids.append(task_id)
-        slots -= 1
+            queued_ids.append(task_id)
 
-    if started_ids and len(started_ids) == len(data.task_ids):
-        message = f"已启动 {len(started_ids)} 个采集任务"
-    elif started_ids:
-        message = (
-            f"已启动 {len(started_ids)} 个任务；"
-            f"其余 {len(skipped_ids)} 个因并发上限（{capacity}）或已在运行而跳过，可稍后再试"
-        )
-    else:
-        message = f"未启动任何任务（并发上限 {capacity}，当前活跃 {active_count}）"
-
+    active_count = CollectionRunnerService.active_collection_run_count()
+    parts: list[str] = []
+    if started_ids:
+        parts.append(f"已启动 {len(started_ids)} 个采集任务")
+    if queued_ids:
+        parts.append(f"已排队 {len(queued_ids)} 个任务，等待空位")
+    if skipped_ids:
+        parts.append(f"跳过 {len(skipped_ids)} 个任务")
+    message = "；".join(parts) if parts else f"未启动任何任务（并发上限 {capacity}）"
     return CollectionTaskBulkRunResult(
         started_ids=started_ids,
+        queued_ids=queued_ids,
         skipped_ids=skipped_ids,
         skipped_reasons=skipped_reasons,
         capacity=capacity,
-        active_count=active_count + len(started_ids),
+        active_count=active_count,
         message=message,
     )
 
@@ -682,48 +651,15 @@ async def run_collection_task(
 
     stale_running = CollectionTaskService.is_running_stale(task)
     if task.status == CollectionTaskStatus.RUNNING.value and not stale_running:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Task is already running")
-
-    blocking_task = await CollectionTaskService.get_blocking_running_task(db, exclude_id=task_id)
-    if blocking_task is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"任务「{blocking_task.name}」正在采集中，请等待完成后再运行其他任务",
-        )
-
-    await CollectionRunnerService.reconcile_in_process_runs(db)
-    if CollectionRunnerService.has_active_collection_run():
-        active_ids = CollectionRunnerService.get_active_collection_task_ids()
-        if task_id not in active_ids:
-            active_id = CollectionRunnerService.get_active_collection_task_id()
-            active_task = await CollectionTaskService.get_task(db, active_id) if active_id else None
-            active_name = active_task.name if active_task else f"#{active_id}"
-            capacity = CollectionRunnerService.collection_run_capacity()
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    f"当前已有 {len(active_ids)}/{capacity} 个任务在采集中"
-                    f"（例如「{active_name}」），请等待完成后再运行"
-                ),
-            )
+        return _run_result_snapshot(task, message=task.status_summary or "Task is already running")
+    if task.status == CollectionTaskStatus.QUEUED.value:
+        return _run_result_snapshot(task, message=task.status_summary or "Task is already queued")
 
     resume = task.status == CollectionTaskStatus.RUNNING.value and stale_running
-    message = _collection_start_message(task)
-    if resume:
-        message = "检测到上次运行中断，将从 checkpoint 继续采集（跳过已完成项）"
-
-    task.status = CollectionTaskStatus.RUNNING.value
-    task.error_message = None
-    task.last_error = None
-    if resume:
-        task.current_stage = task.current_stage or STAGE_DISCOVERY
-    else:
-        reset_run_progress(task)
-    task.status_summary = message
-    await db.commit()
-    await db.refresh(task)
-    background_tasks.add_task(_run_collection_task_in_background, task.id, resume=resume)
-    return _run_result_snapshot(task, message=message)
+    result_status = await CollectionQueueService.queue_or_start(db, task, resume=resume)
+    if result_status == CollectionTaskStatus.RUNNING:
+        background_tasks.add_task(_run_collection_task_in_background, task.id, resume=resume)
+    return _run_result_snapshot(task, message=task.status_summary)
 
 
 @router.post("/{task_id}/send-email", response_model=EmailSendResult)

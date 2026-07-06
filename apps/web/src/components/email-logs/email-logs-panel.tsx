@@ -22,7 +22,9 @@ import {
   markOutreachRecordReplied,
   markOutreachRecordUnreplied,
   scheduleOutreachRecordFollowUp,
+  sendEmailReplyResponse,
   stopOutreachRecordFollowUp,
+  updateEmailReply,
   type CollectionTask,
   type EmailLog,
   type EmailReply,
@@ -31,12 +33,14 @@ import {
   buildEmailLogSummary,
   buildOutreachRecordsUrl,
   filterEmailLogsByView,
+  getEmailLogReplyActions,
   getEmailLogViewTabs,
   getOutreachSummaryMetrics,
   parseEmailLogView,
   translateEmailFailureReason,
   type EmailLogView,
 } from "@/lib/email-log-helpers";
+import { buildEmailReplyResponseDraft } from "@/lib/email-reply-helpers";
 import { EmailAddressCell } from "@/lib/email-address-cell";
 import { EMAIL_LOG_STATUS_LABELS, translateErrorMessage } from "@/lib/labels";
 
@@ -213,6 +217,11 @@ export function EmailLogsPanel({
   const [selectedLogIds, setSelectedLogIds] = useState<Set<number>>(new Set());
   const [deleting, setDeleting] = useState(false);
   const [recordActionId, setRecordActionId] = useState<number | null>(null);
+  const [replyDetail, setReplyDetail] = useState<{ reply: EmailReply; log: LogWithReply } | null>(null);
+  const [responseBody, setResponseBody] = useState("");
+  const [responseDraftGenerated, setResponseDraftGenerated] = useState(false);
+  const [sendingResponse, setSendingResponse] = useState(false);
+  const [success, setSuccess] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const recordsRef = useRef<HTMLDivElement | null>(null);
 
@@ -340,6 +349,7 @@ export function EmailLogsPanel({
   async function runRecordAction(logId: number, action: () => Promise<EmailLog>) {
     setRecordActionId(logId);
     setError(null);
+    setSuccess(null);
     try {
       await action();
       await loadData();
@@ -347,6 +357,93 @@ export function EmailLogsPanel({
       setError(translateErrorMessage(err instanceof Error ? err.message : "外联记录操作失败"));
     } finally {
       setRecordActionId(null);
+    }
+  }
+
+  async function markReplyViewed(reply: EmailReply): Promise<EmailReply> {
+    if (reply.viewed_at) return reply;
+    const updated = await updateEmailReply(reply.id, { mark_viewed: true });
+    setRepliesByLogId((current) => {
+      const next = new Map(current);
+      if (updated.email_log_id) next.set(updated.email_log_id, updated);
+      return next;
+    });
+    window.dispatchEvent(new Event("email-replies:work-count-changed"));
+    return updated;
+  }
+
+  async function openReplyDetail(log: LogWithReply) {
+    if (!log.reply) return;
+    setError(null);
+    setSuccess(null);
+    try {
+      const reply = await markReplyViewed(log.reply);
+      setReplyDetail({ reply, log: { ...log, reply } });
+      setResponseBody("");
+      setResponseDraftGenerated(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "打开回复详情失败");
+    }
+  }
+
+  async function openReplyComposer(log: LogWithReply) {
+    if (!log.reply) return;
+    setError(null);
+    setSuccess(null);
+    try {
+      const reply = await markReplyViewed(log.reply);
+      setReplyDetail({ reply, log: { ...log, reply } });
+      setResponseBody(
+        buildEmailReplyResponseDraft({
+          influencerName: log.influencer_username || null,
+          intentStatus: reply.intent_status,
+        }),
+      );
+      setResponseDraftGenerated(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "打开回复编辑失败");
+    }
+  }
+
+  function handleGenerateResponseDraft() {
+    if (!replyDetail) return;
+    setResponseBody(
+      buildEmailReplyResponseDraft({
+        influencerName: replyDetail.log.influencer_username || null,
+        intentStatus: replyDetail.reply.intent_status,
+      }),
+    );
+    setResponseDraftGenerated(true);
+  }
+
+  async function handleSendResponse() {
+    if (!replyDetail) return;
+    if (!responseBody.trim()) {
+      setError("请先填写回复正文");
+      return;
+    }
+    setSendingResponse(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const result = await sendEmailReplyResponse(replyDetail.reply.id, {
+        body: responseBody,
+        use_ai_draft: responseDraftGenerated,
+        mark_processed: true,
+      });
+      if (!result.sent) {
+        setError(result.error || "发送回复失败");
+        return;
+      }
+      setSuccess("回复已发送，已记录到该红人的邮件回复中。");
+      setReplyDetail(null);
+      setResponseBody("");
+      setResponseDraftGenerated(false);
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "发送回复失败");
+    } finally {
+      setSendingResponse(false);
     }
   }
 
@@ -441,6 +538,7 @@ export function EmailLogsPanel({
     >
       <div className={recordsOnly ? "outreach-records-workbench" : "email-logs-workbench"}>
         {error ? <ErrorAlert message={error} className={recordsOnly ? "outreach-inline-alert" : "shrink-0"} /> : null}
+        {success ? <SuccessAlert message={success} className={recordsOnly ? "outreach-inline-alert" : "shrink-0"} /> : null}
 
         {!recordsOnly ? (
           <section className="email-logs-overview">
@@ -623,6 +721,7 @@ export function EmailLogsPanel({
                         const moreOpen = expandedRows.has(-log.id);
                         const failureText = log.status === "failed" ? translateEmailFailureReason(log.error_message) : null;
                         const replySummary = reply?.snippet ?? log.reply_summary ?? null;
+                        const replyActions = getEmailLogReplyActions(log);
 
                         return (
                           <Fragment key={log.id}>
@@ -677,6 +776,16 @@ export function EmailLogsPanel({
                                   <Button variant={recordsOnly ? "outline" : "ghost"} size="sm" onClick={() => toggleExpandedRow(log.id)}>
                                     {expanded ? "收起" : "详情"}
                                   </Button>
+                                  {replyActions.canViewReply && reply ? (
+                                    <Button variant="outline" size="sm" onClick={() => void openReplyDetail(log)}>
+                                      看回复
+                                    </Button>
+                                  ) : null}
+                                  {replyActions.canSendResponse && reply ? (
+                                    <Button variant="outline" size="sm" onClick={() => void openReplyComposer(log)}>
+                                      回复
+                                    </Button>
+                                  ) : null}
                                   {canScheduleFollowUp ? (
                                     <Button
                                       variant="outline"
@@ -794,6 +903,24 @@ export function EmailLogsPanel({
                                       </div>
                                     </div>
                                   </div>
+                                  {reply ? (
+                                    <div className="rounded-md border border-blue-100 bg-blue-50/50 p-3">
+                                      <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <p className="font-medium text-blue-900">红人回复全文</p>
+                                        <Button type="button" variant="outline" size="sm" onClick={() => void openReplyComposer(log)}>
+                                          回复这封邮件
+                                        </Button>
+                                      </div>
+                                      <div className="mt-2 grid gap-2 text-muted-foreground md:grid-cols-3">
+                                        <p className="break-all">来自：{reply.from_address}</p>
+                                        <p className="break-all">收件：{reply.to_address}</p>
+                                        <p>时间：{formatDate(reply.received_at)}</p>
+                                      </div>
+                                      <pre className="mt-3 max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-white p-3 leading-6 text-slate-700">
+                                        {reply.body || reply.snippet || "没有正文内容"}
+                                      </pre>
+                                    </div>
+                                  ) : null}
                                 </td>
                               </tr>
                             ) : null}
@@ -827,6 +954,74 @@ export function EmailLogsPanel({
             )}
           </div>
         </section>
+
+        {replyDetail ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border bg-background shadow-xl">
+              <div className="flex shrink-0 flex-wrap items-start justify-between gap-3 border-b px-6 py-4">
+                <div>
+                  <h2 className="text-lg font-semibold">{replyDetail.reply.subject || "红人回复"}</h2>
+                  <p className="mt-1 break-all text-sm text-muted-foreground">
+                    {replyDetail.reply.from_address} → {replyDetail.reply.to_address} · {formatDate(replyDetail.reply.received_at)}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {replyDetail.log.influencer_username ? `@${replyDetail.log.influencer_username}` : "未关联红人"} · 原邮件：{replyDetail.log.subject}
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setReplyDetail(null);
+                    setResponseBody("");
+                    setResponseDraftGenerated(false);
+                  }}
+                  disabled={sendingResponse}
+                >
+                  关闭
+                </Button>
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+                <div className="space-y-2">
+                  <p className="text-sm font-semibold">红人回复内容</p>
+                  <pre className="max-h-[34vh] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/20 p-4 text-sm leading-6">
+                    {replyDetail.reply.body || replyDetail.reply.snippet || "没有正文内容"}
+                  </pre>
+                </div>
+
+                <div className="mt-4 space-y-3 rounded-md border bg-muted/10 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h3 className="text-sm font-semibold">业务员回复</h3>
+                      <p className="mt-1 break-all text-xs text-muted-foreground">
+                        会回复到：{replyDetail.reply.from_address}
+                      </p>
+                    </div>
+                    {!replyDetail.log.influencer_username ? <Badge variant="warning">请确认红人身份</Badge> : null}
+                  </div>
+                  <textarea
+                    className="min-h-36 w-full resize-y rounded-md border bg-background p-3 text-sm leading-6"
+                    value={responseBody}
+                    onChange={(event) => {
+                      setResponseBody(event.target.value);
+                      setResponseDraftGenerated(false);
+                    }}
+                    placeholder="在这里编辑要发给红人的回复内容"
+                  />
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <Button type="button" variant="outline" onClick={handleGenerateResponseDraft} disabled={sendingResponse}>
+                      生成回复话术
+                    </Button>
+                    <Button type="button" onClick={() => void handleSendResponse()} disabled={sendingResponse || !responseBody.trim()}>
+                      {sendingResponse ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                      发送回复
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         {saveLog ? (
           <SaveEmailAsTemplateDialog

@@ -28,3 +28,61 @@ class DashboardSummary(BaseModel):
     average_roi_forecast: float | None = None
     platforms: list[PlatformCount]
     recent_tasks: list[CollectionTaskRead]
+
+
+class MonthlyReportMetricCard(BaseModel):
+    label: str
+    value: str
+    helper: str
+    href: str
+    tone: str = "neutral"
+
+
+class MonthlyReportFunnelStep(BaseModel):
+    label: str
+    value: int
+    href: str
+
+
+class MonthlyReportSkipReason(BaseModel):
+    label: str
+    value: int
+    helper: str
+    href: str
+    tone: str = "neutral"
+
+
+class MonthlyReportTodo(BaseModel):
+    title: str
+    description: str
+    href: str
+    action_label: str
+    tone: str = "neutral"
+
+
+class MonthlyReportCardSection(BaseModel):
+    title: str
+    cards: list[MonthlyReportMetricCard]
+
+
+class MonthlyReportFunnelSection(BaseModel):
+    title: str
+    funnel: list[MonthlyReportFunnelStep]
+
+
+class MonthlyReportSkipReasonSection(BaseModel):
+    title: str
+    items: list[MonthlyReportSkipReason]
+
+
+class DashboardMonthlyReport(BaseModel):
+    month: str
+    updated_at: datetime
+    review_notice: str
+    overview: MonthlyReportCardSection
+    outreach_recap: MonthlyReportFunnelSection
+    draft_quality: MonthlyReportCardSection
+    queue_performance: MonthlyReportCardSection
+    skip_reasons: MonthlyReportSkipReasonSection
+    reply_progress: MonthlyReportCardSection
+    todos: list[MonthlyReportTodo]

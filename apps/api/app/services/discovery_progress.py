@@ -161,6 +161,7 @@ class DiscoveryProgressReporter:
         platforms_total: int | None = None,
 
         platform_discovery_status: dict[str, str] | None = None,
+        timeout_skipped_keywords_count: int | None = None,
 
         commit: bool = True,
 
@@ -287,6 +288,8 @@ class DiscoveryProgressReporter:
             merged_status.update(platform_discovery_status)
 
             extra["platform_discovery_status"] = merged_status
+        if timeout_skipped_keywords_count is not None:
+            extra["timeout_skipped_keywords_count"] = timeout_skipped_keywords_count
 
         extra["discovery_elapsed_seconds"] = round(self._discovery_elapsed_seconds(), 1)
 

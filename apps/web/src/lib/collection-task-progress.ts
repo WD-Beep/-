@@ -539,6 +539,8 @@ export function collectionTaskDiscoveryContext(task: CollectionTask): string | n
     checkpoint.provider_availability_state && typeof checkpoint.provider_availability_state === "object"
       ? (checkpoint.provider_availability_state as Record<string, Record<string, unknown>>)
       : null;
+  const timeoutSkippedKeywords =
+    typeof checkpoint.timeout_skipped_keywords_count === "number" ? checkpoint.timeout_skipped_keywords_count : 0;
   const skippedCheckpoint =
     typeof checkpoint.skipped_due_checkpoint_count === "number" ? checkpoint.skipped_due_checkpoint_count : null;
 
@@ -589,6 +591,15 @@ export function collectionTaskDiscoveryContext(task: CollectionTask): string | n
   const providerHint = collectionTaskProviderDiagnosticHint(task);
   if (providerHint) {
     parts.push(providerHint);
+  }
+
+  const slowPlatforms = new Set([platformRaw, task.platform, ...(task.platforms ?? [])].filter(Boolean).map((item) => String(item).toLowerCase()));
+  if (providerRaw === "apify" && (slowPlatforms.has("youtube") || slowPlatforms.has("facebook"))) {
+    parts.push("正在等待 Apify 返回");
+    parts.push("YouTube/Facebook 响应较慢，系统会超时跳过慢关键词");
+  }
+  if (timeoutSkippedKeywords > 0) {
+    parts.push(`已跳过 ${timeoutSkippedKeywords} 个超时关键词`);
   }
 
   if (currentKeyword) {

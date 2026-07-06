@@ -39,7 +39,9 @@ import {
   prepareTenantProductOptions,
   resolveStoredProductId,
 } from "@/lib/product-visibility";
+import { shouldDisableProductSelector } from "@/lib/sidebar-product-selector";
 import { useActiveProductId, useProductActions } from "@/components/providers/product-provider";
+import { SHOW_MONTHLY_REPORT_ENTRY } from "@/lib/monthly-report-visibility";
 import { cn } from "@/lib/utils";
 
 const navGroups = [
@@ -80,7 +82,7 @@ const navGroups = [
 const quickLinks = [
   { href: "/link-import", label: "数据导入", icon: Upload },
   { href: "/email-logs", label: "邮件中心", icon: Mail },
-  { href: "/", label: "月度报告", icon: BarChart3 },
+  ...(SHOW_MONTHLY_REPORT_ENTRY ? [{ href: "/", label: "月度报告", icon: BarChart3 }] : []),
   { href: "/collection-tasks", label: "文件下载", icon: FileDown },
 ];
 
@@ -122,8 +124,9 @@ export function Sidebar() {
   const router = useRouter();
   const productId = useActiveProductId();
   const { setProductId: setActiveProductId } = useProductActions();
-  const [products, setProducts] = useState<TenantProduct[]>(() => readCachedTenantProducts());
+  const [products, setProducts] = useState<TenantProduct[]>([]);
   const [productsLoading, setProductsLoading] = useState(true);
+  const [hasHydrated, setHasHydrated] = useState(false);
   const [productLoadError, setProductLoadError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -174,6 +177,7 @@ export function Sidebar() {
   useEffect(() => {
     let cancelled = false;
     queueMicrotask(() => {
+      if (!cancelled) setHasHydrated(true);
       void loadProducts().then((items) => {
         if (cancelled) return;
         const resolvedId = resolveStoredProductId(productId, items);
@@ -401,7 +405,11 @@ export function Sidebar() {
                 <button
                   id="product-selector"
                   type="button"
-                  disabled={productsLoading && products.length === 0}
+                  disabled={shouldDisableProductSelector({
+                    hasHydrated,
+                    productsLoading,
+                    productCount: products.length,
+                  })}
                   aria-haspopup="listbox"
                   aria-expanded={productMenuOpen}
                   onClick={() => setProductMenuOpen((open) => !open)}

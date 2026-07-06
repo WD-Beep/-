@@ -29,6 +29,7 @@ const TEST_KEYWORDS = [
 
 const SEED_SLUGS = new Set(BRAND_PRODUCT_SEEDS.map((item) => item.slug));
 const SYSTEM_SLUGS = new Set(["default"]);
+const TEST_PREFIXES = ["codex-", "qa-", "monthlyprodect", "monthly-product"] as const;
 
 function combinedText(product: Pick<VisibleProductLike, "name" | "slug" | "brand">): string {
   return `${product.name} ${product.slug} ${product.brand ?? ""}`.toLowerCase();
@@ -49,7 +50,11 @@ export function looksLikeTestProduct(
   if (HASH_SUFFIX_RE.test(product.name) || HASH_SUFFIX_RE.test(slug)) {
     return true;
   }
-  if (slug.startsWith("test-product") || slug.startsWith("dup-slug-")) {
+  if (
+    slug.startsWith("test-product") ||
+    slug.startsWith("dup-slug-") ||
+    TEST_PREFIXES.some((prefix) => slug.startsWith(prefix))
+  ) {
     return true;
   }
   return false;

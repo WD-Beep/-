@@ -27,16 +27,13 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-influencer}:${POSTGRES_PASSWORD:-influencer_secret}@postgres:5432/${POSTGRES_DB:-influencer_intel}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001}
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
-    volumes:
-      - ./apps/api:/app
     # Windows 卷挂载会覆盖 entrypoint 脚本且 CRLF 会导致 exec 失败，改用内联 sh
-    entrypoint: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"]
     # 首次启动后需 seed：docker compose exec api python -m app.scripts.seed
     # 或设置 RUN_SEED=true 自动 seed（仅空库时生效）
 
@@ -50,6 +47,7 @@ services:
       - .env
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      INTERNAL_API_URL: ${INTERNAL_API_URL:-http://api:8000}
     ports:
       - "${WEB_PORT:-3000}:3000"
     depends_on:

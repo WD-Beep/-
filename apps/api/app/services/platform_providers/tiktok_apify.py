@@ -19,7 +19,6 @@ from app.services.platform_utils import (
     engagement_rate_from_metrics,
     parse_count_text,
     profile_to_collected,
-    tiktok_region_from_task,
 )
 from app.services.contact_discovery import extract_emails_from_text, normalize_email
 
@@ -430,7 +429,6 @@ class TikTokApifyProvider:
         concurrency = max(1, settings.tiktok_apify_keyword_concurrency)
         if is_competitor_product_task(task):
             concurrency = 1
-        region = tiktok_region_from_task(task)
         memory_mbytes = max(512, settings.tiktok_apify_memory_mbytes)
 
         profiles: list[PlatformCandidateProfile] = []
@@ -456,8 +454,6 @@ class TikTokApifyProvider:
                     "shouldDownloadAvatars": False,
                     "shouldDownloadCovers": False,
                 }
-                if region:
-                    value["proxyCountryCode"] = region.upper()
                 return value
 
             run_input = _run_input(max_results)

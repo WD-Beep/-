@@ -10,12 +10,14 @@ import pytest
 
 from app.core.config import settings
 from app.models.collection_task import CollectionTask
+from app.services.apify_client import ApifyError
 from app.services.collection_funnel import build_running_discovery_summary
 from app.services.platform_providers.facebook_apify import (
     FacebookApifyProvider,
     _needs_profile_hydration,
     _profile_from_search_item,
 )
+import app.services.platform_providers.facebook_apify as facebook_apify_module
 from app.services.platform_providers.youtube_apify import YouTubeApifyProvider
 
 
@@ -154,8 +156,8 @@ async def test_facebook_apify_keyword_timeout_skips_without_blocking(monkeypatch
     monkeypatch.setattr(settings, "facebook_discovery_max_duration_seconds", 30)
 
     async def slow_actor(actor_id, run_input, **_kwargs):
-        await asyncio.sleep(10)
-        return []
+        await asyncio.sleep(0)
+        raise ApifyError("Apify 请求超时（1s）")
 
     task = CollectionTask(
         name="fb-timeout",
@@ -183,6 +185,51 @@ async def test_facebook_apify_keyword_timeout_skips_without_blocking(monkeypatch
     assert result.errors
     assert all(err.strip() for err in result.errors)
     assert any("FACEBOOK_DISCOVERY_KEYWORD_TIMEOUT_SECONDS" in err for err in result.errors)
+
+
+@pytest.mark.anyio
+async def test_facebook_apify_keyword_wait_for_leaves_apify_abort_grace(monkeypatch):
+    monkeypatch.setattr(settings, "apify_token", "apify_api_test")
+    monkeypatch.setattr(settings, "facebook_apify_keyword_concurrency", 1)
+    monkeypatch.setattr(settings, "facebook_discovery_keyword_timeout_seconds", 30)
+    monkeypatch.setattr(settings, "apify_facebook_timeout_seconds", 30)
+    monkeypatch.setattr(settings, "facebook_apify_profile_timeout_seconds", 30)
+    monkeypatch.setattr(settings, "facebook_discovery_max_duration_seconds", 60)
+
+    wait_for_timeouts: list[float | None] = []
+    actor_timeouts: list[int | None] = []
+
+    async def fake_wait_for(awaitable, timeout=None):
+        wait_for_timeouts.append(timeout)
+        return await awaitable
+
+    async def fake_actor(actor_id, run_input, **kwargs):
+        actor_timeouts.append(kwargs.get("timeout"))
+        return [_search_item("keyword-one", page_id="keyword-one")]
+
+    task = CollectionTask(
+        name="fb-timeout-grace",
+        platform="facebook",
+        platforms=["facebook"],
+        keywords=["keyword-one"],
+        collection_mode="keyword",
+        discovery_limit=5,
+    )
+
+    with patch(
+        "app.services.platform_providers.facebook_apify.run_actor_sync",
+        side_effect=fake_actor,
+    ):
+        with patch.object(facebook_apify_module.asyncio, "wait_for", side_effect=fake_wait_for):
+            with patch(
+                "app.services.platform_providers.facebook_apify.report_discovery_progress",
+                new_callable=AsyncMock,
+            ):
+                result = await FacebookApifyProvider.discover(task)
+
+    assert result.fatal is False
+    assert actor_timeouts[0] == 30
+    assert wait_for_timeouts[0] == 35
 
 
 @pytest.mark.anyio

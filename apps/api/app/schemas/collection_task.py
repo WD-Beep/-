@@ -603,8 +603,8 @@ class CollectionTaskUpdate(BaseModel):
             if value is not None:
                 setattr(self, field_name, [k.strip() for k in value if k and k.strip()])
         if self.input_urls is not None:
-            valid = validate_link_import_url_lines(self.input_urls)
             if self.collection_mode == CollectionMode.LINK_IMPORT:
+                valid = validate_link_import_url_lines(self.input_urls)
                 fields = build_link_import_task_fields(valid)
                 self.collection_mode = fields["collection_mode"]
                 self.platform = fields["platform"]
@@ -687,6 +687,7 @@ class CollectionTaskBulkRun(BaseModel):
 
 class CollectionTaskBulkRunResult(BaseModel):
     started_ids: list[int] = Field(default_factory=list)
+    queued_ids: list[int] = Field(default_factory=list)
     skipped_ids: list[int] = Field(default_factory=list)
     skipped_reasons: dict[str, str] = Field(default_factory=dict)
     capacity: int = 1

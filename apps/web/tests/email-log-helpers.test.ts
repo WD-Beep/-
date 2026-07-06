@@ -6,6 +6,7 @@ import {
   buildEmailLogSummary,
   buildOutreachRecordsUrl,
   filterEmailLogsByView,
+  getEmailLogReplyActions,
   getOutreachSummaryMetrics,
   getEmailLogViewTabs,
   parseEmailLogView,
@@ -48,6 +49,24 @@ test("filterEmailLogsByView separates sent failed replied and unreplied rows", (
   assert.deepEqual(filterEmailLogsByView(logs, "failed").map((log) => log.id), [3]);
   assert.deepEqual(filterEmailLogsByView(logs, "replied").map((log) => log.id), [2]);
   assert.deepEqual(filterEmailLogsByView(logs, "unreplied").map((log) => log.id), [1]);
+});
+
+test("getEmailLogReplyActions exposes reply detail and response actions only when a reply exists", () => {
+  assert.deepEqual(
+    getEmailLogReplyActions({
+      ...baseLog,
+      reply: { id: 9, snippet: "Interested", received_at: "2026-06-22" },
+    }),
+    { canViewReply: true, canSendResponse: true },
+  );
+  assert.deepEqual(getEmailLogReplyActions({ ...baseLog, has_replied: true }), {
+    canViewReply: false,
+    canSendResponse: false,
+  });
+  assert.deepEqual(getEmailLogReplyActions(baseLog), {
+    canViewReply: false,
+    canSendResponse: false,
+  });
 });
 
 test("getEmailLogViewTabs labels the business filters clearly", () => {

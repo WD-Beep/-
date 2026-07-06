@@ -169,7 +169,7 @@ def _platform_timeout_seconds(platform: str, *, competitor_mode: bool) -> int | 
     if platform == "facebook":
         return max(30, settings.facebook_discovery_max_duration_seconds)
     if platform == "tiktok":
-        return max(30, settings.apify_tiktok_timeout_seconds)
+        return max(30, settings.apify_tiktok_timeout_seconds) + 5
     return None
 
 

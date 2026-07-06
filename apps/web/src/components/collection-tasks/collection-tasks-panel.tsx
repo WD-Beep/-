@@ -39,6 +39,8 @@ import {
   fetchLinkImportBatches,
   fetchPlatformCapabilities,
   getCollectionTaskRunningElapsedMs,
+  isCollectionTaskActive,
+  isCollectionTaskQueued,
   isCollectionTaskRunning,
   isCollectionTaskRunningStale,
   isCollectionTaskSettled,
@@ -146,6 +148,26 @@ function formatCollectionResultCell(
     );
   }
 
+  if (isCollectionTaskQueued(task)) {
+    const reasonLabels = Array.isArray(task.run_checkpoint?.queue_reason_labels)
+      ? task.run_checkpoint.queue_reason_labels.filter((item): item is string => typeof item === "string")
+      : [];
+    const queuedText = task.status_summary ?? "任务已排队，等待空位";
+    const reasonText = reasonLabels.length > 0 ? reasonLabels.join("；") : null;
+    return (
+      <>
+        <span className="inline-flex items-center gap-1.5 text-amber-700 dark:text-amber-400">
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+          {queuedText}
+        </span>
+        {reasonText ? (
+          <span className="mt-0.5 block text-xs text-muted-foreground">排队原因：{reasonText}</span>
+        ) : null}
+        <span className="mt-0.5 block text-xs text-muted-foreground">{lines.primary}</span>
+      </>
+    );
+  }
+
   if (isCollectionTaskRunning(task)) {
     const rateLimited = isCollectionTaskRateLimited(task);
     const slowApi = isCollectionTaskSlowApi(task, elapsedMs, slowThresholdMs);
@@ -246,6 +268,7 @@ type TaskListRow =
   | { kind: "legacy_batch"; batch: LinkImportBatch; sortAt: number };
 
 const TASK_PAGE_SIZE_OPTIONS = [10, 20, 50] as const;
+const PAGE_ALERT_CLEAR_MS = 8000;
 
 const PRIMARY_TASK_TABS: { value: TaskEffectivenessFilter; label: string }[] = [
   { value: "all", label: "全部" },
@@ -327,6 +350,7 @@ export function CollectionTasksPanel() {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const prevStatusRef = useRef<Map<number, CollectionTaskStatus>>(new Map());
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pageAlertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((next: TaskToast) => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -417,6 +441,8 @@ export function CollectionTasksPanel() {
   useEffect(() => {
     if (searchParams.get("create") === "link_import") {
       queueMicrotask(() => {
+        setMessage(null);
+        setError(null);
         setDialogMode("create");
         setEditingTask(null);
         setDefaultSourceMethod("link_import");
@@ -428,10 +454,23 @@ export function CollectionTasksPanel() {
   useEffect(() => {
     return () => {
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      if (pageAlertTimerRef.current) clearTimeout(pageAlertTimerRef.current);
     };
   }, []);
 
-  const hasRunningTasks = tasks.some((t) => isCollectionTaskRunning(t));
+  useEffect(() => {
+    if (!message && !error) return;
+    if (pageAlertTimerRef.current) clearTimeout(pageAlertTimerRef.current);
+    pageAlertTimerRef.current = setTimeout(() => {
+      setMessage(null);
+      setError(null);
+    }, PAGE_ALERT_CLEAR_MS);
+    return () => {
+      if (pageAlertTimerRef.current) clearTimeout(pageAlertTimerRef.current);
+    };
+  }, [message, error]);
+
+  const hasRunningTasks = tasks.some((t) => isCollectionTaskActive(t));
   const activeRunningTasks = tasks.filter(
     (t) => isCollectionTaskRunning(t) && !isCollectionTaskRunningStale(t),
   );
@@ -454,20 +493,30 @@ export function CollectionTasksPanel() {
   useEffect(() => {
     for (const task of tasks) {
       const prev = prevStatusRef.current.get(task.id);
-      if (prev === "running" && isCollectionTaskSettled(task.status)) {
+      if ((prev === "running" || prev === "queued") && isCollectionTaskSettled(task.status)) {
         const completion = buildCollectionTaskCompletionMessage(task);
         const completionMessage =
           completion.tone === "error" && task.error_message
             ? `采集失败：${translateErrorMessage(task.error_message)}`
             : completion.message;
         showToast({ tone: completion.tone, message: completionMessage });
-        setMessage(completionMessage);
+        queueMicrotask(() => {
+          if (completion.tone === "error") {
+            setError(completionMessage);
+            setMessage(null);
+          } else {
+            setMessage(completionMessage);
+            setError(null);
+          }
+        });
       }
       prevStatusRef.current.set(task.id, task.status);
     }
   }, [tasks, showToast]);
 
   function openCreateDialog(sourceMethod: TaskSourceMethod = "keyword_discovery") {
+    setMessage(null);
+    setError(null);
     setDialogMode("create");
     setEditingTask(null);
     setDefaultSourceMethod(sourceMethod);
@@ -475,6 +524,8 @@ export function CollectionTasksPanel() {
   }
 
   function openEditDialog(task: CollectionTask) {
+    setMessage(null);
+    setError(null);
     setDialogMode("edit");
     setEditingTask(task);
     setDialogOpen(true);
@@ -494,7 +545,6 @@ export function CollectionTasksPanel() {
       }
       await loadTasks();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "保存失败");
       throw err;
     } finally {
       setSubmitting(false);
@@ -505,24 +555,6 @@ export function CollectionTasksPanel() {
     setActionTaskId(task.id);
     setMessage(null);
     setError(null);
-
-    // Pre-check: if another task appears to be running, warn early
-    const otherActiveCount = tasks.filter(
-      (t) =>
-        t.id !== task.id &&
-        isCollectionTaskRunning(t) &&
-        !isCollectionTaskRunningStale(t),
-    ).length;
-    if (
-      otherActiveCount >= maxRunningTasks &&
-      !(isCollectionTaskRunning(task) && isCollectionTaskRunningStale(task))
-    ) {
-      const msg = `当前已有 ${otherActiveCount} 个任务在运行（上限 ${maxRunningTasks}），请等待空位后再运行`;
-      showToast({ tone: "warning", message: msg });
-      setError(msg);
-      setActionTaskId(null);
-      return;
-    }
 
     try {
       const kickoff = await runCollectionTask(task.id);
@@ -550,6 +582,11 @@ export function CollectionTasksPanel() {
         showToast({ tone: "info", message: `任务已开始：${runningSummary}` });
         prevStatusRef.current.set(task.id, "running");
         await loadTasks({ silent: true });
+      } else if (kickoff.status === "queued") {
+        setMessage(runningSummary);
+        showToast({ tone: "warning", message: runningSummary });
+        prevStatusRef.current.set(task.id, "queued");
+        await loadTasks({ silent: true });
       } else {
         const pseudoTask: CollectionTask = {
           ...task,
@@ -562,8 +599,14 @@ export function CollectionTasksPanel() {
           error_message: kickoff.error_message ?? null,
         };
         const completion = buildCollectionTaskCompletionMessage(pseudoTask);
-        setMessage(completion.message);
         showToast({ tone: completion.tone, message: completion.message });
+        if (completion.tone === "error") {
+          setError(completion.message);
+          setMessage(null);
+        } else {
+          setMessage(completion.message);
+          setError(null);
+        }
         await loadTasks({ silent: true });
       }
     } catch (err) {
@@ -1153,14 +1196,7 @@ export function CollectionTasksPanel() {
                     const isRunning = isCollectionTaskRunning(task);
                     const isStaleRunning = isRunning && isCollectionTaskRunningStale(task);
                     const runningElapsedMs = isRunning ? getCollectionTaskRunningElapsedMs(task, nowMs) : 0;
-                    const otherActiveCount = tasks.filter(
-                      (t) =>
-                        t.id !== task.id &&
-                        isCollectionTaskRunning(t) &&
-                        !isCollectionTaskRunningStale(t),
-                    ).length;
-                    const runBlocked =
-                      (isRunning && !isStaleRunning) || otherActiveCount >= maxRunningTasks;
+                    const runBlocked = isRunning && !isStaleRunning;
                     const mode = task.collection_mode ?? "keyword";
                     const keywords = task.keywords ?? [];
                     const followerRange = formatFollowerRange(task);
@@ -1316,9 +1352,7 @@ export function CollectionTasksPanel() {
                               disabled={isBusy || runBlocked}
                               onClick={() => handleRun(task)}
                               title={
-                                otherActiveCount >= maxRunningTasks
-                                  ? `采集并发已满（${maxRunningTasks}），请等待空位`
-                                  : isStaleRunning
+                                isStaleRunning
                                     ? "上次运行可能中断，继续采集"
                                     : isRunning
                                       ? "任务采集中"

@@ -620,7 +620,7 @@ test("link import preview rejects unsupported Pinterest LTK ShopMy path shapes",
     [
       "https://www.pinterest.com/some_user/some_board/",
       "https://shopltk.com/not-explore/user",
-      "https://shopmy.us/shop/example",
+      "https://shopmy.us/shop",
     ].join("\n"),
   );
   assert.equal(preview.validCount, 0);

@@ -96,6 +96,15 @@ def max_overfetch_rounds_for_task(task: CollectionTask) -> int:
 
     if is_competitor_product_task(task):
         return 1
+    platforms = [
+        str(platform).strip().lower()
+        for platform in (getattr(task, "platforms", None) or [])
+        if platform
+    ]
+    if not platforms and getattr(task, "platform", None):
+        platforms = [str(task.platform).strip().lower()]
+    if set(platforms) & {"tiktok", "youtube", "facebook"}:
+        return 1
     target = target_qualified_count(task)
     if target <= 14:
         return 2

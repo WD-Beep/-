@@ -316,6 +316,15 @@ export function TaskFormDialog({
   const showLegacyUrls =
     !isLinkImport &&
     (collectionMode === "urls" || collectionMode === "mixed" || collectionMode === "clustering");
+  const keywordCount = form.keywordsText
+    .split(/\r?\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean).length;
+  const selectedSlowPlatforms = form.platforms.filter((platform) =>
+    platform === "youtube" || platform === "facebook"
+  );
+  const showSlowPlatformCreateHint =
+    mode === "create" && showKeywordsField && selectedSlowPlatforms.length > 0 && keywordCount > 2;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -411,9 +420,10 @@ export function TaskFormDialog({
                         key={option.value}
                         type="button"
                         disabled={mode === "edit"}
-                        onClick={() =>
-                          setForm((prev) => applyDiscoverySource(option.value, prev, platformCapabilities))
-                        }
+                        onClick={() => {
+                          setError(null);
+                          setForm((prev) => applyDiscoverySource(option.value, prev, platformCapabilities));
+                        }}
                         className={cn(
                           "rounded-md border px-3 py-2 text-left transition-colors",
                           active ? "border-primary bg-primary/5" : "hover:bg-muted/40",
@@ -470,9 +480,10 @@ export function TaskFormDialog({
                                 disabled: false,
                                 hint: "通过社媒搜索发现真实主页链接",
                               }}
-                              onToggle={() =>
-                                setForm((prev) => toggleSeedPlatformSelection(prev, value))
-                              }
+                              onToggle={() => {
+                                setError(null);
+                                setForm((prev) => toggleSeedPlatformSelection(prev, value));
+                              }}
                             />
                           );
                         })}
@@ -507,9 +518,10 @@ export function TaskFormDialog({
                             platform={value}
                             checked={checked}
                             meta={meta}
-                            onToggle={() =>
-                              setForm((prev) => toggleKeywordPlatformSelection(prev, value, platformCapabilities))
-                            }
+                            onToggle={() => {
+                              setError(null);
+                              setForm((prev) => toggleKeywordPlatformSelection(prev, value, platformCapabilities));
+                            }}
                           />
                         );
                       })}
@@ -539,9 +551,10 @@ export function TaskFormDialog({
                               platform={value}
                               checked={checked}
                               meta={meta}
-                              onToggle={() =>
-                                setForm((prev) => toggleKeywordPlatformSelection(prev, value, platformCapabilities))
-                              }
+                              onToggle={() => {
+                                setError(null);
+                                setForm((prev) => toggleKeywordPlatformSelection(prev, value, platformCapabilities));
+                              }}
                             />
                           );
                         }
@@ -599,7 +612,10 @@ export function TaskFormDialog({
                     <Textarea
                       id="link_import_urls"
                       value={form.inputUrlsText}
-                      onChange={(e) => setForm({ ...form, inputUrlsText: e.target.value })}
+                      onChange={(e) => {
+                        setError(null);
+                        setForm({ ...form, inputUrlsText: e.target.value });
+                      }}
                       rows={6}
                       placeholder={"每行一条链接，支持 Instagram / YouTube / TikTok / Facebook / Pinterest / LTK / ShopMy / Amazon"}
                     />
@@ -629,7 +645,10 @@ export function TaskFormDialog({
                   <Textarea
                     id="competitor_input"
                     value={form.competitorInputText}
-                    onChange={(e) => setForm({ ...form, competitorInputText: e.target.value })}
+                    onChange={(e) => {
+                      setError(null);
+                      setForm({ ...form, competitorInputText: e.target.value });
+                    }}
                     rows={4}
                     placeholder={"home decor finds\nHOMEHIVE jewelry storage bags\nB0XXXXXXX\nhttps://www.amazon.com/dp/B0XXXXXXX/"}
                   />
@@ -649,10 +668,18 @@ export function TaskFormDialog({
                   <Textarea
                     id="keywords"
                     value={form.keywordsText}
-                    onChange={(e) => setForm({ ...form, keywordsText: e.target.value })}
+                    onChange={(e) => {
+                      setError(null);
+                      setForm({ ...form, keywordsText: e.target.value });
+                    }}
                     rows={4}
                     placeholder={"amazon finds creator\namazon home finds"}
                   />
+                  {showSlowPlatformCreateHint ? (
+                    <p className="rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                      YouTube/Facebook 可能较慢，建议先用 2-3 个关键词验证；系统会超时跳过慢关键词，不会阻断任务。
+                    </p>
+                  ) : null}
                 </div>
               ) : showLegacyUrls ? (
                 <div className="space-y-2">

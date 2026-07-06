@@ -49,3 +49,22 @@ def test_is_product_visible_respects_flags_and_heuristics():
 
     include = _Product(name="测试产品B-9b793a3a", slug="test-product-b-9b793a3a")
     assert is_product_visible(include, include_test=True)
+
+
+def test_generated_qa_and_monthly_products_are_hidden():
+    assert looks_like_test_product(
+        name="codex-acceptance-b2fd186e product",
+        slug="codex-acceptance-b2fd186e",
+    )
+    assert looks_like_test_product(
+        name="qa-run-4eae8bec product",
+        slug="qa-run-4eae8bec-product",
+    )
+    assert looks_like_test_product(
+        name="monthlyprodect report product",
+        slug="monthlyprodect-report-product",
+    )
+    assert looks_like_test_product(
+        name="monthly-product report product",
+        slug="monthly-product-report-product",
+    )

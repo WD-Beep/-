@@ -163,6 +163,14 @@ class EmailReplyMatcher:
         if product_id_hint is None and inbound_to and recipient and recipient not in inbound_to:
             # Allow missing/unknown to-address when thread headers exist.
             if not in_reply_to and not references:
+                matched = await EmailReplyMatcher._match_by_sender_only(
+                    db,
+                    sender=sender,
+                    subject=subject,
+                    product_id_hint=product_id_hint,
+                )
+                if matched:
+                    return matched
                 return None
 
         thread_ids = [
@@ -259,14 +267,20 @@ class EmailReplyMatcher:
         subject: str | None = None,
         product_id_hint: int | None,
     ) -> ReplyMatchResult | None:
-        pair = await EmailReplyMatcher._find_product_influencer_by_email(
+        rows = await EmailReplyMatcher._find_product_influencer_rows_by_email(
             db,
             email=sender,
             product_id_hint=product_id_hint,
         )
-        if not pair:
+        if not rows:
             return None
-        product_row, _global_row = pair
+        if len(rows) > 1:
+            return await EmailReplyMatcher._match_ambiguous_sender_by_sent_subject(
+                db,
+                rows=rows,
+                subject=subject,
+            )
+        product_row, _global_row = rows[0]
 
         log_query = (
             select(EmailLog)
@@ -296,6 +310,50 @@ class EmailReplyMatcher:
             campaign_id=campaign_id,
             match_method="from_email",
             match_confidence="high" if log else "medium",
+        )
+
+    @staticmethod
+    async def _match_ambiguous_sender_by_sent_subject(
+        db: AsyncSession,
+        *,
+        rows: list[tuple[ProductInfluencer, GlobalInfluencerProfile]],
+        subject: str | None,
+    ) -> ReplyMatchResult | None:
+        normalized_subject = normalize_subject(subject)
+        if not normalized_subject:
+            return None
+
+        product_rows = {product_row.id: product_row for product_row, _global_row in rows}
+        log_query = (
+            select(EmailLog)
+            .where(
+                EmailLog.product_influencer_id.in_(list(product_rows.keys())),
+                EmailLog.status == EmailLogStatus.SENT.value,
+            )
+            .order_by(EmailLog.sent_at.desc().nullslast(), EmailLog.id.desc())
+            .limit(50)
+        )
+        logs = [
+            log
+            for log in (await db.scalars(log_query)).all()
+            if normalize_subject(log.subject) == normalized_subject
+        ]
+        matched_ids = {log.product_influencer_id for log in logs if log.product_influencer_id}
+        if len(matched_ids) != 1:
+            return None
+
+        log = logs[0]
+        product_row = product_rows.get(log.product_influencer_id)
+        if not product_row or log.product_id != product_row.product_id:
+            return None
+        campaign_id = await EmailReplyMatcher._resolve_campaign_id(db, email_log_id=log.id)
+        return ReplyMatchResult(
+            product_id=product_row.product_id,
+            product_influencer_id=product_row.id,
+            email_log_id=log.id,
+            campaign_id=campaign_id,
+            match_method="from_email_sent_subject",
+            match_confidence="high",
         )
 
     @staticmethod
@@ -573,9 +631,25 @@ class EmailReplyMatcher:
         email: str,
         product_id_hint: int | None,
     ) -> tuple[ProductInfluencer, GlobalInfluencerProfile] | None:
+        rows = await EmailReplyMatcher._find_product_influencer_rows_by_email(
+            db,
+            email=email,
+            product_id_hint=product_id_hint,
+        )
+        if len(rows) != 1:
+            return None
+        return rows[0][0], rows[0][1]
+
+    @staticmethod
+    async def _find_product_influencer_rows_by_email(
+        db: AsyncSession,
+        *,
+        email: str,
+        product_id_hint: int | None,
+    ) -> list[tuple[ProductInfluencer, GlobalInfluencerProfile]]:
         normalized = normalize_email_address(email)
         if not normalized:
-            return None
+            return []
 
         email_match = or_(
             func.lower(GlobalInfluencerProfile.final_email) == normalized,
@@ -596,9 +670,7 @@ class EmailReplyMatcher:
             query = query.where(ProductInfluencer.product_id == product_id_hint)
 
         rows = (await db.execute(query)).all()
-        if len(rows) != 1:
-            return None
-        return rows[0][0], rows[0][1]
+        return [(product_row, global_row) for product_row, global_row in rows]
 
     @staticmethod
     async def _validate_sender_for_log(

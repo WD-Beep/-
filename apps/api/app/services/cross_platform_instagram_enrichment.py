@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Iterable, Sequence
 
 from app.collectors.base import CollectedInfluencer
+from app.core.config import settings
 from app.services.contact_discovery import extract_emails_from_text, normalize_email
 from app.services.high_value_filter import CONTACT_FOUND
 from app.services.instagram_urls import (
@@ -221,19 +223,30 @@ async def enrich_profiles_with_instagram_email(
     """Return collected items after best-effort Instagram email enrichment."""
     scrape = scrape_func or _default_scrape
     collected = [profile_to_collected(profile) for profile in profiles]
+    max_attempts = max(0, settings.collection_cross_platform_instagram_enrichment_limit)
+    timeout_seconds = max(1, settings.collection_cross_platform_instagram_enrichment_timeout_seconds)
+    attempted = 0
 
     for profile, item in zip(profiles, collected, strict=False):
         platform = (profile.platform or "").strip().lower()
         if platform == "instagram" or _has_email(profile) or item.final_email or item.email:
             continue
+        if attempted >= max_attempts:
+            break
 
         probes = _candidate_probes(profile)
         if not probes:
             continue
 
         for probe in probes:
+            if attempted >= max_attempts:
+                break
+            attempted += 1
             try:
-                result = await scrape([probe.profile_url])
+                result = await asyncio.wait_for(
+                    scrape([probe.profile_url]),
+                    timeout=timeout_seconds,
+                )
             except Exception as exc:
                 logger.warning(
                     "Instagram email enrichment failed for %s %s via %s: %s",

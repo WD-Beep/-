@@ -256,6 +256,7 @@ export type AnalyzeInfluencerResponse = {
 export type CollectionTaskStatus =
   | "draft"
   | "pending"
+  | "queued"
   | "running"
   | "completed"
   | "completed_with_results"
@@ -503,6 +504,14 @@ export function isCollectionTaskSettled(status: CollectionTaskStatus): boolean {
 
 export function isCollectionTaskRunning(task: CollectionTask): boolean {
   return task.status === "running";
+}
+
+export function isCollectionTaskQueued(task: CollectionTask): boolean {
+  return task.status === "queued";
+}
+
+export function isCollectionTaskActive(task: CollectionTask): boolean {
+  return isCollectionTaskRunning(task) || isCollectionTaskQueued(task);
 }
 
 export function getCollectionTaskRunningReferenceAt(task: CollectionTask): string | null {
@@ -897,6 +906,36 @@ export type EmailTestResponse = {
   recipient: string | null;
 };
 
+export type ManualOutreachSendMode = "now" | "scheduled";
+
+export type ManualOutreachEmailPayload = {
+  recipients: string[];
+  subject: string;
+  body: string;
+  send_mode: ManualOutreachSendMode;
+  scheduled_at?: string;
+};
+
+export type ManualOutreachEmailItem = {
+  id: number | null;
+  recipient: string;
+  status: string;
+  email_log_id: number | null;
+  error_message: string | null;
+  scheduled_at: string | null;
+  sent_at: string | null;
+};
+
+export type ManualOutreachEmailResponse = {
+  status: string;
+  total: number;
+  sent_count: number;
+  scheduled_count: number;
+  failed_count: number;
+  message: string;
+  items: ManualOutreachEmailItem[];
+};
+
 export type DashboardSummary = {
   total_influencers: number;
   total_tasks: number;
@@ -917,6 +956,75 @@ export type DashboardSummary = {
   recent_tasks: CollectionTask[];
 };
 
+export type DashboardMonthlyReportMetricCard = {
+  label: string;
+  value: string;
+  helper: string;
+  href: string;
+  tone: "primary" | "success" | "warning" | "danger" | "neutral" | string;
+};
+
+export type DashboardMonthlyReportFunnelStep = {
+  label: string;
+  value: number;
+  href: string;
+};
+
+export type DashboardMonthlyReportSkipReason = {
+  label: string;
+  value: number;
+  helper: string;
+  href: string;
+  tone: "primary" | "success" | "warning" | "danger" | "neutral" | string;
+};
+
+export type DashboardMonthlyReportTodo = {
+  title: string;
+  description: string;
+  href: string;
+  action_label: string;
+  tone: "primary" | "success" | "warning" | "danger" | "neutral" | string;
+};
+
+export type DashboardMonthlyReportCardSection = {
+  title: string;
+  cards: DashboardMonthlyReportMetricCard[];
+};
+
+export type DashboardMonthlyReportFunnelSection = {
+  title: string;
+  funnel: DashboardMonthlyReportFunnelStep[];
+};
+
+export type DashboardMonthlyReportSkipReasonSection = {
+  title: string;
+  items: DashboardMonthlyReportSkipReason[];
+};
+
+export type DashboardMonthlyReport = {
+  month: string;
+  updated_at: string;
+  review_notice: string;
+  overview: DashboardMonthlyReportCardSection;
+  outreach_recap: DashboardMonthlyReportFunnelSection;
+  draft_quality: DashboardMonthlyReportCardSection;
+  queue_performance: DashboardMonthlyReportCardSection;
+  skip_reasons: DashboardMonthlyReportSkipReasonSection;
+  reply_progress: DashboardMonthlyReportCardSection;
+  todos: DashboardMonthlyReportTodo[];
+};
+
+export function cleanBackendErrorMessage(message: string): string {
+  const cleaned = message
+    .replace(/^body:\s*/i, "")
+    .replace(/^Value error,\s*/i, "")
+    .trim();
+  if (cleaned.includes("链接导入至少需要一个链接")) {
+    return "请先粘贴至少一个链接，或切回关键词发现模式。";
+  }
+  return cleaned || message;
+}
+
 async function parseError(response: Response): Promise<string> {
   try {
     const text = await response.text();
@@ -924,10 +1032,12 @@ async function parseError(response: Response): Promise<string> {
       return `Request failed: ${response.status}`;
     }
     try {
-      const data = JSON.parse(text) as { detail?: string | Array<{ msg?: string }> };
-      if (typeof data.detail === "string") return data.detail;
+      const data = JSON.parse(text) as { detail?: string | Array<{ msg?: string; loc?: Array<string | number> }> };
+      if (typeof data.detail === "string") return cleanBackendErrorMessage(data.detail);
       if (Array.isArray(data.detail)) {
-        return data.detail.map((item: { msg?: string }) => item.msg ?? JSON.stringify(item)).join("；");
+        return data.detail
+          .map((item) => cleanBackendErrorMessage(item.msg ?? JSON.stringify(item)))
+          .join("；");
       }
     } catch {
       if (response.status >= 500 && /Internal Server Error/i.test(text)) {
@@ -959,6 +1069,16 @@ export async function fetchHealth(): Promise<HealthResponse> {
 
 export async function fetchDashboardSummary(): Promise<DashboardSummary> {
   const response = await apiFetch(`${API_URL}/api/dashboard/summary`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchDashboardMonthlyReport(month: string): Promise<DashboardMonthlyReport> {
+  const response = await apiFetch(`${API_URL}/api/dashboard/monthly-report?month=${encodeURIComponent(month)}`, {
+    cache: "no-store",
+  });
   if (!response.ok) {
     throw new Error(await parseError(response));
   }
@@ -1552,6 +1672,7 @@ export async function bulkManageCollectionTasks(
 
 export type CollectionTaskBulkRunResult = {
   started_ids: number[];
+  queued_ids: number[];
   skipped_ids: number[];
   skipped_reasons: Record<string, string>;
   capacity: number;
@@ -1909,6 +2030,20 @@ export async function sendTestEmail(recipient: string): Promise<EmailTestRespons
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ recipient }),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function sendManualOutreachEmail(
+  payload: ManualOutreachEmailPayload,
+): Promise<ManualOutreachEmailResponse> {
+  const response = await apiFetch(`${API_URL}/api/manual-outreach-email/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
   if (!response.ok) {
     throw new Error(await parseError(response));
@@ -2964,16 +3099,24 @@ export async function fetchOutreachCampaigns(): Promise<OutreachCampaign[]> {
 }
 
 export async function fetchOutreachWorkbench(): Promise<OutreachOneClickWorkbench> {
-  const response = await apiFetch(`${API_URL}/api/outreach-campaigns/workbench`, {
-    cache: "no-store",
-  });
-  if (!response.ok) {
-    if (response.status === 404 || response.status === 405) {
-      return fetchOutreachWorkbenchFallback();
+  try {
+    const response = await apiFetch(`${API_URL}/api/outreach-campaigns/workbench`, {
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      if (response.status === 404 || response.status === 405) {
+        return fetchOutreachWorkbenchFallback();
+      }
+      throw new Error(await parseError(response));
     }
-    throw new Error(await parseError(response));
+    return response.json();
+  } catch (error) {
+    try {
+      return await fetchOutreachWorkbenchFallback();
+    } catch {
+      throw error;
+    }
   }
-  return response.json();
 }
 
 async function fetchOutreachWorkbenchFallback(): Promise<OutreachOneClickWorkbench> {

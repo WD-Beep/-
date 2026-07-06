@@ -20,6 +20,7 @@ from app.models.link_knowledge_base import (
     LinkScriptJob,
     LinkScriptResult,
 )
+from app.models.manual_outreach_email import ManualOutreachEmail
 from app.models.message_template import MessageTemplate
 from app.models.outreach_campaign_recipient import OutreachCampaignRecipient
 from app.models.outreach_email_campaign import OutreachEmailCampaign
@@ -49,6 +50,7 @@ __all__ = [
     "LinkKnowledgeChunk",
     "LinkScriptJob",
     "LinkScriptResult",
+    "ManualOutreachEmail",
     "User",
     "Workspace",
     "WorkspaceMember",

@@ -628,6 +628,7 @@ class YouTubeApifyProvider:
 
 
         keywords_completed = 0
+        timeout_skipped_keywords_count = 0
 
         for chunk_start in range(0, len(keywords), concurrency):
 
@@ -702,6 +703,8 @@ class YouTubeApifyProvider:
                 rate_limit_count += local_rate_limits
 
                 slow_api = slow_api or local_slow
+                if local_slow:
+                    timeout_skipped_keywords_count += 1
 
                 errors.extend(local_errors)
 
@@ -732,6 +735,7 @@ class YouTubeApifyProvider:
                     keywords_completed=keywords_completed,
 
                     keywords_total=len(keywords),
+                    timeout_skipped_keywords_count=timeout_skipped_keywords_count,
 
                     timing_note=local_errors[-1] if local_errors else None,
 
@@ -874,6 +878,7 @@ class YouTubeApifyProvider:
             keywords_completed=keywords_completed,
 
             keywords_total=len(keywords),
+            timeout_skipped_keywords_count=timeout_skipped_keywords_count,
 
         )
 
@@ -962,6 +967,7 @@ class YouTubeApifyProvider:
             keywords_completed=keywords_completed,
 
             keywords_total=len(keywords),
+            timeout_skipped_keywords_count=timeout_skipped_keywords_count,
 
         )
 

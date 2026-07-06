@@ -228,6 +228,7 @@ test("running task shows current keyword from checkpoint", () => {
       keywords_completed: 2,
       keywords_total: 10,
       slow_api: true,
+      timeout_skipped_keywords_count: 1,
     },
   });
   const hint = collectionTaskRunningHint(runningTask, { elapsedMs: 0 });
@@ -235,7 +236,20 @@ test("running task shows current keyword from checkpoint", () => {
   assert.match(hint!, /amazon seller/);
   assert.match(hint!, /Apify YouTube/);
   assert.match(hint!, /2\/10/);
+  assert.match(hint!, /正在等待 Apify 返回/);
+  assert.match(hint!, /YouTube\/Facebook 响应较慢，系统会超时跳过慢关键词/);
+  assert.match(hint!, /已跳过 1 个超时关键词/);
   assert.match(hint!, /接口响应较慢，继续处理/);
+});
+
+test("task form warns on many youtube or facebook keywords without blocking", () => {
+  const source = readFileSync(
+    new URL("../src/components/collection-tasks/task-form-dialog.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /showSlowPlatformCreateHint/);
+  assert.match(source, /YouTube\/Facebook 可能较慢，建议先用 2-3 个关键词验证/);
+  assert.match(source, /系统会超时跳过慢关键词，不会阻断任务/);
 });
 
 test("running facebook task shows hydration progress and partial skip", () => {

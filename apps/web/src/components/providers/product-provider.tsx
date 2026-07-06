@@ -3,6 +3,8 @@
 import { createContext, useContext, useLayoutEffect, useMemo, useState } from "react";
 
 import { ALL_PRODUCTS_ID, readStoredProductIdFromStorage, setStoredProductId } from "@/lib/product-context";
+import { readCachedTenantProducts } from "@/lib/product-options-cache";
+import { resolveInitialProductIdFromCache } from "@/lib/product-provider-state";
 
 type ProductContextValue = {
   productId: number;
@@ -18,7 +20,11 @@ export function ProductProvider({ children }: { children: React.ReactNode }) {
   useLayoutEffect(() => {
     queueMicrotask(() => {
       const storedProductId = readStoredProductIdFromStorage();
-      setProductIdState(storedProductId);
+      const resolvedProductId = resolveInitialProductIdFromCache(
+        storedProductId,
+        readCachedTenantProducts(),
+      );
+      setProductIdState(resolvedProductId);
       setHydrated(true);
     });
   }, []);

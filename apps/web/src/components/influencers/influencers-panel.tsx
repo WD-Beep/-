@@ -65,6 +65,7 @@ import {
 import { cn } from "@/lib/utils";
 import {
   INFLUENCER_ONE_CLICK_EMAIL_BUTTON_LABEL,
+  buildOutreachCampaignResultUrl,
   buildOutreachCampaignsUrl,
   buildOneClickCampaignName,
   buildOneClickCampaignPayload,
@@ -572,7 +573,16 @@ export function InfluencersPanel() {
       );
       const result = await generateAndSendOutreachCampaign(campaign.id);
       clearSelection();
-      router.push(`/outreach-campaigns?highlight=${campaign.id}&message=${encodeURIComponent(result.message)}`);
+      router.push(
+        buildOutreachCampaignResultUrl({
+          campaignId: campaign.id,
+          message: result.message,
+          ids: bulkOutreachSelection.ids,
+          selectAll: bulkOutreachSelection.selectAll,
+          filters: bulkOutreachSelection.filters,
+          total: bulkOutreachSelection.count,
+        }),
+      );
     } catch (err) {
       setError(translateErrorMessage(err instanceof Error ? err.message : "一键生成并发送失败"));
     } finally {

@@ -1297,12 +1297,71 @@ body {
   box-shadow: 0 1px 2px rgba(16, 32, 51, 0.04);
 }
 
+.campaign-status-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .campaign-status-metrics {
   display: grid;
   min-width: 0;
   flex: 1;
   grid-template-columns: repeat(5, minmax(142px, 1fr));
   gap: 10px;
+}
+
+.campaign-status-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.campaign-manual-test-summary {
+  display: grid;
+  width: 260px;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  border: 1px solid hsl(214 24% 88%);
+  border-radius: 7px;
+  background: hsl(214 33% 97%);
+  padding: 7px 10px;
+}
+
+.campaign-manual-test-panel {
+  flex-shrink: 0;
+  border: 1px solid hsl(214 24% 88%);
+  border-radius: 8px;
+  background: hsl(210 30% 99%);
+  padding: 12px 14px;
+  box-shadow: 0 1px 2px rgba(16, 32, 51, 0.04);
+}
+
+.campaign-manual-test-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.9fr) minmax(180px, 0.75fr) minmax(260px, 1.1fr);
+  gap: 12px;
+}
+
+.campaign-manual-test-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.campaign-manual-test-time {
+  display: grid;
+  grid-template-columns: 160px 120px;
+  gap: 8px;
+}
+
+.campaign-manual-test-hint {
+  margin-top: 10px;
 }
 
 .campaign-metric-pill {
@@ -1713,6 +1772,15 @@ body {
   .campaign-layout-grid {
     grid-template-columns: minmax(0, 1fr) minmax(280px, 320px);
   }
+
+  .campaign-status-main {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .campaign-status-actions {
+    width: 100%;
+  }
 }
 
 @media (max-width: 980px) {
@@ -1751,5 +1819,32 @@ body {
 
   .campaign-status-metrics {
     grid-template-columns: repeat(2, minmax(150px, 1fr));
+  }
+
+  .campaign-manual-test-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .campaign-status-actions {
+    flex-wrap: wrap;
+  }
+
+  .campaign-manual-test-summary {
+    width: 100%;
+  }
+
+  .campaign-manual-test-time {
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .campaign-status-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .campaign-status-actions > button {
+    flex: 1 1 120px;
   }
 }

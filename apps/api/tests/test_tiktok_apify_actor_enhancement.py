@@ -88,6 +88,30 @@ def test_tiktok_hashtag_actor_maps_video_author_and_source_fields(monkeypatch):
     assert result.profiles[0].email == "hello@creator.com"
 
 
+def test_tiktok_apify_keyword_search_omits_proxy_country_to_avoid_actor_stall(monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_run_actor(actor_id, run_input, **kwargs):
+        calls.append((actor_id, run_input))
+        return [
+            {
+                "text": "makeup bag travel pouch",
+                "webVideoUrl": "https://www.tiktok.com/@creator/video/123",
+                "authorMeta": {"name": "creator", "fans": 45000},
+                "playCount": 10000,
+                "diggCount": 700,
+                "commentCount": 30,
+            }
+        ]
+
+    monkeypatch.setattr("app.services.platform_providers.tiktok_apify.run_actor_sync", fake_run_actor)
+
+    result = asyncio.run(TikTokApifyProvider.discover(_task(keywords=["makeup bag"], country="DE")))
+
+    assert result.profiles
+    assert "proxyCountryCode" not in calls[0][1]
+
+
 def test_tiktok_video_actor_maps_input_url_author(monkeypatch):
     calls: list[tuple[str, dict]] = []
 

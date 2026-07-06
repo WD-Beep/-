@@ -1,4 +1,4 @@
-import type { MatchedKnowledgeItem, OutreachScheduleRequest } from "./api.ts";
+import type { ManualOutreachEmailPayload, ManualOutreachSendMode, MatchedKnowledgeItem, OutreachScheduleRequest } from "./api.ts";
 
 export const TEMPLATE_VARIABLE_HINTS = [
   "{name}",
@@ -114,6 +114,67 @@ export function buildScheduledOutreachQueuePayload(input: {
   };
 }
 
+const MANUAL_OUTREACH_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export function parseManualOutreachRecipients(text: string): {
+  valid: string[];
+  invalid: string[];
+  overLimit: boolean;
+} {
+  const seen = new Set<string>();
+  const valid: string[] = [];
+  const invalid: string[] = [];
+  const parts = text
+    .split(/[\s,;，；]+/)
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+
+  for (const item of parts) {
+    if (!MANUAL_OUTREACH_EMAIL_PATTERN.test(item)) {
+      invalid.push(item);
+      continue;
+    }
+    if (seen.has(item)) continue;
+    seen.add(item);
+    if (valid.length < 10) {
+      valid.push(item);
+    }
+  }
+
+  return {
+    valid,
+    invalid,
+    overLimit: seen.size > 10,
+  };
+}
+
+export function buildManualOutreachPayload(input: {
+  recipientsText: string;
+  subject: string;
+  body: string;
+  sendMode: ManualOutreachSendMode;
+  scheduledAt?: Date | null;
+}): ManualOutreachEmailPayload {
+  const parsed = parseManualOutreachRecipients(input.recipientsText);
+  const payload: ManualOutreachEmailPayload = {
+    recipients: parsed.valid,
+    subject: input.subject.trim(),
+    body: input.body.trim(),
+    send_mode: input.sendMode,
+  };
+  if (input.sendMode === "scheduled" && input.scheduledAt) {
+    payload.scheduled_at = input.scheduledAt.toISOString();
+  }
+  return payload;
+}
+
+export function buildManualOutreachConfirmMessage(count: number, mode: ManualOutreachSendMode): string {
+  if (mode === "scheduled") {
+    return `本次将定时发送 ${count} 封自定义测试邮件。到时间后会自动发送，确认入队？`;
+  }
+  return `本次将立即发送 ${count} 封自定义测试邮件。确认发送？`;
+}
+
 export type CampaignSendMode = "now" | "scheduled" | "smart";
 export type OneClickSendMode = "now" | "scheduled";
 export type OneClickContentSource = "manual" | "template" | "ai";
@@ -218,10 +279,34 @@ export function getOneClickQueueStatusLabel(status: OneClickQueueStatus): string
     ready_to_send: "待确认发送",
     waiting: "已定时",
     sending: "正在发送",
-    completed: "已发送",
+    completed: "已完成",
     failed: "失败",
   };
   return labels[status];
+}
+
+export function getOneClickCurrentStatusLabel(input: {
+  busyAction: "preview" | "send" | "queue" | "save" | null;
+  copyMode: OneClickContentSource;
+  hasPreview: boolean;
+  queueStatus: OneClickQueueStatus;
+  preview?: { total: number; can_queue_count: number; skip_count: number } | null;
+}): string {
+  if (input.busyAction === "preview") return "生成中";
+  if (input.busyAction === "send") return "发送中";
+  if (input.busyAction === "queue") return "创建定时中";
+  if (
+    input.preview &&
+    input.preview.total > 0 &&
+    input.preview.can_queue_count === 0 &&
+    input.preview.skip_count >= input.preview.total
+  ) {
+    return "本批无可发送";
+  }
+  if (input.copyMode === "ai" && input.hasPreview && input.queueStatus === "ready_to_send") {
+    return "待确认";
+  }
+  return getOneClickQueueStatusLabel(input.queueStatus);
 }
 
 export function getOneClickContentSourceLabel(source: OneClickContentSource): string {
@@ -277,6 +362,18 @@ export function buildScheduledQueueSuccessMessage(input: {
 }): string {
   const skipped = input.skippedCount > 0 ? `，跳过 ${input.skippedCount} 人` : "";
   return `已设置定时发送：${formatOneClickDateTime(input.startAt)}，共 ${input.createdCount} 封${skipped}。到时间会自动发送，不需要再手动点。`;
+}
+
+export function buildScheduledSendCompletionMessage(input: {
+  queuedCount: number;
+  sentCount: number;
+  failedCount: number;
+}): string | null {
+  if (input.sentCount <= 0 && input.failedCount <= 0) return null;
+  if (input.failedCount > 0) {
+    return `定时发送已完成，发送成功 ${input.sentCount} 封，失败 ${input.failedCount} 封。请到发送队列查看失败原因。`;
+  }
+  return `定时发送已完成，发送成功：已发出 ${input.sentCount} 封邮件。`;
 }
 
 export function buildImmediateSendStartedMessage(): string {

@@ -321,7 +321,7 @@ async def test_webhook_does_not_change_blacklisted_status():
 
 
 @pytest.mark.asyncio
-async def test_webhook_skips_cross_product_ambiguous_sender():
+async def test_webhook_matches_cross_product_sender_when_sent_subject_is_unique():
     suffix = _suffix()
     shared_email = f"shared_{suffix}@example.com"
     sender = "amazon03@ptraveldesign.com"
@@ -363,9 +363,11 @@ async def test_webhook_skips_cross_product_ambiguous_sender():
             body="Reply",
             received_at=datetime.now(UTC),
         )
-        ambiguous = await EmailReplyService.ingest(db, payload, source="webhook")
-        assert ambiguous.status == "ingested"
-        assert ambiguous.match_method == "unmatched"
+        matched = await EmailReplyService.ingest(db, payload, source="webhook")
+        assert matched.status == "ingested"
+        assert matched.product_id == 1
+        assert matched.product_influencer_id == record1.id
+        assert matched.match_method == "from_email_sent_subject"
 
         payload.product_id = 1
         scoped = await EmailReplyService.ingest(
@@ -385,6 +387,47 @@ async def test_webhook_skips_cross_product_ambiguous_sender():
         assert scoped.product_id == 1
         assert scoped.product_influencer_id == record1.id
 
+
+@pytest.mark.asyncio
+async def test_webhook_skips_cross_product_sender_when_sent_subject_is_ambiguous():
+    suffix = _suffix()
+    shared_email = f"shared_ambiguous_{suffix}@example.com"
+    sender = "amazon03@ptraveldesign.com"
+
+    async with async_session_factory() as db:
+        record1 = await _create_influencer(db, suffix=f"amb_a_{suffix}", email=shared_email, product_id=1)
+        record2 = await _create_influencer(db, suffix=f"amb_b_{suffix}", email=shared_email, product_id=2)
+        for record in (record1, record2):
+            await EmailService.create_outreach_email_log(
+                db,
+                task_id=None,
+                recipients=[shared_email],
+                subject="Shared outreach",
+                body="Hi",
+                status=EmailLogStatus.SENT,
+                product_id=record.product_id,
+                user_id=1,
+                product_influencer_id=record.id,
+                sender_email=sender,
+            )
+        await db.commit()
+
+        result = await EmailReplyService.ingest(
+            db,
+            InboundEmailPayload(
+                message_id=f"<reply-shared-ambiguous-{suffix}@example.com>",
+                from_address=shared_email,
+                to_address=sender,
+                subject="Re: Shared outreach",
+                body="Reply",
+                received_at=datetime.now(UTC),
+            ),
+            source="webhook",
+        )
+
+        assert result.status == "ingested"
+        assert result.match_method == "unmatched"
+        assert result.product_influencer_id is None
 
 @pytest.mark.asyncio
 async def test_poll_imap_uses_mock_messages():
@@ -457,7 +500,7 @@ async def test_unmatched_reply_is_saved_for_manual_review():
         assert result.status == "ingested"
         assert result.match_method == "unmatched"
         assert result.product_influencer_id is None
-        assert result.message == "已接收回复，但还没有匹配到红人，请在未匹配回复中手动关联"
+        assert result.message == "宸叉帴鏀跺洖澶嶏紝浣嗚繕娌℃湁鍖归厤鍒扮孩浜猴紝璇峰湪鏈尮閰嶅洖澶嶄腑鎵嬪姩鍏宠仈"
 
         reply = await db.scalar(
             select(EmailReply).where(EmailReply.message_id == f"<unmatched-{suffix}@example.com>")
@@ -501,7 +544,8 @@ async def test_single_name_candidate_is_auto_linked_for_non_generic_sender():
         record = await _create_influencer(db, suffix=suffix, email=f"known_{suffix}@example.com")
         profile = await db.get(GlobalInfluencerProfile, record.global_influencer_id)
         assert profile is not None
-        profile.display_name = "Kayla"
+        unique_name = "Kayla" + "".join(chr(97 + int(char, 16)) for char in suffix[:6])
+        profile.display_name = unique_name
         await db.commit()
 
         result = await EmailReplyService.ingest(
@@ -511,7 +555,7 @@ async def test_single_name_candidate_is_auto_linked_for_non_generic_sender():
                 from_address=f"kayla.team.{suffix}@agency.example",
                 to_address="amazon03@ptraveldesign.com",
                 subject="Re: Campaign",
-                body="Thanks, please send more details.\n-- Kayla",
+                body=f"Thanks, please send more details.\n-- {unique_name}",
                 received_at=datetime.now(UTC),
                 product_id=1,
             ),
