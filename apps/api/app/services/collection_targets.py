@@ -103,7 +103,12 @@ def max_overfetch_rounds_for_task(task: CollectionTask) -> int:
     ]
     if not platforms and getattr(task, "platform", None):
         platforms = [str(task.platform).strip().lower()]
-    if set(platforms) & {"tiktok", "youtube", "facebook"}:
+    keywords = [
+        str(keyword).strip()
+        for keyword in (getattr(task, "keywords", None) or [])
+        if str(keyword).strip()
+    ]
+    if set(platforms) & {"tiktok", "youtube", "facebook"} and not keywords:
         return 1
     target = target_qualified_count(task)
     if target <= 14:

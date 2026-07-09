@@ -80,7 +80,6 @@ type CopyMode = OneClickContentSource;
 type ActionKind = "preview" | "send" | "queue" | "save";
 
 const TIMEZONE = "Asia/Shanghai";
-
 function todayInputValue(): string {
   const now = new Date();
   const year = now.getFullYear();
@@ -1062,7 +1061,7 @@ export function OutreachCampaignsPanel() {
                 <div className="campaign-hint-row">
                   <span>
                     {copyMode === "ai"
-                      ? "AI 生成必须先预览确认"
+                      ? "AI 生成必须先预览确认，系统会为本次选中的红人逐个生成不同邮件。"
                       : "可直接立即发送，也可先定时发送"}
                   </span>
                 </div>

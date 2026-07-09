@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.session import get_db
-from app.deps.tenant import TenantContext, get_tenant_context
+from app.deps.tenant import TenantContext, get_tenant_context, require_write_product_id
 from app.schemas.ai import (
     AiStatusResponse,
     AnalyzeInfluencerResponse,
@@ -33,8 +33,9 @@ async def analyze_influencer_by_id(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> AnalyzeInfluencerResponse:
+    product_id = require_write_product_id(ctx)
     pair = await ProductInfluencerService.get_product_influencer(
-        db, product_id=ctx.product_id, record_id=influencer_id
+        db, product_id=product_id, record_id=influencer_id
     )
     if not pair:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Influencer not found")
@@ -49,6 +50,7 @@ async def batch_analyze_influencers(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> BatchAnalyzeResponse:
+    product_id = require_write_product_id(ctx)
     return await AiAnalysisService.batch_analyze_and_save(
-        db, payload.influencer_ids, product_id=ctx.product_id
+        db, payload.influencer_ids, product_id=product_id
     )

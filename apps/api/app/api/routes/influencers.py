@@ -3,7 +3,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.deps.tenant import TenantContext, get_tenant_context
+from app.deps.tenant import TenantContext, get_tenant_context, require_write_product_id
 from app.services.influencer_projection import merged_influencer_for_ai
 from app.services.product_influencer_service import ProductInfluencerService
 from app.schemas.common import PaginatedResponse
@@ -36,9 +36,15 @@ from app.services.outreach_send_queue_service import OutreachSendQueueService
 from app.services.single_outreach_email_service import SingleOutreachEmailService
 
 router = APIRouter(prefix="/influencers", tags=["influencers"])
-async def _require_product_influencer(db: AsyncSession, ctx: TenantContext, influencer_id: int):
+async def _require_product_influencer(
+    db: AsyncSession,
+    ctx: TenantContext,
+    influencer_id: int,
+    *,
+    product_id: int | None = None,
+):
     pair = await ProductInfluencerService.get_product_influencer(
-        db, product_id=ctx.product_id, record_id=influencer_id
+        db, product_id=product_id if product_id is not None else ctx.product_id, record_id=influencer_id
     )
     if not pair:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Influencer not found")
@@ -259,9 +265,10 @@ async def create_influencer(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> InfluencerRead:
+    product_id = require_write_product_id(ctx)
     try:
         product_row, global_row = await ProductInfluencerService.create_influencer(
-            db, product_id=ctx.product_id, data=data
+            db, product_id=product_id, data=data
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -274,9 +281,10 @@ async def bulk_delete_influencers(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> InfluencerBulkDeleteResponse:
+    product_id = require_write_product_id(ctx)
     return await ProductInfluencerService.delete_influencers(
         db,
-        product_id=ctx.product_id,
+        product_id=product_id,
         record_ids=payload.ids,
     )
 
@@ -303,7 +311,8 @@ async def update_influencer(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> InfluencerRead:
-    product_row, global_row = await _require_product_influencer(db, ctx, influencer_id)
+    product_id = require_write_product_id(ctx)
+    product_row, global_row = await _require_product_influencer(db, ctx, influencer_id, product_id=product_id)
     try:
         product_row, global_row = await ProductInfluencerService.update_influencer(
             db, product_row=product_row, global_row=global_row, data=data
@@ -320,7 +329,8 @@ async def update_influencer_lead(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> InfluencerRead:
-    product_row, global_row = await _require_product_influencer(db, ctx, influencer_id)
+    product_id = require_write_product_id(ctx)
+    product_row, global_row = await _require_product_influencer(db, ctx, influencer_id, product_id=product_id)
     try:
         product_row = await InfluencerLeadService.update_product_lead(db, product_row, data)
     except ValueError as exc:
@@ -381,7 +391,8 @@ async def create_influencer_followup(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> FollowupRead:
-    product_row, _ = await _require_product_influencer(db, ctx, influencer_id)
+    product_id = require_write_product_id(ctx)
+    product_row, _ = await _require_product_influencer(db, ctx, influencer_id, product_id=product_id)
     try:
         followup = await InfluencerLeadService.add_product_followup(db, product_row, data)
     except ValueError as exc:
@@ -395,7 +406,8 @@ async def refresh_influencer_contact(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> ContactRefreshResult:
-    product_row, global_row = await _require_product_influencer(db, ctx, influencer_id)
+    product_id = require_write_product_id(ctx)
+    product_row, global_row = await _require_product_influencer(db, ctx, influencer_id, product_id=product_id)
     temp = merged_influencer_for_ai(product_row, global_row)
     result = await ContactDiscoveryService.refresh_influencer(temp)
     ContactDiscoveryService.apply_to_influencer(global_row, result)
@@ -447,9 +459,10 @@ async def send_influencer_outreach_email(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> SingleOutreachEmailSendResponse:
+    product_id = require_write_product_id(ctx)
     return await SingleOutreachEmailService.send(
         db,
-        product_id=ctx.product_id,
+        product_id=product_id,
         user_id=ctx.user_id,
         influencer_id=influencer_id,
         payload=payload,
@@ -467,6 +480,7 @@ async def enqueue_influencer_outreach_email(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> OutreachSendQueueRead:
+    require_write_product_id(ctx)
     return await OutreachSendQueueService.enqueue(
         db,
         ctx=ctx,
@@ -481,5 +495,6 @@ async def delete_influencer(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> None:
-    product_row, _ = await _require_product_influencer(db, ctx, influencer_id)
+    product_id = require_write_product_id(ctx)
+    product_row, _ = await _require_product_influencer(db, ctx, influencer_id, product_id=product_id)
     await ProductInfluencerService.delete_influencer(db, product_row=product_row)

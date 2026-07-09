@@ -22,7 +22,7 @@ export type PlatformStatItem = PlatformStatCounts & {
 };
 
 export const PLATFORM_FILTER_LABELS: Record<PlatformFilterKey, string> = {
-  all: "全部平台",
+  all: "当前品牌全部平台",
   tiktok: "TikTok",
   youtube: "YouTube",
   instagram: "Instagram",
@@ -118,7 +118,7 @@ export function platformFilterToApi(platform: PlatformFilterKey): string | undef
 }
 
 export function platformListTitle(platform: PlatformFilterKey): string {
-  if (platform === "all") return "全部平台线索列表";
+  if (platform === "all") return "当前品牌线索列表";
   return `${PLATFORM_FILTER_LABELS[platform]} 线索列表`;
 }
 

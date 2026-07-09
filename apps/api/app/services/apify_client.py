@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from typing import Any
 
+import anyio
 import httpx
 
 from app.core.config import settings
@@ -143,7 +143,7 @@ async def run_actor_sync(
                 remaining = deadline - time.perf_counter()
                 if remaining <= 0:
                     raise httpx.TimeoutException(f"local timeout after {timeout}s")
-                await asyncio.sleep(min(1.0, max(0.05, remaining)))
+                await anyio.sleep(min(1.0, max(0.05, remaining)))
                 run_response = await client.get(f"{APIFY_BASE}/actor-runs/{run_id}", params={"token": settings.apify_token})
                 if run_response.status_code not in (200, 201):
                     detail = run_response.text[:500]
@@ -188,7 +188,7 @@ async def run_actor_sync(
                 exc=exc,
                 remote_stop_attempted=remote_stop_attempted,
                 remote_stop_failed=remote_stop_failed,
-                run_id_available=run_id is not None,
+                run_id_available=True,
             )
         ) from exc
     except httpx.NetworkError as exc:

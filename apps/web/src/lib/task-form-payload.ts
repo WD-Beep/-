@@ -1,9 +1,18 @@
 import type { CollectionMode, CollectionTask, CollectionTaskPayload, PlatformCapability, TaskSourceMethod } from "./api.ts";
 import { COLLECTION_MODE_LABELS, KEYWORD_DISCOVERY_PLATFORMS, KEYWORD_SEED_DISCOVERY_PLATFORMS, NO_CONFIGURED_KEYWORD_PLATFORMS_MSG, PLATFORM_LABELS, SEED_DISCOVERY_PLATFORMS, taskSourceMethodForMode, URL_ONLY_PLATFORM_VALIDATION_MSG, URL_ONLY_PLATFORMS } from "./labels.ts";
 import { parseLinkImportPreview } from "./collection-sources.ts";
+import { ALL_PRODUCTS_ID } from "./product-context.ts";
 
 export const TEMPLATE_STORAGE_KEY = "influencer-intel:collection-task-template";
 export type DiscoverySource = "keyword_hashtag" | "link_import" | "shopping_seed_auto" | "multi_platform_auto";
+
+export function canCreateCollectionTaskForProduct(productId: number | null): boolean {
+  return productId !== null && productId !== ALL_PRODUCTS_ID;
+}
+
+export function collectionTaskCreateDisabledReason(productId: number | null): string | null {
+  return canCreateCollectionTaskForProduct(productId) ? null : "请先选择具体产品/品牌后再创建采集任务";
+}
 
 const DEFAULT_PLATFORMS = ["youtube"];
 export const KEYWORD_HIGH_VALUE_DEFAULTS = {

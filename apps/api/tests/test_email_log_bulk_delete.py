@@ -62,32 +62,32 @@ async def test_bulk_delete_email_logs_by_status_deletes_all_matching_product_row
         own_failed_1 = EmailLog(
             product_id=own_product.id,
             user_id=1,
-            recipients=["failed-one@example.com"],
-            subject="Failed one",
+            recipients=["failed-one@brandmail.co"],
+            subject="Outreach failed one",
             status=EmailLogStatus.FAILED.value,
             sent_at=None,
         )
         own_failed_2 = EmailLog(
             product_id=own_product.id,
             user_id=1,
-            recipients=["failed-two@example.com"],
-            subject="Failed two",
+            recipients=["failed-two@brandmail.co"],
+            subject="Outreach failed two",
             status=EmailLogStatus.FAILED.value,
             sent_at=None,
         )
         own_sent = EmailLog(
             product_id=own_product.id,
             user_id=1,
-            recipients=["sent@example.com"],
-            subject="Sent",
+            recipients=["sent@brandmail.co"],
+            subject="Outreach sent",
             status=EmailLogStatus.SENT.value,
             sent_at=datetime.now(UTC),
         )
         other_failed = EmailLog(
             product_id=other_product.id,
             user_id=1,
-            recipients=["other-failed@example.com"],
-            subject="Other failed",
+            recipients=["other-failed@brandmail.co"],
+            subject="Other outreach failed",
             status=EmailLogStatus.FAILED.value,
             sent_at=None,
         )

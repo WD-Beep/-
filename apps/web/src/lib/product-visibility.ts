@@ -1,4 +1,5 @@
 import { BRAND_PRODUCT_SEEDS } from "./brand-products.ts";
+import type { AuthSession } from "./auth-session.ts";
 import { ALL_PRODUCTS_ID } from "./product-context.ts";
 
 export type VisibleProductLike = {
@@ -11,6 +12,13 @@ export type VisibleProductLike = {
   is_hidden?: boolean;
   is_test?: boolean;
   display_order?: number | null;
+};
+
+export type ProductSwitcherOption<T extends VisibleProductLike = VisibleProductLike> = {
+  id: number;
+  label: string;
+  product: T | null;
+  isAllProducts: boolean;
 };
 
 const HASH_SUFFIX_RE = /-[0-9a-f]{8}$/i;
@@ -113,6 +121,60 @@ export function resolveStoredProductId<T extends VisibleProductLike>(
     return visibleProducts[0].id;
   }
   return ALL_PRODUCTS_ID;
+}
+
+export function hasNoAccessibleProducts(session: AuthSession | null): boolean {
+  return Boolean(session && !session.isAdmin && session.accessibleProducts.length === 0);
+}
+
+export function canSelectAllProducts(session: AuthSession | null): boolean {
+  return session?.isAdmin ?? false;
+}
+
+export function buildProductSwitcherOptions<T extends VisibleProductLike>(
+  session: AuthSession | null,
+  products?: T[],
+): ProductSwitcherOption<T>[] {
+  const rawProducts = products ?? ((session?.accessibleProducts ?? []) as unknown as T[]);
+  const sourceProducts = canSelectAllProducts(session)
+    ? rawProducts
+    : rawProducts.filter((product) => !product.is_default && product.slug !== "default");
+  const visibleProducts = prepareTenantProductOptions(sourceProducts);
+  const options = visibleProducts.map((product) => ({
+    id: product.id,
+    label: product.brand ? `${product.name} / ${product.brand}` : product.name,
+    product,
+    isAllProducts: false,
+  }));
+  if (!canSelectAllProducts(session)) {
+    return options;
+  }
+  return [
+    {
+      id: ALL_PRODUCTS_ID,
+      label: "全部品牌",
+      product: null,
+      isAllProducts: true,
+    },
+    ...options,
+  ];
+}
+
+export function resolveProductIdForSession(
+  storedProductId: number,
+  session: AuthSession | null,
+): number | null {
+  const sourceProducts = canSelectAllProducts(session)
+    ? session?.accessibleProducts ?? []
+    : (session?.accessibleProducts ?? []).filter((product) => !product.is_default && product.slug !== "default");
+  const products = prepareTenantProductOptions(sourceProducts);
+  if (canSelectAllProducts(session) && storedProductId === ALL_PRODUCTS_ID) {
+    return ALL_PRODUCTS_ID;
+  }
+  if (products.some((product) => product.id === storedProductId)) {
+    return storedProductId;
+  }
+  return products[0]?.id ?? null;
 }
 
 export function formatHiddenProductLabel(name: string, brand?: string | null): string {

@@ -116,7 +116,14 @@ class CollectionQueueService:
         active_count = max(len(running), in_process)
         capacity = max(1, settings.collection_max_running_tasks)
         reasons: list[str] = []
-        if active_count >= capacity and not CollectionRunnerService.is_task_active_in_process(task.id):
+        task_active = CollectionRunnerService.is_task_active_in_process(task.id)
+        if CollectionRunnerService.has_active_collection_run() and not task_active:
+            reasons.append(QUEUE_REASON_GLOBAL_FULL)
+        if (
+            active_count >= capacity
+            and not task_active
+            and QUEUE_REASON_GLOBAL_FULL not in reasons
+        ):
             reasons.append(QUEUE_REASON_GLOBAL_FULL)
         if task.user_id is not None:
             for running_task in running:

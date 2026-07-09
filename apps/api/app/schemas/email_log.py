@@ -14,7 +14,7 @@ class EmailLogRead(ORMModel):
     product_influencer_id: int | None = None
     sender_email: str | None = None
     influencer_username: str | None = None
-    recipients: list[EmailStr]
+    recipients: list[str]
     subject: str
     body: str | None = None
     status: EmailLogStatus

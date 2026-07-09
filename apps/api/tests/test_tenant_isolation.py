@@ -294,7 +294,7 @@ def test_collection_tasks_all_products_scope_shows_total_tasks():
         try:
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.get(
-                    f"/api/collection-tasks?search=total-&page_size=200",
+                    f"/api/collection-tasks?search=total-&page_size=100",
                     headers={"X-User-Id": "1", "X-Product-Id": "0"},
                 )
                 assert response.status_code == 200, response.text
@@ -713,6 +713,8 @@ def test_protected_api_rejects_missing_tenant_headers():
 
 def test_email_logs_filtered_by_product():
     async def _run() -> None:
+        from datetime import UTC, datetime
+
         from httpx import ASGITransport, AsyncClient
         from sqlalchemy import delete
 
@@ -734,17 +736,19 @@ def test_email_logs_filtered_by_product():
                         task_id=None,
                         product_id=1,
                         user_id=1,
-                        recipients=["a@example.com"],
+                        recipients=["a@brandmail.co"],
                         subject=f"product-a-{suffix}",
                         status=EmailLogStatus.SENT.value,
+                        sent_at=datetime.now(UTC),
                     ),
                     EmailLog(
                         task_id=None,
                         product_id=product_b_id,
                         user_id=1,
-                        recipients=["b@example.com"],
+                        recipients=["b@brandmail.co"],
                         subject=f"product-b-{suffix}",
                         status=EmailLogStatus.SENT.value,
+                        sent_at=datetime.now(UTC),
                     ),
                 ]
             )
@@ -780,6 +784,8 @@ def test_email_logs_filtered_by_product():
 
 def test_email_logs_all_products_scope_shows_total_logs():
     async def _run() -> None:
+        from datetime import UTC, datetime
+
         from httpx import ASGITransport, AsyncClient
         from sqlalchemy import delete
 
@@ -801,17 +807,19 @@ def test_email_logs_all_products_scope_shows_total_logs():
                         task_id=None,
                         product_id=1,
                         user_id=1,
-                        recipients=["a@example.com"],
+                        recipients=["a@brandmail.co"],
                         subject=f"total-product-a-{suffix}",
                         status=EmailLogStatus.SENT.value,
+                        sent_at=datetime.now(UTC),
                     ),
                     EmailLog(
                         task_id=None,
                         product_id=product_b_id,
                         user_id=2,
-                        recipients=["b@example.com"],
+                        recipients=["b@brandmail.co"],
                         subject=f"total-product-b-{suffix}",
                         status=EmailLogStatus.SENT.value,
+                        sent_at=datetime.now(UTC),
                     ),
                 ]
             )
@@ -821,7 +829,7 @@ def test_email_logs_all_products_scope_shows_total_logs():
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.get(
-                    "/api/email-logs?page_size=200",
+                    "/api/email-logs?page_size=100",
                     headers={"X-User-Id": "1", "X-Product-Id": "0"},
                 )
                 assert response.status_code == 200, response.text

@@ -22,13 +22,14 @@ import {
   Send,
   Settings,
   Sparkles,
+  Trash2,
   Upload,
   Users,
 } from "lucide-react";
 
 import { ProductCreateDialog } from "@/components/layout/product-create-dialog";
-import { fetchEmailReplyWorkCount, fetchTenantProducts, type TenantProduct } from "@/lib/api";
-import { clearAuthSession } from "@/lib/auth";
+import { deleteTenantProduct, fetchEmailReplyWorkCount, fetchTenantProducts, type TenantProduct } from "@/lib/api";
+import { clearAuthSession, getStoredAuthSession, setAuthSession, type AuthSession } from "@/lib/auth";
 import { formatTenantProductLabel } from "@/lib/brand-products";
 import {
   readCachedTenantProducts,
@@ -36,7 +37,10 @@ import {
 } from "@/lib/product-options-cache";
 import { ALL_PRODUCTS_ID } from "@/lib/product-context";
 import {
+  canSelectAllProducts,
+  hasNoAccessibleProducts,
   prepareTenantProductOptions,
+  resolveProductIdForSession,
   resolveStoredProductId,
 } from "@/lib/product-visibility";
 import { shouldDisableProductSelector } from "@/lib/sidebar-product-selector";
@@ -125,10 +129,12 @@ export function Sidebar() {
   const productId = useActiveProductId();
   const { setProductId: setActiveProductId } = useProductActions();
   const [products, setProducts] = useState<TenantProduct[]>([]);
+  const [session, setSession] = useState<AuthSession | null>(null);
   const [productsLoading, setProductsLoading] = useState(true);
   const [hasHydrated, setHasHydrated] = useState(false);
   const [productLoadError, setProductLoadError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [deletingProduct, setDeletingProduct] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [productMenuOpen, setProductMenuOpen] = useState(false);
@@ -136,21 +142,58 @@ export function Sidebar() {
   const collapseTimer = useRef<number | null>(null);
   const productMenuRef = useRef<HTMLDivElement | null>(null);
 
+  const isAdmin = session?.isAdmin ?? false;
+  const scopedProducts = useMemo(
+    () => (products.length > 0 ? products : (session?.accessibleProducts ?? [])),
+    [products, session],
+  );
+  const effectiveSession = useMemo<AuthSession | null>(
+    () => (session ? { ...session, accessibleProducts: scopedProducts } : null),
+    [scopedProducts, session],
+  );
+  const noAssignedProducts = hasNoAccessibleProducts(effectiveSession);
+  const visibleNavGroups = useMemo(
+    () =>
+      isAdmin
+        ? navGroups
+        : navGroups
+            .map((group) => ({
+              ...group,
+              items: group.items.filter((item) => item.href !== "/settings"),
+            }))
+            .filter((group) => group.items.length > 0 && group.title !== "绯荤粺"),
+    [isAdmin],
+  );
+  const visibleMiniItems = useMemo(
+    () => (isAdmin ? miniItems : miniItems.filter((item) => item.href !== "/settings")),
+    [isAdmin],
+  );
+  const visibleQuickLinks = useMemo(
+    () => (noAssignedProducts ? [] : quickLinks),
+    [noAssignedProducts],
+  );
   const activeMiniItem = useMemo(
-    () => miniItems.find((item) => isNavActive(pathname, item.href)) ?? miniItems[0],
-    [pathname],
+    () => visibleMiniItems.find((item) => isNavActive(pathname, item.href)) ?? visibleMiniItems[0] ?? miniItems[0],
+    [pathname, visibleMiniItems],
   );
   const ActiveMiniIcon = activeMiniItem.icon;
   const activeProductLabel = useMemo(() => {
     if (productId === ALL_PRODUCTS_ID) return "全部产品（汇总）";
-    const activeProduct = products.find((product) => product.id === productId);
+    const activeProduct = scopedProducts.find((product) => product.id === productId);
     return activeProduct
       ? formatTenantProductLabel(activeProduct.name, activeProduct.brand)
       : "选择产品 / 品牌";
-  }, [productId, products]);
+  }, [productId, scopedProducts]);
+  const activeProduct = useMemo(
+    () => scopedProducts.find((product) => product.id === productId) ?? null,
+    [productId, scopedProducts],
+  );
 
-  const loadProducts = useCallback(async () => {
-    const cachedItems = prepareTenantProductOptions(readCachedTenantProducts());
+  const loadProducts = useCallback(async (sessionForCache: AuthSession | null = getStoredAuthSession()) => {
+    const cacheUserId = sessionForCache?.userId;
+    const cachedItems = sessionForCache
+      ? prepareTenantProductOptions(readCachedTenantProducts(cacheUserId))
+      : [];
     if (cachedItems.length > 0) {
       setProducts(cachedItems);
     }
@@ -158,7 +201,7 @@ export function Sidebar() {
     try {
       const items = prepareTenantProductOptions(await fetchTenantProductsWithRetry());
       setProducts(items);
-      writeCachedTenantProducts(items);
+      writeCachedTenantProducts(items, cacheUserId);
       setProductLoadError(null);
       return items;
     } catch {
@@ -177,20 +220,20 @@ export function Sidebar() {
   useEffect(() => {
     let cancelled = false;
     queueMicrotask(() => {
+      const storedSession = getStoredAuthSession();
+      if (!cancelled) setSession(storedSession);
       if (!cancelled) setHasHydrated(true);
-      void loadProducts().then((items) => {
+      void loadProducts(storedSession).then((items) => {
         if (cancelled) return;
-        const resolvedId = resolveStoredProductId(productId, items);
+        const sessionForResolution = storedSession
+          ? { ...storedSession, accessibleProducts: items }
+          : null;
+        const resolvedId =
+          resolveProductIdForSession(productId, sessionForResolution) ??
+          resolveStoredProductId(productId, items);
         if (resolvedId !== productId) {
           setActiveProductId(resolvedId);
           return;
-        }
-        if (items.length === 0) return;
-        if (productId === ALL_PRODUCTS_ID) {
-          const defaultProduct = items.find((item) => item.is_default) ?? items[0];
-          if (defaultProduct) {
-            setActiveProductId(defaultProduct.id);
-          }
         }
       });
     });
@@ -285,6 +328,7 @@ export function Sidebar() {
 
   function selectProduct(next: number) {
     if (!Number.isFinite(next) || next < 0) return;
+    if (next === ALL_PRODUCTS_ID && !canSelectAllProducts(effectiveSession)) return;
     setActiveProductId(next);
     setProductMenuOpen(false);
     router.refresh();
@@ -295,6 +339,34 @@ export function Sidebar() {
     setActiveProductId(product.id);
     router.refresh();
     showToast("已创建并切换到新产品/品牌");
+  }
+
+  async function handleProductDeleted() {
+    if (!activeProduct || productId === ALL_PRODUCTS_ID || deletingProduct) return;
+    const confirmed = window.confirm(`确定删除品牌「${formatTenantProductLabel(activeProduct.name, activeProduct.brand)}」吗？`);
+    if (!confirmed) return;
+
+    setDeletingProduct(true);
+    try {
+      await deleteTenantProduct(activeProduct.id);
+      const currentSession = getStoredAuthSession();
+      const remainingProducts = scopedProducts.filter((product) => product.id !== activeProduct.id);
+      if (currentSession) {
+        const nextSession = { ...currentSession, accessibleProducts: remainingProducts };
+        setAuthSession(nextSession);
+        writeCachedTenantProducts(remainingProducts, nextSession.userId);
+        setSession(nextSession);
+      }
+      setProducts(remainingProducts);
+      setActiveProductId(remainingProducts[0]?.id ?? ALL_PRODUCTS_ID);
+      setProductMenuOpen(false);
+      router.refresh();
+      showToast("已删除品牌");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "删除品牌失败");
+    } finally {
+      setDeletingProduct(false);
+    }
   }
 
   return (
@@ -322,7 +394,7 @@ export function Sidebar() {
           </button>
 
           <div className="mt-7 flex flex-1 flex-col items-center gap-1.5">
-            {miniItems.map((item) => {
+            {visibleMiniItems.map((item) => {
               const Icon = item.icon;
               const active = isNavActive(pathname, item.href);
               return (
@@ -392,14 +464,27 @@ export function Sidebar() {
                 >
                   当前产品 / 品牌
                 </label>
-                <button
-                  type="button"
-                  className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium text-slate-300 transition hover:bg-white/[0.08] hover:text-white"
-                  onClick={() => setCreateOpen(true)}
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  新增
-                </button>
+                <div className="flex items-center gap-1">
+                  {activeProduct && productId !== ALL_PRODUCTS_ID ? (
+                    <button
+                      type="button"
+                      className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium text-rose-200 transition hover:bg-rose-500/12 hover:text-rose-100 disabled:cursor-wait disabled:opacity-60"
+                      onClick={handleProductDeleted}
+                      disabled={deletingProduct}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      删除
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium text-slate-300 transition hover:bg-white/[0.08] hover:text-white"
+                    onClick={() => setCreateOpen(true)}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    新增
+                  </button>
+                </div>
               </div>
               <div className="relative" ref={productMenuRef}>
                 <button
@@ -408,7 +493,7 @@ export function Sidebar() {
                   disabled={shouldDisableProductSelector({
                     hasHydrated,
                     productsLoading,
-                    productCount: products.length,
+                    productCount: scopedProducts.length,
                   })}
                   aria-haspopup="listbox"
                   aria-expanded={productMenuOpen}
@@ -429,6 +514,7 @@ export function Sidebar() {
                     aria-labelledby="product-selector"
                     className="absolute left-0 right-0 top-[42px] z-[95] max-h-[360px] overflow-y-auto rounded-md border border-[#3B4A68] bg-[#111A2F] py-1 text-[13px] shadow-[0_18px_42px_rgba(0,0,0,0.42)] ring-1 ring-white/8 [scrollbar-color:rgba(157,187,255,0.42)_transparent] [scrollbar-width:thin]"
                   >
+                    {canSelectAllProducts(effectiveSession) ? (
                     <button
                       type="button"
                       role="option"
@@ -441,7 +527,8 @@ export function Sidebar() {
                     >
                       <span className="truncate">全部产品（汇总）</span>
                     </button>
-                    {products.map((product) => {
+                    ) : null}
+                    {scopedProducts.map((product) => {
                       const selected = product.id === productId;
                       return (
                         <button
@@ -468,7 +555,11 @@ export function Sidebar() {
                 <p className="mt-2 text-[11px] text-slate-400">正在加载产品/品牌...</p>
               ) : null}
               {!productsLoading && products.length === 0 ? (
-                <p className="mt-2 text-[11px] text-slate-400">暂无正式产品，请新增产品/品牌</p>
+                <p className="mt-2 text-[11px] text-slate-400">
+                  {noAssignedProducts
+                    ? "当前账号还没有品牌，可点击新增创建自己的品牌；如需加入已有品牌，请联系管理员分配。"
+                    : "暂无正式产品，请新增产品/品牌"}
+                </p>
               ) : null}
               {productLoadError && products.length > 0 ? (
                 <p className="mt-2 text-[11px] leading-relaxed text-amber-300/90">
@@ -494,7 +585,7 @@ export function Sidebar() {
           </div>
 
           <div className="grid grid-cols-2 gap-1 px-4 pb-3">
-            {quickLinks.map((item) => {
+            {visibleQuickLinks.map((item) => {
               const Icon = item.icon;
               return (
                 <Link
@@ -511,7 +602,7 @@ export function Sidebar() {
 
           <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 [scrollbar-color:rgba(170,182,216,0.35)_transparent] [scrollbar-width:thin]">
             <div className="space-y-4">
-              {navGroups.map((group) => (
+              {visibleNavGroups.map((group) => (
                 <div key={group.title} className="space-y-1.5">
                   <p className="px-3 text-[11px] font-semibold tracking-normal text-slate-500">
                     {group.title}

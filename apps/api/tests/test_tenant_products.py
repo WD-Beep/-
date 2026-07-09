@@ -8,7 +8,7 @@ import uuid
 from sqlalchemy import delete
 
 from app.db.session import async_session_factory
-from app.models.tenant import Product
+from app.models.tenant import Product, ProductMember, User, WorkspaceMember
 
 
 def test_create_product_requires_user_header():
@@ -100,6 +100,118 @@ def test_create_product_auto_slug_and_unique():
         finally:
             async with async_session_factory() as db_session:
                 await db_session.execute(delete(Product).where(Product.slug.like(f"%{suffix}%")))
+                await db_session.commit()
+
+    asyncio.run(_run())
+
+
+def test_sales_create_product_assigns_product_to_self():
+    async def _run() -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        from app.main import app
+
+        suffix = uuid.uuid4().hex[:8]
+        username = f"sales-empty-{suffix}"
+        payload = {
+            "name": f"Sales Brand {suffix}",
+            "slug": f"sales-brand-{suffix}",
+            "description": "Created by sales",
+            "is_default": False,
+        }
+
+        try:
+            async with async_session_factory() as db_session:
+                user = User(username=username, display_name="Empty Sales", is_admin=False)
+                db_session.add(user)
+                await db_session.flush()
+                db_session.add(WorkspaceMember(workspace_id=1, user_id=user.id, role="member"))
+                await db_session.commit()
+                user_id = user.id
+
+            headers = {"X-User-Id": str(user_id), "X-Product-Id": "0"}
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                before = await client.get("/api/tenant/products", headers=headers)
+                assert before.status_code == 200
+                assert before.json() == []
+
+                create = await client.post("/api/tenant/products", headers=headers, json=payload)
+                assert create.status_code == 201
+                created = create.json()
+                assert created["slug"] == payload["slug"]
+
+                listed = await client.get("/api/tenant/products", headers=headers)
+                assert listed.status_code == 200
+                assert payload["slug"] in {item["slug"] for item in listed.json()}
+
+            async with async_session_factory() as db_session:
+                rows = await db_session.execute(
+                    delete(ProductMember).where(ProductMember.product_id == created["id"])
+                )
+                assert rows.rowcount == 1
+                await db_session.commit()
+        finally:
+            async with async_session_factory() as db_session:
+                await db_session.execute(delete(Product).where(Product.slug == payload["slug"]))
+                await db_session.execute(delete(User).where(User.username == username))
+                await db_session.commit()
+
+    asyncio.run(_run())
+
+
+def test_sales_can_delete_own_product():
+    async def _run() -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        from app.main import app
+
+        suffix = uuid.uuid4().hex[:8]
+        username = f"sales-delete-{suffix}"
+
+        async with async_session_factory() as db_session:
+            user = User(username=username, display_name="Delete Sales", is_admin=False)
+            db_session.add(user)
+            await db_session.flush()
+            db_session.add(WorkspaceMember(workspace_id=1, user_id=user.id, role="member"))
+            product = Product(
+                workspace_id=1,
+                name=f"Delete Brand {suffix}",
+                slug=f"delete-brand-{suffix}",
+                brand="Delete",
+                is_default=False,
+            )
+            db_session.add(product)
+            await db_session.flush()
+            db_session.add(ProductMember(user_id=user.id, product_id=product.id, role="owner"))
+            await db_session.commit()
+            user_id = user.id
+            product_id = product.id
+
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.delete(
+                    f"/api/tenant/products/{product_id}",
+                    headers={"X-User-Id": str(user_id), "X-Product-Id": str(product_id)},
+                )
+                assert response.status_code == 204, response.text
+
+                listed = await client.get(
+                    "/api/tenant/products",
+                    headers={"X-User-Id": str(user_id), "X-Product-Id": "0"},
+                )
+                assert listed.status_code == 200
+                assert product_id not in {item["id"] for item in listed.json()}
+
+            async with async_session_factory() as db_session:
+                assert await db_session.get(Product, product_id) is None
+        finally:
+            async with async_session_factory() as db_session:
+                await db_session.execute(delete(ProductMember).where(ProductMember.product_id == product_id))
+                await db_session.execute(delete(Product).where(Product.id == product_id))
+                await db_session.execute(delete(User).where(User.username == username))
                 await db_session.commit()
 
     asyncio.run(_run())

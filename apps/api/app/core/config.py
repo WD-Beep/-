@@ -78,9 +78,9 @@ class Settings(BaseSettings):
     api_direct_max_requests_per_platform: int = 20
     collection_search_concurrency: int = 4
     collection_profile_concurrency: int = 8
-    collection_profile_enrich_concurrency: int = 2
+    collection_profile_enrich_concurrency: int = 3
     collection_profile_request_timeout_seconds: int = 20
-    collection_max_running_tasks: int = 10
+    collection_max_running_tasks: int = 2
     collection_contact_concurrency: int = 2
     collection_ai_concurrency: int = 1
     collection_batch_commit_size: int = 20

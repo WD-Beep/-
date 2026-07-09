@@ -114,8 +114,19 @@ test("reply panel offers candidate confirmation through the update API and refre
 
   assert.match(source, /getEmailReplyMatchCandidates/);
   assert.match(source, /product_influencer_id:\s*candidate\.product_influencer_id/);
-  assert.match(source, /campaign_id:\s*candidate\.campaign_id\s*\?\?\s*undefined/);
+  assert.doesNotMatch(source, /campaign_id:\s*candidate\.campaign_id\s*\?\?\s*undefined/);
   assert.match(source, /await load\(\)/);
+});
+
+test("reply panel keeps unmatched label but removes campaign clutter from the list", async () => {
+  const source = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/components/email-replies/email-replies-panel.tsx", import.meta.url), "utf8"),
+  );
+
+  assert.match(source, /未自动关联/);
+  assert.doesNotMatch(source, />\s*活动\s*<\/th>/);
+  assert.doesNotMatch(source, /全部活动/);
+  assert.doesNotMatch(source, /未关联活动/);
 });
 
 test("reply response draft changes by intent status", () => {
@@ -158,6 +169,21 @@ test("reply panel exposes direct row reply action for sales users", async () => 
   assert.match(source, /openReplyComposer/);
   assert.match(source, />\s*回复\s*</);
   assert.match(source, /onClick=\{\(\) => void openReplyComposer\(reply\)\}/);
+});
+
+test("reply panel lets sales edit follow up notes from the row", async () => {
+  const source = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/components/email-replies/email-replies-panel.tsx", import.meta.url), "utf8"),
+  );
+  const apiSource = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/lib/api.ts", import.meta.url), "utf8"),
+  );
+
+  assert.match(source, /openNoteEditor/);
+  assert.match(source, /saveReplyNote/);
+  assert.match(source, /manual_note/);
+  assert.match(source, />\s*备注\s*</);
+  assert.match(apiSource, /manual_note\?:\s*string \| null/);
 });
 
 test("reply panel marks a reply viewed before clearing the navigation badge", async () => {

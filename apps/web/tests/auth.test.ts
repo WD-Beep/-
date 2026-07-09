@@ -2,7 +2,13 @@ import "./register-path-aliases.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AUTH_PASSWORD, resolveAuthAccount, validateCredentials } from "../src/lib/auth.ts";
+import {
+  ADMIN_AUTH_PASSWORD,
+  AUTH_PASSWORD,
+  resolveAdminAuthAccount,
+  resolveAuthAccount,
+  validateCredentials,
+} from "../src/lib/auth.ts";
 
 test("demo login maps admin and sales users to distinct user ids", () => {
   assert.equal(resolveAuthAccount("admin", AUTH_PASSWORD)?.userId, 1);
@@ -14,4 +20,10 @@ test("demo login maps admin and sales users to distinct user ids", () => {
 test("credential validation accepts seeded sales accounts", () => {
   assert.equal(validateCredentials("sales2", AUTH_PASSWORD), true);
   assert.equal(validateCredentials("sales2", "wrong"), false);
+});
+
+test("admin login only accepts the admin account with the admin password", () => {
+  assert.equal(resolveAdminAuthAccount("admin", ADMIN_AUTH_PASSWORD)?.role, "admin");
+  assert.equal(resolveAdminAuthAccount("sales1", ADMIN_AUTH_PASSWORD), null);
+  assert.equal(resolveAdminAuthAccount("admin", AUTH_PASSWORD), null);
 });

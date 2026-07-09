@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import SMTP_NOT_CONFIGURED_MSG
 from app.db.session import get_db
-from app.deps.tenant import TenantContext, get_tenant_context
+from app.deps.tenant import TenantContext, get_tenant_context, require_write_product_id
 from app.schemas.email import EmailTestRequest, EmailTestResponse, SmtpStatus
 from app.schemas.outreach_email import (
     OutreachBatchPreviewRequest,
@@ -49,9 +49,10 @@ async def send_outreach_batch(
     db: AsyncSession = Depends(get_db),
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> OutreachBatchSendResponse:
+    product_id = require_write_product_id(ctx)
     return await OutreachEmailService.send_batch(
         db,
-        product_id=ctx.product_id,
+        product_id=product_id,
         user_id=ctx.user_id,
         payload=payload,
     )

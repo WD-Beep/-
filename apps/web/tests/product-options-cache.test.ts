@@ -46,6 +46,27 @@ test("cached tenant products restore the previous brand list immediately", () =>
   );
 });
 
+test("cached tenant products are isolated per user", () => {
+  storage.clear();
+
+  writeCachedTenantProducts([product({ id: 1, name: "Admin Brand", slug: "admin-brand" })], 1);
+
+  assert.deepEqual(readCachedTenantProducts(2), []);
+  assert.deepEqual(
+    readCachedTenantProducts(1).map((item) => item.slug),
+    ["admin-brand"],
+  );
+});
+
+test("empty tenant product list replaces stale cached products", () => {
+  storage.clear();
+
+  writeCachedTenantProducts([product({ id: 1, name: "Old Brand", slug: "old-brand" })], 2);
+  writeCachedTenantProducts([], 2);
+
+  assert.deepEqual(readCachedTenantProducts(2), []);
+});
+
 test("invalid cached tenant products are ignored", () => {
   storage.clear();
   storage.set("influencer_intel_tenant_products", JSON.stringify([{ id: "bad" }]));

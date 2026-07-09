@@ -60,3 +60,17 @@ async def update_product(
         product_id=product_id,
         data=data,
     )
+
+
+@router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_product(
+    product_id: int,
+    ctx: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    await TenantService.delete_product(
+        db,
+        user_id=ctx.user_id,
+        is_admin=ctx.is_admin,
+        product_id=product_id,
+    )

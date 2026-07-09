@@ -23,6 +23,7 @@ class User(Base):
     )
 
     memberships: Mapped[list["WorkspaceMember"]] = relationship(back_populates="user")
+    product_memberships: Mapped[list["ProductMember"]] = relationship(back_populates="user")
 
 
 class Workspace(Base):
@@ -76,3 +77,21 @@ class Product(Base):
     )
 
     workspace: Mapped["Workspace"] = relationship(back_populates="products")
+    members: Mapped[list["ProductMember"]] = relationship(back_populates="product")
+
+
+class ProductMember(Base):
+    __tablename__ = "product_members"
+    __table_args__ = (UniqueConstraint("user_id", "product_id", name="uq_product_member_user_product"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="member")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped["User"] = relationship(back_populates="product_memberships")
+    product: Mapped["Product"] = relationship(back_populates="members")

@@ -11,6 +11,8 @@ import { Label } from "@/components/ui/label";
 import {
   AUTH_PASSWORD,
   AUTH_USERNAME,
+  defaultPathForSession,
+  loadBackendAuthSession,
   resolveAuthAccount,
   setAuthSession,
 } from "@/lib/auth";
@@ -66,8 +68,16 @@ export function LoginForm() {
       return;
     }
 
-    setAuthSession(account.userId);
-    router.replace(redirectTo.startsWith("/") ? redirectTo : "/");
+    try {
+      const session = await loadBackendAuthSession(account);
+      setAuthSession(session);
+      const target = redirectTo.startsWith("/") && redirectTo !== "/" ? redirectTo : defaultPathForSession(session);
+      router.replace(target);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "登录成功，但权限信息加载失败，请稍后重试。");
+      setSubmitting(false);
+      return;
+    }
     router.refresh();
   }
 

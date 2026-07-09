@@ -684,6 +684,18 @@ test("campaign page copy explains AI personalized batch outreach", () => {
   ]);
 });
 
+test("AI one-click workbench keeps the full selected generation batch", () => {
+  const source = readFileSync(
+    new URL("../src/components/outreach-campaigns/outreach-campaigns-panel.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.doesNotMatch(source, /AI_DEFAULT_BATCH_LIMIT/);
+  assert.doesNotMatch(source, /prefillIds\.slice\(0,\s*effectiveSendLimit\)/);
+  assert.match(source, /influencerIds:\s*sourceMode === "selected" \? prefillIds : undefined/);
+  assert.match(source, /逐个生成不同邮件/);
+});
+
 test("operator guide answers how to batch send and view replies", () => {
   assert.deepEqual(CAMPAIGN_OPERATOR_GUIDE, [
     {

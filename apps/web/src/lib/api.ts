@@ -1432,6 +1432,9 @@ export async function fetchCollectionTask(id: number): Promise<CollectionTask> {
 export async function createCollectionTask(
   payload: CollectionTaskPayload,
 ): Promise<CollectionTask> {
+  if ((await ensureTenantProductId()) === 0) {
+    throw new Error("创建采集任务需要先选择具体产品/品牌");
+  }
   const response = await apiFetch(`${API_URL}/api/collection-tasks`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2068,6 +2071,9 @@ export async function fetchLinkImportBatches(
 export async function createLinkImportBatch(
   payload: LinkImportBatchPayload,
 ): Promise<LinkImportBatch> {
+  if ((await ensureTenantProductId()) === 0) {
+    throw new Error("创建链接导入任务需要先选择具体产品/品牌");
+  }
   const response = await apiFetch(`${API_URL}/api/link-import/batches`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2156,6 +2162,255 @@ export async function createTenantProduct(payload: TenantProductPayload): Promis
   return response.json();
 }
 
+export async function deleteTenantProduct(productId: number): Promise<void> {
+  const response = await apiFetch(`${API_URL}/api/tenant/products/${productId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+}
+
+export type AdminSummary = {
+  total_users: number;
+  total_sales: number;
+  total_products: number;
+  total_collection_tasks: number;
+  total_influencers: number;
+  total_email_logs: number;
+  total_replies: number;
+  today_collection_tasks: number;
+  today_influencers: number;
+  today_email_logs: number;
+  today_replies: number;
+  failed_collection_tasks: number;
+  failed_email_logs: number;
+  pending_replies: number;
+  sales_rank: Array<{ id: number; username: string; product_count: number }>;
+  product_rank: Array<{ id: number; name: string; influencer_count: number }>;
+};
+
+export type AdminUser = {
+  id: number;
+  username: string;
+  display_name: string | null;
+  email: string | null;
+  role: "admin" | "sales";
+  is_admin: boolean;
+  is_active: boolean;
+  product_count: number;
+  bound_products: Array<{
+    id: number;
+    name: string;
+    slug: string;
+    role: string;
+    status: string;
+    created_at: string | null;
+  }>;
+  collection_task_count: number;
+  collection_success_count: number;
+  collection_failed_count: number;
+  influencer_count: number;
+  email_count: number;
+  email_failed_count: number;
+  reply_count: number;
+  pending_reply_count: number;
+  last_active_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  status: "active" | "disabled";
+  recent_activity?: {
+    collection_tasks: AdminCollectionTask[];
+    emails: AdminEmail[];
+    replies: AdminReply[];
+  };
+};
+
+export type AdminProductMember = {
+  user_id: number;
+  username: string;
+  role: string;
+};
+
+export type AdminProduct = {
+  id: number;
+  name: string;
+  subject: string | null;
+  brand?: string | null;
+  description?: string | null;
+  slug: string;
+  created_at: string | null;
+  updated_at?: string | null;
+  members: AdminProductMember[];
+  owner_names: string[];
+  collection_task_count: number;
+  influencer_count: number;
+  email_count: number;
+  reply_count: number;
+  status: "active" | "hidden" | "archived";
+  collection_tasks?: AdminCollectionTask[];
+  influencers?: AdminInfluencer[];
+  emails?: AdminEmail[];
+  replies?: AdminReply[];
+};
+
+export type AdminCollectionTask = {
+  id: number;
+  name: string;
+  status: string;
+  platform: string;
+  platforms: string[];
+  keywords: string[];
+  product_id: number | null;
+  product_name: string | null;
+  user_id: number | null;
+  username: string | null;
+  success_count: number;
+  failed_count: number;
+  inserted_count: number;
+  result_count: number;
+  last_run_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type AdminInfluencer = {
+  id: number;
+  product_id: number;
+  product_name: string | null;
+  platform: string;
+  username: string;
+  display_name: string | null;
+  profile_url: string;
+  followers_count: number | null;
+  email: string | null;
+  follow_status: string | null;
+  score: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type AdminEmail = {
+  id: number;
+  user_id: number | null;
+  username: string | null;
+  product_id: number | null;
+  product_name: string | null;
+  task_id: number | null;
+  product_influencer_id: number | null;
+  sender_email: string | null;
+  influencer_username: string | null;
+  recipients: string[];
+  subject: string;
+  status: string;
+  error_message: string | null;
+  sent_at: string | null;
+  has_replied: boolean;
+  replied_at: string | null;
+};
+
+export type AdminReply = {
+  id: number;
+  user_id: number | null;
+  username: string | null;
+  product_id: number;
+  product_name: string | null;
+  email_log_id: number | null;
+  product_influencer_id: number | null;
+  from_address: string;
+  to_address: string;
+  subject: string;
+  snippet: string | null;
+  processing_status: string;
+  intent_status: string;
+  received_at: string | null;
+  handled_at: string | null;
+};
+
+export async function fetchAdminSummary(): Promise<AdminSummary> {
+  const response = await apiFetch(`${API_URL}/api/admin/summary`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchAdminUsers(): Promise<AdminUser[]> {
+  const response = await apiFetch(`${API_URL}/api/admin/users`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchAdminUser(userId: number): Promise<AdminUser> {
+  const response = await apiFetch(`${API_URL}/api/admin/users/${userId}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchAdminUserProducts(userId: number): Promise<AdminProduct[]> {
+  const response = await apiFetch(`${API_URL}/api/admin/users/${userId}/products`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchAdminUserCollectionTasks(userId: number): Promise<AdminCollectionTask[]> {
+  const response = await apiFetch(`${API_URL}/api/admin/users/${userId}/collection-tasks`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchAdminUserInfluencers(userId: number): Promise<AdminInfluencer[]> {
+  const response = await apiFetch(`${API_URL}/api/admin/users/${userId}/influencers`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchAdminUserEmails(userId: number): Promise<AdminEmail[]> {
+  const response = await apiFetch(`${API_URL}/api/admin/users/${userId}/emails`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchAdminUserReplies(userId: number): Promise<AdminReply[]> {
+  const response = await apiFetch(`${API_URL}/api/admin/users/${userId}/replies`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchAdminProducts(): Promise<AdminProduct[]> {
+  const response = await apiFetch(`${API_URL}/api/admin/products`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchAdminProduct(productId: number): Promise<AdminProduct> {
+  const response = await apiFetch(`${API_URL}/api/admin/products/${productId}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchAdminCollectionTasks(): Promise<AdminCollectionTask[]> {
+  const response = await apiFetch(`${API_URL}/api/admin/collection-tasks`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchAdminInfluencers(): Promise<AdminInfluencer[]> {
+  const response = await apiFetch(`${API_URL}/api/admin/influencers`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchAdminEmails(): Promise<AdminEmail[]> {
+  const response = await apiFetch(`${API_URL}/api/admin/emails`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchAdminReplies(): Promise<AdminReply[]> {
+  const response = await apiFetch(`${API_URL}/api/admin/replies`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
 export type MessageTemplate = {
   id: number;
   user_id: number;
@@ -2216,6 +2471,9 @@ export async function fetchMessageTemplates(
 }
 
 export async function createMessageTemplate(payload: MessageTemplatePayload): Promise<MessageTemplate> {
+  if ((await ensureTenantProductId()) === 0) {
+    throw new Error("创建话术模板需要先选择具体产品/品牌");
+  }
   const response = await apiFetch(`${API_URL}/api/message-templates`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2536,6 +2794,9 @@ export async function sendOutreachBatch(payload: {
   user_intent?: string;
   dry_run?: boolean;
 }): Promise<OutreachBatchSendResponse> {
+  if ((await ensureTenantProductId()) === 0) {
+    throw new Error("发送外联邮件需要先选择具体产品/品牌");
+  }
   const response = await apiFetch(`${API_URL}/api/email/outreach/send-batch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -3196,6 +3457,9 @@ async function fetchOutreachWorkbenchFallback(): Promise<OutreachOneClickWorkben
 export async function createOutreachCampaign(
   payload: OutreachCampaignCreatePayload,
 ): Promise<OutreachCampaign> {
+  if ((await ensureTenantProductId()) === 0) {
+    throw new Error("创建外联任务需要先选择具体产品/品牌");
+  }
   const response = await apiFetch(`${API_URL}/api/outreach-campaigns`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -3431,6 +3695,9 @@ export async function fetchLinkKnowledgeBases(params: {
 export async function createLinkKnowledgeBase(
   payload: CreateLinkKnowledgeBasePayload,
 ): Promise<LinkKnowledgeBase> {
+  if ((await ensureTenantProductId()) === 0) {
+    throw new Error("创建链接库需要先选择具体产品/品牌");
+  }
   const response = await apiFetch(
     `${API_URL}/api/link-knowledge-bases`,
     {
@@ -3617,6 +3884,9 @@ export async function createKnowledgeBase(payload: {
   name: string;
   description?: string | null;
 }): Promise<KnowledgeBase> {
+  if ((await ensureTenantProductId()) === 0) {
+    throw new Error("创建知识库需要先选择具体产品/品牌");
+  }
   const response = await apiFetch(`${API_URL}/api/knowledge-bases`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

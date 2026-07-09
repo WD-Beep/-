@@ -2,6 +2,10 @@ import type { TenantProduct } from "./api.ts";
 
 const PRODUCT_OPTIONS_CACHE_KEY = "influencer_intel_tenant_products";
 
+function cacheKeyForUser(userId?: number | null): string {
+  return Number.isFinite(userId) ? `${PRODUCT_OPTIONS_CACHE_KEY}:${userId}` : PRODUCT_OPTIONS_CACHE_KEY;
+}
+
 function isTenantProduct(value: unknown): value is TenantProduct {
   if (!value || typeof value !== "object") return false;
   const item = value as Partial<TenantProduct>;
@@ -13,25 +17,25 @@ function isTenantProduct(value: unknown): value is TenantProduct {
   );
 }
 
-export function readCachedTenantProducts(): TenantProduct[] {
+export function readCachedTenantProducts(userId?: number | null): TenantProduct[] {
   if (typeof window === "undefined") return [];
   try {
-    const raw = window.localStorage.getItem(PRODUCT_OPTIONS_CACHE_KEY);
+    const cacheKey = cacheKeyForUser(userId);
+    const raw = window.localStorage.getItem(cacheKey);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed) || !parsed.every(isTenantProduct)) {
-      window.localStorage.removeItem(PRODUCT_OPTIONS_CACHE_KEY);
+      window.localStorage.removeItem(cacheKey);
       return [];
     }
     return parsed;
   } catch {
-    window.localStorage.removeItem(PRODUCT_OPTIONS_CACHE_KEY);
+    window.localStorage.removeItem(cacheKeyForUser(userId));
     return [];
   }
 }
 
-export function writeCachedTenantProducts(products: TenantProduct[]): void {
+export function writeCachedTenantProducts(products: TenantProduct[], userId?: number | null): void {
   if (typeof window === "undefined") return;
-  if (products.length === 0) return;
-  window.localStorage.setItem(PRODUCT_OPTIONS_CACHE_KEY, JSON.stringify(products));
+  window.localStorage.setItem(cacheKeyForUser(userId), JSON.stringify(products));
 }

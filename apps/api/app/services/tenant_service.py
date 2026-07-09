@@ -5,7 +5,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.tenant import Product, User, WorkspaceMember
+from app.models.tenant import Product, ProductMember, User, WorkspaceMember
 from app.schemas.tenant import ProductCreate, ProductRead, ProductUpdate, UserRead
 from app.services.product_visibility import infer_test_flags, is_product_visible
 
@@ -24,7 +24,7 @@ def normalize_product_slug(slug: str) -> str:
     text = (slug or "").strip().lower()
     normalized = _SLUG_RE.sub("-", text).strip("-")
     if not normalized:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="slug 无效")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid slug")
     return normalized[:100]
 
 
@@ -42,6 +42,10 @@ class TenantService:
         )
 
     @staticmethod
+    def _is_system_default_product(product: Product) -> bool:
+        return product.is_default or product.slug == "default"
+
+    @staticmethod
     async def list_accessible_products(
         db: AsyncSession,
         *,
@@ -54,8 +58,12 @@ class TenantService:
         else:
             rows = await db.execute(
                 select(Product)
-                .join(WorkspaceMember, WorkspaceMember.workspace_id == Product.workspace_id)
-                .where(WorkspaceMember.user_id == user_id)
+                .join(ProductMember, ProductMember.product_id == Product.id)
+                .where(
+                    ProductMember.user_id == user_id,
+                    Product.is_default.is_(False),
+                    Product.slug != "default",
+                )
             )
         products = TenantService._sort_products(list(rows.scalars().all()))
         visible = [row for row in products if is_product_visible(row, include_test=include_test)]
@@ -81,7 +89,7 @@ class TenantService:
             return 1
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="当前用户未加入任何工作区，无法创建产品/品牌",
+            detail="Current user has no workspace membership and cannot create brands.",
         )
 
     @staticmethod
@@ -123,7 +131,8 @@ class TenantService:
         base_slug = normalize_product_slug(data.slug or slugify_product_name(data.name))
         slug = await TenantService._ensure_unique_slug(db, workspace_id, base_slug)
 
-        if data.is_default:
+        make_default = data.is_default and is_admin
+        if make_default:
             await TenantService._clear_default_products(db, workspace_id)
 
         brand = (data.brand or "").strip() or None
@@ -139,12 +148,14 @@ class TenantService:
             slug=slug,
             brand=brand,
             description=(data.description or "").strip() or None,
-            is_default=data.is_default,
+            is_default=make_default,
             is_test=is_test,
             is_hidden=is_hidden,
             created_source=created_source or "user",
         )
         db.add(row)
+        if not is_admin:
+            db.add(ProductMember(user_id=user_id, product=row, role="owner"))
         await db.commit()
         await db.refresh(row)
         return ProductRead.model_validate(row)
@@ -160,20 +171,19 @@ class TenantService:
     ) -> ProductRead:
         product = await db.get(Product, product_id)
         if not product:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="产品不存在")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
 
-        workspace_id = await TenantService.resolve_user_workspace_id(
-            db, user_id=user_id, is_admin=is_admin
-        )
-        if product.workspace_id != workspace_id and not is_admin:
+        if not is_admin:
+            if TenantService._is_system_default_product(product):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to system default brand")
             membership = await db.execute(
-                select(WorkspaceMember.id).where(
-                    WorkspaceMember.workspace_id == product.workspace_id,
-                    WorkspaceMember.user_id == user_id,
+                select(ProductMember.id).where(
+                    ProductMember.product_id == product.id,
+                    ProductMember.user_id == user_id,
                 )
             )
             if membership.scalar_one_or_none() is None:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权修改该产品")
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this product")
 
         payload = data.model_dump(exclude_unset=True)
         if "name" in payload and payload["name"] is not None:
@@ -186,12 +196,39 @@ class TenantService:
             base_slug = normalize_product_slug(payload["slug"])
             if base_slug != product.slug:
                 product.slug = await TenantService._ensure_unique_slug(db, product.workspace_id, base_slug)
-        if payload.get("is_default") is True:
+        if payload.get("is_default") is True and is_admin:
             await TenantService._clear_default_products(db, product.workspace_id)
             product.is_default = True
-        elif payload.get("is_default") is False:
+        elif payload.get("is_default") is False or (payload.get("is_default") is True and not is_admin):
             product.is_default = False
 
         await db.commit()
         await db.refresh(product)
         return ProductRead.model_validate(product)
+
+    @staticmethod
+    async def delete_product(
+        db: AsyncSession,
+        *,
+        user_id: int,
+        is_admin: bool,
+        product_id: int,
+    ) -> None:
+        product = await db.get(Product, product_id)
+        if not product:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+
+        if not is_admin:
+            if TenantService._is_system_default_product(product):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to system default brand")
+            membership = await db.execute(
+                select(ProductMember.id).where(
+                    ProductMember.product_id == product.id,
+                    ProductMember.user_id == user_id,
+                )
+            )
+            if membership.scalar_one_or_none() is None:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this product")
+
+        await db.delete(product)
+        await db.commit()

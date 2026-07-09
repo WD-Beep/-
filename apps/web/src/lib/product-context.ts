@@ -9,6 +9,7 @@ export type ProductOption = {
 export const ALL_PRODUCTS_ID = 0;
 const PRODUCT_STORAGE_KEY = "influencer_intel_product_id";
 const USER_STORAGE_KEY = "influencer_intel_user_id";
+const AUTH_SESSION_STORAGE_KEY = "influencer_intel_auth_session";
 
 let activeProductId: number = ALL_PRODUCTS_ID;
 
@@ -16,7 +17,7 @@ export function readStoredProductIdFromStorage(): number {
   if (typeof window === "undefined") return ALL_PRODUCTS_ID;
   const raw = window.localStorage.getItem(PRODUCT_STORAGE_KEY);
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : ALL_PRODUCTS_ID;
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : ALL_PRODUCTS_ID;
 }
 
 export function getActiveProductId(): number {
@@ -50,13 +51,38 @@ export function clearStoredUserId(): void {
   window.localStorage.removeItem(USER_STORAGE_KEY);
 }
 
+function readStoredToken(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(AUTH_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { token?: unknown };
+    return typeof parsed.token === "string" && parsed.token.trim() ? parsed.token : null;
+  } catch {
+    return null;
+  }
+}
+
 export function tenantHeaders(): Record<string, string> {
-  return {
+  const headers: Record<string, string> = {
     "X-User-Id": String(getStoredUserId()),
     "X-Product-Id": String(getActiveProductId()),
   };
+  const token = readStoredToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
 }
 
 export async function ensureTenantProductId(): Promise<number> {
   return getActiveProductId();
+}
+
+export function assertConcreteProductSelected(action = "该操作"): number {
+  const productId = getActiveProductId();
+  if (productId === ALL_PRODUCTS_ID) {
+    throw new Error(`${action}需要先选择具体产品/品牌`);
+  }
+  return productId;
 }

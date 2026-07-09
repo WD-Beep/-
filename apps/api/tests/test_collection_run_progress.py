@@ -355,7 +355,7 @@ def test_running_stale_uses_backend_threshold(monkeypatch):
 
 
 def test_collection_stability_defaults_are_conservative():
-    assert settings.collection_max_running_tasks == 10
+    assert settings.collection_max_running_tasks == 2
     assert settings.apify_youtube_timeout_seconds == 90
     assert settings.youtube_discovery_keyword_timeout_seconds == 90
     assert settings.youtube_apify_keyword_concurrency == 2
@@ -365,7 +365,7 @@ def test_collection_stability_defaults_are_conservative():
     assert settings.facebook_discovery_keyword_timeout_seconds == 90
     assert settings.facebook_apify_keyword_concurrency == 1
     assert settings.facebook_apify_profile_concurrency == 1
-    assert settings.collection_profile_enrich_concurrency == 2
+    assert settings.collection_profile_enrich_concurrency == 3
     assert settings.collection_contact_concurrency == 2
     assert settings.collection_ai_concurrency == 1
 

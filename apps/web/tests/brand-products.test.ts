@@ -13,15 +13,27 @@ test("brand product seeds include 11 real entries", () => {
 });
 
 test("formatTenantProductLabel uses subject and brand", () => {
-  assert.equal(formatTenantProductLabel("珺临", "EPEDAL24"), "珺临 · EPEDAL24");
-  assert.equal(formatTenantProductLabel("OCE", "OCE GEAR"), "OCE · OCE GEAR");
+  assert.equal(formatTenantProductLabel("珺临", "EPEDAL24"), "珺临 / EPEDAL24");
+  assert.equal(formatTenantProductLabel("OCE", "OCE GEAR"), "OCE / OCE GEAR");
 });
 
-test("duolairui has RecoverJoy and JourCraf as separate options", () => {
-  const duolairui = BRAND_PRODUCT_SEEDS.filter((item) => item.name === "哆莱瑞");
-  assert.equal(duolairui.length, 2);
+test("brand product seeds match the sales1 to sales11 assignment list", () => {
   assert.deepEqual(
-    duolairui.map((item) => item.brand).sort(),
-    ["JourCraf", "RecoverJoy"],
+    BRAND_PRODUCT_SEEDS.map((item) => item.slug),
+    [
+      "junlin-epedal24",
+      "duolaiwei-aquorix",
+      "duolairui-recoverjoy",
+      "qianyu-scandihome",
+      "duolaida-acestrike",
+      "baibo-p-travel",
+      "oce-oce-gear",
+      "junyu-p-travel-design",
+      "duolaiji-homehive",
+      "jiuyu-bbcreat",
+      "hongbolang",
+    ],
   );
+  assert.equal(BRAND_PRODUCT_SEEDS.some((item) => item.slug === "duolairui-jourcraf"), false);
+  assert.equal(BRAND_PRODUCT_SEEDS.at(-1)?.brand, "Hongbolang");
 });

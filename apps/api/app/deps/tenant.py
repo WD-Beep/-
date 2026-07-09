@@ -1,17 +1,17 @@
-"""多租户上下文：用户 + 产品权限校验。"""
+"""Tenant context dependencies: user and product access checks."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.models.tenant import Product, User, WorkspaceMember
+from app.models.tenant import Product, ProductMember, User, WorkspaceMember
 from app.services.tenant_scope import ALL_PRODUCTS_ID
-from app.services.tenant_service import TenantService
 
 
 @dataclass(frozen=True)
@@ -31,24 +31,26 @@ class UserContext:
 async def _load_user(db: AsyncSession, user_id: int) -> User:
     user = await db.get(User, user_id)
     if not user or not user.is_active:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已停用")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or disabled")
     return user
 
 
 async def _ensure_product_access(db: AsyncSession, *, user: User, product_id: int) -> Product:
     product = await db.get(Product, product_id)
     if not product:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="产品不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
     if user.is_admin:
         return product
-    membership = await db.execute(
-        select(WorkspaceMember.id).where(
-            WorkspaceMember.workspace_id == product.workspace_id,
-            WorkspaceMember.user_id == user.id,
+    if product.is_default or product.slug == "default":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this product")
+    assignment = await db.execute(
+        select(ProductMember.id).where(
+            ProductMember.product_id == product.id,
+            ProductMember.user_id == user.id,
         )
     )
-    if membership.scalar_one_or_none() is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问该产品")
+    if assignment.scalar_one_or_none() is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this product")
     return product
 
 
@@ -56,21 +58,49 @@ def _parse_required_header(value: int | None, header_name: str) -> int:
     if value is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"缺少 {header_name} 请求头",
+            detail=f"Missing {header_name} header",
         )
     if value < 0:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"{header_name} 无效",
+            detail=f"Invalid {header_name}",
         )
     return value
+
+
+def _is_production_env() -> bool:
+    value = (os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or "").strip().lower()
+    return value in {"prod", "production"}
+
+
+def _resolve_authenticated_user_id(
+    *,
+    x_user_id: int | None,
+    x_authenticated_user_id: int | None,
+    x_auth_proxy_secret: str | None,
+) -> int:
+    if _is_production_env():
+        expected_secret = (os.getenv("AUTH_PROXY_SHARED_SECRET") or "").strip()
+        if not expected_secret:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication is not configured")
+        if not x_auth_proxy_secret or x_auth_proxy_secret.strip() != expected_secret:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authentication proxy secret")
+        return _parse_required_header(x_authenticated_user_id, "X-Authenticated-User-Id")
+
+    return _parse_required_header(x_user_id, "X-User-Id")
 
 
 async def get_user_context(
     db: AsyncSession = Depends(get_db),
     x_user_id: int | None = Header(default=None, alias="X-User-Id"),
+    x_authenticated_user_id: int | None = Header(default=None, alias="X-Authenticated-User-Id"),
+    x_auth_proxy_secret: str | None = Header(default=None, alias="X-Auth-Proxy-Secret"),
 ) -> UserContext:
-    user_id = _parse_required_header(x_user_id, "X-User-Id")
+    user_id = _resolve_authenticated_user_id(
+        x_user_id=x_user_id,
+        x_authenticated_user_id=x_authenticated_user_id,
+        x_auth_proxy_secret=x_auth_proxy_secret,
+    )
     user = await _load_user(db, user_id)
     return UserContext(user_id=user.id, is_admin=user.is_admin)
 
@@ -79,11 +109,19 @@ async def get_tenant_context(
     db: AsyncSession = Depends(get_db),
     x_user_id: int | None = Header(default=None, alias="X-User-Id"),
     x_product_id: int | None = Header(default=None, alias="X-Product-Id"),
+    x_authenticated_user_id: int | None = Header(default=None, alias="X-Authenticated-User-Id"),
+    x_auth_proxy_secret: str | None = Header(default=None, alias="X-Auth-Proxy-Secret"),
 ) -> TenantContext:
-    user_id = _parse_required_header(x_user_id, "X-User-Id")
+    user_id = _resolve_authenticated_user_id(
+        x_user_id=x_user_id,
+        x_authenticated_user_id=x_authenticated_user_id,
+        x_auth_proxy_secret=x_auth_proxy_secret,
+    )
     product_id = _parse_required_header(x_product_id, "X-Product-Id")
     user = await _load_user(db, user_id)
     if product_id == ALL_PRODUCTS_ID:
+        if not user.is_admin:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to all products")
         membership = await db.execute(
             select(WorkspaceMember.workspace_id)
             .where(WorkspaceMember.user_id == user.id)
@@ -109,7 +147,7 @@ def require_write_product_id(ctx: TenantContext) -> int:
     if ctx.product_id == ALL_PRODUCTS_ID:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="请先选择具体产品后再创建或修改数据",
+            detail="Please select a concrete product before writing data.",
         )
     return ctx.product_id
 
@@ -117,17 +155,10 @@ def require_write_product_id(ctx: TenantContext) -> int:
 async def resolve_write_product_id(db: AsyncSession, ctx: TenantContext) -> int:
     if ctx.product_id != ALL_PRODUCTS_ID:
         return ctx.product_id
-    products = await TenantService.list_accessible_products(
-        db,
-        user_id=ctx.user_id,
-        is_admin=ctx.is_admin,
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Please select a concrete product before writing data.",
     )
-    if not products:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="暂无可用产品，请先创建产品",
-        )
-    return products[0].id
 
 
 async def require_product_access(

@@ -840,7 +840,7 @@ export function InfluencersPanel() {
                 <div className="flex flex-wrap justify-center gap-2">
                   {activePlatform !== "all" ? (
                     <Button variant="outline" size="sm" onClick={() => handlePlatformChange("all")}>
-                      返回全部平台
+                      返回当前品牌全部平台
                     </Button>
                   ) : null}
                   <Button variant="secondary" size="sm" onClick={clearAllFilters}>

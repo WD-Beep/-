@@ -81,6 +81,10 @@ import {
   taskManagementTags,
   type TaskEffectivenessFilter,
 } from "@/lib/task-effectiveness";
+import {
+  canCreateCollectionTaskForProduct,
+  collectionTaskCreateDisabledReason,
+} from "@/lib/task-form-payload";
 
 function formatDate(value: string | null): string {
   if (!value) return "-";
@@ -475,6 +479,7 @@ export function CollectionTasksPanel() {
     (t) => isCollectionTaskRunning(t) && !isCollectionTaskRunningStale(t),
   );
   const activeRunningTask = activeRunningTasks[0];
+  const createDisabledReason = collectionTaskCreateDisabledReason(productId);
 
   useEffect(() => {
     if (!hasRunningTasks) return;
@@ -515,6 +520,11 @@ export function CollectionTasksPanel() {
   }, [tasks, showToast]);
 
   function openCreateDialog(sourceMethod: TaskSourceMethod = "keyword_discovery") {
+    if (!canCreateCollectionTaskForProduct(productId)) {
+      setMessage(null);
+      setError(createDisabledReason ?? "请先选择具体产品/品牌");
+      return;
+    }
     setMessage(null);
     setError(null);
     setDialogMode("create");
@@ -537,6 +547,9 @@ export function CollectionTasksPanel() {
     setError(null);
     try {
       if (dialogMode === "create") {
+        if (!canCreateCollectionTaskForProduct(productId)) {
+          throw new Error(createDisabledReason ?? "请先选择具体产品/品牌");
+        }
         await createCollectionTask(payload);
         setMessage("任务创建成功");
       } else if (editingTask) {
@@ -893,11 +906,20 @@ export function CollectionTasksPanel() {
       <div className="ops-page">
       <div className="ops-toolbar shrink-0">
         <div className="flex items-center gap-2">
-          <Button onClick={() => openCreateDialog("keyword_discovery")}>
+          <Button
+            onClick={() => openCreateDialog("keyword_discovery")}
+            disabled={!canCreateCollectionTaskForProduct(productId)}
+            title={createDisabledReason ?? undefined}
+          >
             <Plus className="h-4 w-4" />
             创建任务
           </Button>
-          <Button variant="outline" onClick={() => openCreateDialog("link_import")}>
+          <Button
+            variant="outline"
+            onClick={() => openCreateDialog("link_import")}
+            disabled={!canCreateCollectionTaskForProduct(productId)}
+            title={createDisabledReason ?? undefined}
+          >
             链接导入
           </Button>
           <Button variant="outline" onClick={() => void loadTasks()} disabled={loading}>

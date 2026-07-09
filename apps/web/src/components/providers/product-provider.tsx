@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useLayoutEffect, useMemo, useState } from "react";
 
+import { getStoredAuthSession } from "@/lib/auth";
 import { ALL_PRODUCTS_ID, readStoredProductIdFromStorage, setStoredProductId } from "@/lib/product-context";
 import { readCachedTenantProducts } from "@/lib/product-options-cache";
 import { resolveInitialProductIdFromCache } from "@/lib/product-provider-state";
@@ -19,10 +20,12 @@ export function ProductProvider({ children }: { children: React.ReactNode }) {
 
   useLayoutEffect(() => {
     queueMicrotask(() => {
+      const session = getStoredAuthSession();
       const storedProductId = readStoredProductIdFromStorage();
       const resolvedProductId = resolveInitialProductIdFromCache(
         storedProductId,
-        readCachedTenantProducts(),
+        readCachedTenantProducts(session?.userId),
+        session,
       );
       setProductIdState(resolvedProductId);
       setHydrated(true);

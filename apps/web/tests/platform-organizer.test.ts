@@ -1,3 +1,5 @@
+import "./register-path-aliases.ts";
+
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -43,4 +45,21 @@ test("link-import platform cards shown with real stats", () => {
   ]);
   assert.deepEqual(keys, ["pinterest"]);
   assert.equal(URL_ONLY_PLATFORM_STAT_HINT, "主要通过链接导入或外链发现，站内关键词搜索暂未接入");
+});
+
+test("all platform copy is scoped to the current brand", async () => {
+  const { buildPlatformCards, platformListTitle } = await import("../src/lib/platform-organizer.ts");
+  const cards = buildPlatformCards([
+    {
+      platform: "instagram",
+      total: 1,
+      has_email: 0,
+      direct_contact: 0,
+      missing_contact: 1,
+      high_value: 0,
+    },
+  ]);
+
+  assert.equal(cards[0]?.label, "当前品牌全部平台");
+  assert.equal(platformListTitle("all"), "当前品牌线索列表");
 });

@@ -27,7 +27,7 @@ from app.models.outreach_email_campaign import OutreachEmailCampaign
 from app.models.outreach_send_queue import OutreachSendQueueItem
 from app.models.product_influencer import ProductInfluencer
 from app.models.product_influencer_source import ProductInfluencerSource
-from app.models.tenant import Product, User, Workspace, WorkspaceMember
+from app.models.tenant import Product, ProductMember, User, Workspace, WorkspaceMember
 
 __all__ = [
     "Influencer",
@@ -54,6 +54,7 @@ __all__ = [
     "User",
     "Workspace",
     "WorkspaceMember",
+    "ProductMember",
     "Product",
     "CollectionTaskStatus",
     "CandidateStatus",

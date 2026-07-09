@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
 import { Inbox, Loader2, RefreshCw, Trash2 } from "lucide-react";
 
 import { AdminShell } from "@/components/layout/admin-shell";
@@ -14,13 +13,11 @@ import {
   deleteEmailReplies,
   fetchEmailReplies,
   fetchInfluencers,
-  fetchOutreachCampaigns,
   pollImapInbox,
   sendEmailReplyResponse,
   updateEmailReply,
   type EmailReply,
   type Influencer,
-  type OutreachCampaign,
 } from "@/lib/api";
 import {
   filterEmailRepliesForCenter,
@@ -74,23 +71,19 @@ function isGenericReplyAddress(value: string | null | undefined): boolean {
 export function EmailRepliesPanel() {
   const productId = useActiveProductId();
   const requiresProduct = productId === ALL_PRODUCTS_ID;
-  const searchParams = useSearchParams();
-  const initialCampaignId = Number(searchParams.get("campaign_id"));
   const [replies, setReplies] = useState<EmailReply[]>([]);
   const [influencers, setInfluencers] = useState<Influencer[]>([]);
-  const [campaigns, setCampaigns] = useState<OutreachCampaign[]>([]);
   const [activeView, setActiveView] = useState<EmailReplyCenterView>("unprocessed");
-  const [campaignFilter, setCampaignFilter] = useState<number | null>(
-    Number.isFinite(initialCampaignId) && initialCampaignId > 0 ? initialCampaignId : null,
-  );
   const [expanded, setExpanded] = useState<EmailReply | null>(null);
+  const [noteEditingReply, setNoteEditingReply] = useState<EmailReply | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
   const [selectedInfluencerId, setSelectedInfluencerId] = useState("");
-  const [selectedCampaignId, setSelectedCampaignId] = useState("");
   const [responseBody, setResponseBody] = useState("");
   const [responseDraftGenerated, setResponseDraftGenerated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [actionId, setActionId] = useState<number | null>(null);
   const [sendingResponse, setSendingResponse] = useState(false);
+  const [savingNote, setSavingNote] = useState(false);
   const [polling, setPolling] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [selectedReplyIds, setSelectedReplyIds] = useState<Set<number>>(() => new Set());
@@ -101,14 +94,12 @@ export function EmailRepliesPanel() {
     setLoading(true);
     setError(null);
     try {
-      const [replyData, influencerData, campaignData] = await Promise.all([
+      const [replyData, influencerData] = await Promise.all([
         fetchEmailReplies({ page: 1, pageSize: PAGE_SIZE }),
         fetchInfluencers(1, 100, { hasEmail: true }),
-        fetchOutreachCampaigns(),
       ]);
       setReplies(replyData.items);
       setInfluencers(influencerData.items);
-      setCampaigns(campaignData);
       setSelectedReplyIds(new Set());
     } catch (err) {
       setError(err instanceof Error ? err.message : "鍥炲鍒楄〃鍔犺浇澶辫触");
@@ -124,20 +115,19 @@ export function EmailRepliesPanel() {
   }, [load, productId]);
 
   const visibleReplies = useMemo(
-    () => filterEmailRepliesForCenter(replies, { view: activeView, campaignId: campaignFilter }),
-    [activeView, campaignFilter, replies],
+    () => filterEmailRepliesForCenter(replies, { view: activeView }),
+    [activeView, replies],
   );
 
   const counts = useMemo(() => {
     const map = new Map<EmailReplyCenterView, number>();
     for (const tab of VIEW_TABS) {
-      map.set(tab.key, filterEmailRepliesForCenter(replies, { view: tab.key, campaignId: campaignFilter }).length);
+      map.set(tab.key, filterEmailRepliesForCenter(replies, { view: tab.key }).length);
     }
     return map;
-  }, [campaignFilter, replies]);
+  }, [replies]);
 
   const influencerMap = useMemo(() => new Map(influencers.map((item) => [item.id, item])), [influencers]);
-  const campaignMap = useMemo(() => new Map(campaigns.map((item) => [item.id, item])), [campaigns]);
   const visibleReplyIds = useMemo(() => getSelectableReplyIds(visibleReplies), [visibleReplies]);
   const selectedVisibleIds = useMemo(
     () => visibleReplyIds.filter((id) => selectedReplyIds.has(id)),
@@ -194,14 +184,12 @@ export function EmailRepliesPanel() {
 
   async function handleManualLink(reply: EmailReply) {
     const influencerId = Number(selectedInfluencerId);
-    const campaignId = selectedCampaignId ? Number(selectedCampaignId) : undefined;
     if (!Number.isFinite(influencerId) || influencerId <= 0) {
       setError("请先选择要关联的红人");
       return;
     }
     await patchReply(reply, {
       product_influencer_id: influencerId,
-      campaign_id: campaignId,
       intent_status: reply.intent_status === "unmatched" ? "unprocessed" : reply.intent_status,
     });
   }
@@ -224,6 +212,34 @@ export function EmailRepliesPanel() {
       }),
     );
     setResponseDraftGenerated(true);
+  }
+
+  function openNoteEditor(reply: EmailReply) {
+    setNoteEditingReply(reply);
+    setNoteDraft(reply.manual_note ?? "");
+    setError(null);
+    setNotice(null);
+  }
+
+  async function saveReplyNote() {
+    if (!noteEditingReply) return;
+    setSavingNote(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const updated = await updateEmailReply(noteEditingReply.id, {
+        manual_note: noteDraft.trim() || null,
+      });
+      setReplies((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      if (expanded?.id === updated.id) setExpanded(updated);
+      setNoteEditingReply(null);
+      setNoteDraft("");
+      setNotice("跟进备注已保存");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存跟进备注失败");
+    } finally {
+      setSavingNote(false);
+    }
   }
 
   function handleGenerateResponseDraft(reply: EmailReply) {
@@ -369,18 +385,6 @@ export function EmailRepliesPanel() {
                 {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
                 删除已选{selectedVisibleIds.length > 0 ? ` ${selectedVisibleIds.length}` : ""}
               </Button>
-              <select
-                className="h-9 rounded-md border bg-background px-3 text-sm"
-                value={campaignFilter ?? ""}
-                onChange={(event) => setCampaignFilter(event.target.value ? Number(event.target.value) : null)}
-              >
-                <option value="">全部活动</option>
-                {campaigns.map((campaign) => (
-                  <option key={campaign.id} value={campaign.id}>
-                    {campaign.name}
-                  </option>
-                ))}
-              </select>
             </div>
           </div>
         </section>
@@ -407,7 +411,6 @@ export function EmailRepliesPanel() {
                     </th>
                     <th className="px-4 py-3">红人 / 邮箱</th>
                     <th className="px-4 py-3">主题 / 摘要</th>
-                    <th className="px-4 py-3">活动</th>
                     <th className="px-4 py-3">状态</th>
                     <th className="px-4 py-3">回复时间</th>
                     <th className="px-4 py-3">操作</th>
@@ -416,7 +419,6 @@ export function EmailRepliesPanel() {
                 <tbody>
                   {visibleReplies.map((reply) => {
                     const influencer = reply.product_influencer_id ? influencerMap.get(reply.product_influencer_id) : null;
-                    const campaign = reply.campaign_id ? campaignMap.get(reply.campaign_id) : null;
                     const matchCandidates = getEmailReplyMatchCandidates(reply);
                     return (
                       <tr
@@ -461,7 +463,6 @@ export function EmailRepliesPanel() {
                                   onClick={() =>
                                     void patchReply(reply, {
                                       product_influencer_id: candidate.product_influencer_id,
-                                      campaign_id: candidate.campaign_id ?? undefined,
                                       intent_status: reply.intent_status === "unmatched" ? "unprocessed" : reply.intent_status,
                                     })
                                   }
@@ -475,15 +476,11 @@ export function EmailRepliesPanel() {
                         <td className="max-w-[320px] px-4 py-3">
                           <div className="font-medium">{truncate(reply.subject || "(无标题)", 90)}</div>
                           <div className="mt-1 text-xs text-muted-foreground">{truncate(reply.snippet || reply.body, 120)}</div>
-                        </td>
-                        <td className="px-4 py-3">
-                          {campaign ? (
-                            <Link className="hover:underline" href={`/outreach-campaigns/${campaign.id}?tab=replied`}>
-                              {campaign.name}
-                            </Link>
-                          ) : (
-                            <span className="text-muted-foreground">未关联活动</span>
-                          )}
+                          {reply.manual_note ? (
+                            <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+                              备注：{truncate(reply.manual_note, 80)}
+                            </div>
+                          ) : null}
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex flex-wrap gap-1.5">
@@ -522,6 +519,15 @@ export function EmailRepliesPanel() {
                             >
                               需跟进
                             </Button>
+                            {activeView === "follow_up" || reply.intent_status === "follow_up" ? (
+                              <Button
+                                size="sm"
+                                variant={reply.manual_note ? "default" : "outline"}
+                                onClick={() => openNoteEditor(reply)}
+                              >
+                                备注
+                              </Button>
+                            ) : null}
                             <Button
                               size="sm"
                               variant="outline"
@@ -579,9 +585,6 @@ export function EmailRepliesPanel() {
                         : "当前未自动关联红人，建议先关联后发送。"}
                       {" · "}
                       {expanded.from_address}
-                      {expanded.campaign_id && campaignMap.get(expanded.campaign_id)
-                        ? ` · ${campaignMap.get(expanded.campaign_id)?.name}`
-                        : ""}
                     </p>
                   </div>
                   {isGenericReplyAddress(expanded.from_address) ? (
@@ -624,7 +627,7 @@ export function EmailRepliesPanel() {
             </div>
 
             <div className="shrink-0 border-t bg-background px-6 py-4">
-              <div className="grid min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
+              <div className="grid min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
                 <label className="space-y-1 text-sm">
                   <span className="font-medium">手动关联红人</span>
                   <select
@@ -640,21 +643,6 @@ export function EmailRepliesPanel() {
                     ))}
                   </select>
                 </label>
-                <label className="space-y-1 text-sm">
-                  <span className="font-medium">手动关联活动</span>
-                  <select
-                    className="h-9 w-full rounded-md border bg-background px-3"
-                    value={selectedCampaignId}
-                    onChange={(event) => setSelectedCampaignId(event.target.value)}
-                  >
-                    <option value="">不关联活动</option>
-                    {campaigns.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
                 <Button
                   className="h-9 whitespace-nowrap"
                   onClick={() => void handleManualLink(expanded)}
@@ -663,6 +651,46 @@ export function EmailRepliesPanel() {
                   保存关联
                 </Button>
               </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {noteEditingReply ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-xl rounded-lg border bg-background shadow-xl">
+            <div className="border-b px-6 py-4">
+              <h2 className="text-lg font-semibold">编辑跟进备注</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                给业务同事记录下一步动作、对方诉求或需要注意的点。
+              </p>
+            </div>
+            <div className="px-6 py-4">
+              <textarea
+                className="min-h-40 w-full resize-y rounded-md border bg-background p-3 text-sm leading-6"
+                value={noteDraft}
+                onChange={(event) => setNoteDraft(event.target.value)}
+                maxLength={2000}
+                placeholder="例如：对方想看报价单，明天下午跟进；需要确认寄样地址。"
+              />
+              <div className="mt-2 text-right text-xs text-muted-foreground">{noteDraft.length}/2000</div>
+            </div>
+            <div className="flex justify-end gap-2 border-t px-6 py-4">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={savingNote}
+                onClick={() => {
+                  setNoteEditingReply(null);
+                  setNoteDraft("");
+                }}
+              >
+                取消
+              </Button>
+              <Button type="button" disabled={savingNote} onClick={() => void saveReplyNote()}>
+                {savingNote ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                保存备注
+              </Button>
             </div>
           </div>
         </div>
