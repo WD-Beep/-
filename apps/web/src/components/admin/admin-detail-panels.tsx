@@ -32,6 +32,7 @@ import {
 import { ProductCreateDialog } from "@/components/layout/product-create-dialog";
 import {
   filterAdminRows,
+  buildSalesWorkbenchDetailView,
   formatAdminDate,
   formatAdminNumber,
   getCollectionTaskStatusMeta,
@@ -40,8 +41,11 @@ import {
   getInfluencerStatusMeta,
   getPlatformLabel,
   getProductStatusMeta,
+  getReplyIntentStatusMeta,
+  getReplyProcessingStatusMeta,
   getReplyStateLabel,
   getRoleLabel,
+  type AdminTone,
 } from "@/components/admin/admin-ui-helpers";
 import {
   type AdminCollectionTask,
@@ -153,7 +157,7 @@ function EmailsTable({ items }: { items: AdminEmail[] }) {
         <span key="subject" className="block max-w-[260px] truncate font-medium text-[#102033]">{item.subject || "暂无主题"}</span>,
         item.product_name ?? "暂无",
         item.username ?? "暂无",
-        item.recipients.join("、") || item.influencer_username || "暂无",
+        (item.recipients ?? []).join("、") || item.influencer_username || "暂无",
         <AdminStatusBadge key="status" meta={getEmailStatusMeta(item.status)} />,
         <AdminStatusBadge key="reply" meta={getReplyStateLabel(item.has_replied)} />,
         <AdminStatusBadge key="follow" meta={item.has_replied ? getEmailStatusMeta("pending") : getEmailStatusMeta(item.status)} />,
@@ -184,9 +188,9 @@ function RepliesTable({ items }: { items: AdminReply[] }) {
         <span key="subject" className="block max-w-[260px] truncate font-medium text-[#102033]">{item.subject || "暂无主题"}</span>,
         item.product_name ?? "暂无",
         item.username ?? "暂无",
-        item.from_address,
-        <AdminStatusBadge key="processing" meta={getEmailStatusMeta(item.processing_status)} />,
-        <AdminStatusBadge key="intent" meta={getEmailStatusMeta(item.intent_status)} />,
+        item.from_address ?? "暂无",
+        <AdminStatusBadge key="processing" meta={getReplyProcessingStatusMeta(item.processing_status)} />,
+        <AdminStatusBadge key="intent" meta={getReplyIntentStatusMeta(item.intent_status)} />,
         formatAdminDate(item.received_at),
         formatAdminDate(item.handled_at),
         <AdminCompactActions
@@ -202,7 +206,120 @@ function RepliesTable({ items }: { items: AdminReply[] }) {
   );
 }
 
+function BrandProgressTable({ items }: { items: ReturnType<typeof buildSalesWorkbenchDetailView>["brandProgress"] }) {
+  return (
+    <AdminTable
+      minWidth={1180}
+      columns={["品牌名", "SLUG", "风险", "采集任务数", "最近任务状态", "入库红人数", "邮件数", "回复数", "异常数", "最近更新时间"]}
+      rows={items.map((item) => [
+        <span key="name" className="font-medium text-[#102033]">{item.name}</span>,
+        item.slug || "暂无",
+        item.outreachInsufficient ? <AdminStatusBadge key="risk" meta={{ label: "外联不足", tone: "warning" }} /> : <AdminStatusBadge key="risk" meta={{ label: "正常", tone: "success" }} />,
+        formatAdminNumber(item.taskCount),
+        <AdminStatusBadge key="status" meta={getCollectionTaskStatusMeta(item.latestTaskStatus)} />,
+        formatAdminNumber(item.influencerCount),
+        formatAdminNumber(item.emailCount),
+        formatAdminNumber(item.replyCount),
+        item.exceptionCount > 0 ? <AdminStatusBadge key="exceptions" meta={{ label: formatAdminNumber(item.exceptionCount), tone: "danger" }} /> : "0",
+        formatAdminDate(item.updatedAt),
+      ])}
+      emptyMessage="暂无负责品牌进度。"
+    />
+  );
+}
+
+function ExceptionsTable({
+  tasks,
+  emails,
+  replies,
+}: {
+  tasks: AdminCollectionTask[];
+  emails: AdminEmail[];
+  replies: AdminReply[];
+}) {
+  const rows = [
+    ...tasks
+      .filter((item) => getCollectionTaskStatusMeta(item.status).tone === "danger" || (item.failed_count ?? 0) > 0)
+      .map((item) => ({
+        type: "采集任务",
+        brand: item.product_name,
+        title: item.name,
+        status: getCollectionTaskStatusMeta(item.status),
+        detail: (item.failed_count ?? 0) > 0 ? `失败 ${formatAdminNumber(item.failed_count)} 条` : "任务失败",
+        time: item.updated_at ?? item.last_run_at ?? item.created_at,
+      })),
+    ...emails
+      .filter((item) => getEmailStatusMeta(item.status).tone === "danger" || item.error_message)
+      .map((item) => ({
+        type: "邮件记录",
+        brand: item.product_name,
+        title: item.subject || item.influencer_username || "暂无主题",
+        status: getEmailStatusMeta(item.status),
+        detail: item.error_message || "发送失败",
+        time: item.sent_at,
+      })),
+    ...replies
+      .filter((item) => getReplyProcessingStatusMeta(item.processing_status).tone === "warning")
+      .map((item) => ({
+        type: "回复记录",
+        brand: item.product_name,
+        title: item.subject || item.from_address,
+        status: getReplyProcessingStatusMeta(item.processing_status),
+        detail: item.snippet || "待处理回复",
+        time: item.received_at,
+      })),
+  ].sort((a, b) => new Date(b.time ?? 0).getTime() - new Date(a.time ?? 0).getTime());
+
+  return (
+    <AdminTable
+      minWidth={980}
+      columns={["类型", "品牌", "记录", "状态", "说明", "时间"]}
+      rows={rows.map((item) => [
+        item.type,
+        item.brand ?? "暂无",
+        <span key="title" className="block max-w-[280px] truncate font-medium text-[#102033]">{item.title}</span>,
+        <AdminStatusBadge key="status" meta={item.status} />,
+        <span key="detail" className="block max-w-[320px] truncate">{item.detail}</span>,
+        formatAdminDate(item.time),
+      ])}
+      emptyMessage="暂无异常记录。"
+    />
+  );
+}
+
+function DetailTabs({
+  tabs,
+  activeTab,
+  onChange,
+}: {
+  tabs: Array<{ key: string; label: string; count: number; tone?: AdminTone }>;
+  activeTab: string;
+  onChange: (key: string) => void;
+}) {
+  return (
+    <div className="flex gap-1 overflow-x-auto border-b border-[#E5ECF4] bg-[#F7F9FC] px-3 pt-3">
+      {tabs.map((tab) => (
+        <button
+          key={tab.key}
+          type="button"
+          onClick={() => onChange(tab.key)}
+          className={[
+            "inline-flex h-9 shrink-0 items-center gap-2 rounded-t-md border border-b-0 px-3 text-sm font-medium transition",
+            activeTab === tab.key
+              ? "border-[#DDE6F0] bg-white text-[#102033]"
+              : "border-transparent text-[#667085] hover:bg-white/70 hover:text-[#102033]",
+          ].join(" ")}
+        >
+          {tab.label}
+          <span className="rounded-full bg-[#EEF2F7] px-1.5 py-0.5 text-xs tabular-nums text-[#667085]">{formatAdminNumber(tab.count)}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function AdminUserDetailPanel({ userId }: { userId: number }) {
+  const [activeTab, setActiveTab] = useState("tasks");
   const [data, setData] = useState<{
     user: AdminUser;
     products: AdminProduct[];
@@ -224,7 +341,16 @@ export function AdminUserDetailPanel({ userId }: { userId: number }) {
       fetchAdminUserReplies(userId),
     ])
       .then(([user, products, tasks, influencers, emails, replies]) => {
-        if (active) setData({ user, products, tasks, influencers, emails, replies });
+        if (active) {
+          setData({
+            user,
+            products: products ?? [],
+            tasks: tasks ?? [],
+            influencers: influencers ?? [],
+            emails: emails ?? [],
+            replies: replies ?? [],
+          });
+        }
       })
       .catch((err) => {
         if (active) setError(err instanceof Error ? err.message : "业务员详情加载失败。");
@@ -238,26 +364,44 @@ export function AdminUserDetailPanel({ userId }: { userId: number }) {
   if (!data) return <AdminState type="loading" message="正在加载业务员详情..." />;
 
   const { user, products, tasks, influencers, emails, replies } = data;
+  const detailView = buildSalesWorkbenchDetailView({ products, tasks, influencers, emails, replies });
+  const exceptionCount =
+    tasks.filter((item) => getCollectionTaskStatusMeta(item.status).tone === "danger" || (item.failed_count ?? 0) > 0).length +
+    emails.filter((item) => getEmailStatusMeta(item.status).tone === "danger" || item.error_message).length +
+    replies.filter((item) => getReplyProcessingStatusMeta(item.processing_status).tone === "warning").length;
+  const tabs = [
+    { key: "tasks", label: "采集任务", count: tasks.length },
+    { key: "influencers", label: "红人数据", count: influencers.length },
+    { key: "emails", label: "邮件记录", count: emails.length },
+    { key: "replies", label: "回复记录", count: replies.length },
+    { key: "exceptions", label: "异常记录", count: exceptionCount, tone: "danger" as AdminTone },
+  ];
 
   return (
     <div className="space-y-5">
       <AdminPageHeader
-        label="业务员详情"
+        label="业务员作业明细"
         title={`${user.username}（#${user.id}）`}
-        description="查看该账号从品牌负责、任务执行、红人沉淀到邮件回复的完整链路。"
-        actions={<AdminActionButton href="/admin/users">返回业务员列表</AdminActionButton>}
+        description="查看这个业务员具体采集了哪些品牌的数据，以及每个品牌的任务、红人、邮件、回复和异常进度。"
+        actions={<AdminActionButton href="/admin/sales-workbench">返回业务员作业</AdminActionButton>}
       />
       <AdminKpiGrid>
         <AdminKpiCard label="角色" value={getRoleLabel(user.role)} helper={user.is_active ? "账号启用" : "账号禁用"} icon={ShieldCheck} tone={user.is_active ? "success" : "muted"} />
-        <AdminKpiCard label="负责品牌数" value={user.product_count} helper="绑定品牌" icon={Database} tone="info" />
+        <AdminKpiCard label="负责品牌数" value={user.product_count ?? 0} helper="绑定品牌" icon={Database} tone="info" />
         <AdminKpiCard label="任务成功 / 失败" value={`${formatAdminNumber(user.collection_success_count)} / ${formatAdminNumber(user.collection_failed_count)}`} helper="采集表现" icon={RefreshCw} tone="info" />
         <AdminKpiCard label="回复 / 待处理" value={`${formatAdminNumber(user.reply_count)} / ${formatAdminNumber(user.pending_reply_count)}`} helper="跟进压力" icon={Mail} tone="warning" />
       </AdminKpiGrid>
-      <SectionWithTable title="负责品牌"><AdminTable columns={["品牌", "SLUG", "状态", "成员"]} rows={products.map((item) => [item.name, item.slug, <AdminStatusBadge key="status" meta={getProductStatusMeta(item.status)} />, item.members.map((member) => member.username).join("、") || "暂无"])} /></SectionWithTable>
-      <SectionWithTable title="采集任务"><TasksTable items={tasks} /></SectionWithTable>
-      <SectionWithTable title="红人数据"><InfluencersTable items={influencers} /></SectionWithTable>
-      <SectionWithTable title="邮件记录"><EmailsTable items={emails} /></SectionWithTable>
-      <SectionWithTable title="回复记录"><RepliesTable items={replies} /></SectionWithTable>
+      <SectionWithTable title="负责品牌进度" description="按品牌汇总采集任务、红人入库、邮件触达、回复和异常情况。">
+        <BrandProgressTable items={detailView.brandProgress} />
+      </SectionWithTable>
+      <AdminSection title="作业明细" description="按采集、红人、邮件、回复和异常切换查看，表格均支持分页和横向滚动。">
+        <DetailTabs tabs={tabs} activeTab={activeTab} onChange={setActiveTab} />
+        {activeTab === "tasks" ? <TasksTable items={tasks} /> : null}
+        {activeTab === "influencers" ? <InfluencersTable items={influencers} /> : null}
+        {activeTab === "emails" ? <EmailsTable items={emails} /> : null}
+        {activeTab === "replies" ? <RepliesTable items={replies} /> : null}
+        {activeTab === "exceptions" ? <ExceptionsTable tasks={tasks} emails={emails} replies={replies} /> : null}
+      </AdminSection>
     </div>
   );
 }
@@ -292,13 +436,13 @@ export function AdminProductDetailPanel({ productId }: { productId: number }) {
         actions={<AdminActionButton href="/admin/products">返回品牌列表</AdminActionButton>}
       />
       <AdminKpiGrid>
-        <AdminKpiCard label="状态" value={getProductStatusMeta(product.status).label} helper={product.slug} icon={ShoppingBag} tone={getProductStatusMeta(product.status).tone} />
-        <AdminKpiCard label="任务数" value={product.collection_task_count} helper="采集任务" icon={RefreshCw} tone="info" />
-        <AdminKpiCard label="红人数" value={product.influencer_count} helper="资料库" icon={Database} tone="info" />
+        <AdminKpiCard label="状态" value={getProductStatusMeta(product.status).label} helper={product.slug ?? "暂无"} icon={ShoppingBag} tone={getProductStatusMeta(product.status).tone} />
+        <AdminKpiCard label="任务数" value={product.collection_task_count ?? 0} helper="采集任务" icon={RefreshCw} tone="info" />
+        <AdminKpiCard label="红人数" value={product.influencer_count ?? 0} helper="资料库" icon={Database} tone="info" />
         <AdminKpiCard label="邮件 / 回复" value={`${formatAdminNumber(product.email_count)} / ${formatAdminNumber(product.reply_count)}`} helper="外联进度" icon={Mail} tone="success" />
       </AdminKpiGrid>
       <SectionWithTable title="品牌成员">
-        <AdminTable columns={["用户 ID", "用户名", "角色", "加入时间"]} rows={product.members.map((item) => [`#${item.user_id}`, item.username, getRoleLabel(item.role), "暂无"])} />
+        <AdminTable columns={["用户 ID", "用户名", "角色", "加入时间"]} rows={(product.members ?? []).map((item) => [`#${item.user_id}`, item.username ?? "暂无", getRoleLabel(item.role), "暂无"])} />
       </SectionWithTable>
       <SectionWithTable title="采集任务"><TasksTable items={product.collection_tasks ?? []} /></SectionWithTable>
       <SectionWithTable title="红人数据"><InfluencersTable items={product.influencers ?? []} /></SectionWithTable>
@@ -528,7 +672,7 @@ export function AdminEmailsPanel() {
           owner: item.username,
           status: item.has_replied ? "replied" : item.status,
           subject: item.subject,
-          recipient: item.recipients.join(" "),
+          recipient: (item.recipients ?? []).join(" "),
           createdAt: item.sent_at,
         })),
         filters,

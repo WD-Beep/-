@@ -62,7 +62,7 @@ export function AdminUsersPanel() {
           ...item,
           name: item.username,
           owner: item.role,
-          brand: item.bound_products.map((product) => product.name).join(" "),
+          brand: (item.bound_products ?? []).map((product) => product.name).join(" "),
           status: item.status,
           createdAt: item.created_at,
         })),
@@ -71,9 +71,9 @@ export function AdminUsersPanel() {
     [items, filters],
   );
 
-  const totalTasks = items.reduce((sum, item) => sum + item.collection_task_count, 0);
-  const totalFailures = items.reduce((sum, item) => sum + item.collection_failed_count + item.email_failed_count, 0);
-  const pendingReplies = items.reduce((sum, item) => sum + item.pending_reply_count, 0);
+  const totalTasks = items.reduce((sum, item) => sum + (item.collection_task_count ?? 0), 0);
+  const totalFailures = items.reduce((sum, item) => sum + (item.collection_failed_count ?? 0) + (item.email_failed_count ?? 0), 0);
+  const pendingReplies = items.reduce((sum, item) => sum + (item.pending_reply_count ?? 0), 0);
 
   return (
     <div className="space-y-5">
@@ -140,7 +140,7 @@ export function AdminUsersPanel() {
               getRoleLabel(item.role),
               <AdminStatusBadge key="status" meta={activeMeta[item.status] ?? activeMeta.disabled} />,
               formatAdminNumber(item.product_count),
-              <span key="brands" className="block max-w-[260px] truncate">{item.bound_products.map((product) => product.name).join("、") || "暂无"}</span>,
+              <span key="brands" className="block max-w-[260px] truncate">{(item.bound_products ?? []).map((product) => product.name).join("、") || "暂无"}</span>,
               formatAdminNumber(item.collection_task_count),
               `${formatAdminNumber(item.collection_success_count)} / ${formatAdminNumber(item.collection_failed_count)}`,
               formatAdminNumber(item.influencer_count),

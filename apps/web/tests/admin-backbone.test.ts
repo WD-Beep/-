@@ -33,6 +33,7 @@ test("admin shell files exist and do not import sales workspace controls", () =>
   assert.doesNotMatch(combined, /ProductProvider|useProductActions|setProductId/);
   assert.doesNotMatch(combined, /新增品牌|当前产品|当前品牌/);
   assert.match(combined, /\/admin\/dashboard/);
+  assert.match(combined, /\/admin\/sales-workbench/);
   assert.match(combined, /\/admin\/users/);
   assert.match(combined, /\/admin\/products/);
 });
@@ -47,6 +48,24 @@ test("admin users and products pages render dedicated admin panels", () => {
   assert.match(source("../src/app/admin/products/page.tsx"), /AdminProductsPanel/);
   assert.match(source("../src/app/admin/users/[id]/page.tsx"), /AdminUserDetailPanel/);
   assert.match(source("../src/app/admin/products/[id]/page.tsx"), /AdminProductDetailPanel/);
+});
+
+test("admin sales workbench has a dedicated route and strengthened detail view", () => {
+  assert.equal(exists("../src/app/admin/sales-workbench/page.tsx"), true);
+
+  const page = source("../src/app/admin/sales-workbench/page.tsx");
+  const panel = source("../src/components/admin/admin-sales-workbench-panel.tsx");
+  const detail = source("../src/components/admin/admin-detail-panels.tsx");
+
+  assert.match(page, /AdminSalesWorkbenchPanel/);
+  assert.match(panel, /业务员作业看板/);
+  assert.match(panel, /今日有动作业务员/);
+  assert.match(panel, /外联不足/);
+  assert.match(panel, /查看作业明细/);
+  assert.match(panel, /AdminCompactActions/);
+  assert.match(detail, /负责品牌进度/);
+  assert.match(detail, /采集任务/);
+  assert.match(detail, /异常记录/);
 });
 
 test("admin dashboard and lists expose required real-data fields", () => {
@@ -104,6 +123,7 @@ test("admin route guard clears non-admin sessions before showing admin pages", (
   const guard = source("../src/components/admin/admin-route-guard.tsx");
 
   assert.match(guard, /getStoredAuthSession\(\)\?\.isAdmin/);
+  assert.match(guard, /useState<GuardState>\("checking"\)/);
   assert.match(guard, /clearAuthSession\(\)/);
   assert.match(guard, /\/admin\/login\?error=admin_required/);
 });

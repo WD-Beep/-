@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   Activity,
   BarChart3,
+  BriefcaseBusiness,
   CalendarDays,
   Database,
   Inbox,
@@ -23,6 +24,7 @@ import { cn } from "@/lib/utils";
 const navItems = [
   { href: "/admin/dashboard", label: "后台首页", description: "全局概览", icon: LayoutDashboard },
   { href: "/admin/monthly-report", label: "月度总结", description: "月报复盘", icon: CalendarDays },
+  { href: "/admin/sales-workbench", label: "业务员作业", description: "作业追踪", icon: BriefcaseBusiness },
   { href: "/admin/users", label: "业务员管理", description: "账号与业绩", icon: Users },
   { href: "/admin/products", label: "品牌管理", description: "运营进度", icon: ShoppingBag },
   { href: "/admin/collection-tasks", label: "采集任务", description: "任务监控", icon: BarChart3 },

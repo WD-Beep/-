@@ -9,21 +9,34 @@ type AdminRouteGuardProps = {
   children: React.ReactNode;
 };
 
+type GuardState = "checking" | "allowed" | "blocked";
+
 export function AdminRouteGuard({ children }: AdminRouteGuardProps) {
   const router = useRouter();
-  const [allowed] = useState(() => Boolean(getStoredAuthSession()?.isAdmin));
+  const [state, setState] = useState<GuardState>("checking");
 
   useEffect(() => {
-    if (!allowed) {
-      clearAuthSession();
-      router.replace("/admin/login?error=admin_required");
-    }
-  }, [allowed, router]);
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      const allowed = Boolean(getStoredAuthSession()?.isAdmin);
+      if (allowed) {
+        setState("allowed");
+      } else {
+        clearAuthSession();
+        setState("blocked");
+        router.replace("/admin/login?error=admin_required");
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
-  if (!allowed) {
+  if (state !== "allowed") {
     return (
       <div className="flex h-dvh items-center justify-center bg-[#F4F7FB]">
-        <p className="text-sm text-[#667085]">Checking administrator access...</p>
+        <p className="text-sm text-[#667085]">正在校验管理员权限...</p>
       </div>
     );
   }
