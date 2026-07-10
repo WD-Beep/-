@@ -1,15 +1,15 @@
 FROM node:22-alpine
 
 WORKDIR /app
-ENV NODE_ENV=production
 
 RUN npm config set registry https://mirrors.cloud.tencent.com/npm/
 
 COPY package.json package-lock.json* ./
-RUN npm ci --registry=https://mirrors.cloud.tencent.com/npm/
+RUN npm install --registry=https://mirrors.cloud.tencent.com/npm/
 
 COPY . .
 RUN npm run build
+ENV NODE_ENV=production
 
 EXPOSE 3000
 
