@@ -455,18 +455,15 @@ function validateQualityAndDelivery(values: TaskFormValues): string | null {
   if (values.batch_round_enabled) {
     const total = Number(values.batch_total_limit);
     const roundSize = Number(values.batch_round_size);
-    const roundCount = Number(values.batch_round_count);
-    if (!Number.isFinite(total) || total < 1 || total > 500) {
-      return "多轮采集总目标数量需在 1-500 之间";
+    const roundCount = calculateBatchRoundCount(values);
+    if (!Number.isFinite(total) || total < 1 || total > 100000) {
+      return "多轮采集总目标数量需在 1-100000 之间";
     }
     if (!Number.isFinite(roundSize) || roundSize < 1 || roundSize > 500) {
       return "多轮采集每轮数量需在 1-500 之间";
     }
-    if (!Number.isFinite(roundCount) || roundCount < 1 || roundCount > 20 || !Number.isInteger(roundCount)) {
-      return "多轮采集轮数需为 1-20 的整数";
-    }
-    if (roundSize * roundCount < total) {
-      return "每轮数量 × 轮数不能小于总目标数量";
+    if (roundCount == null || roundCount < 1 || roundCount > 1000) {
+      return "多轮采集轮数需为 1-1000 的整数";
     }
   }
   const minEngagementText = values.min_engagement_rate.trim();
@@ -648,6 +645,15 @@ function buildQualityFilterPayload(values: TaskFormValues) {
 
 export { buildQualityFilterPayload };
 
+export function calculateBatchRoundCount(values: Pick<TaskFormValues, "batch_total_limit" | "batch_round_size">): number | null {
+  const total = Number(values.batch_total_limit);
+  const roundSize = Number(values.batch_round_size);
+  if (!Number.isFinite(total) || total < 1 || !Number.isFinite(roundSize) || roundSize < 1) {
+    return null;
+  }
+  return Math.ceil(total / roundSize);
+}
+
 function withStablePayloadDefaults(
   payload: CollectionTaskPayload,
   values: TaskFormValues,
@@ -673,12 +679,13 @@ function withBatchRoundPayload(
   values: TaskFormValues,
 ): CollectionTaskPayload {
   if (!values.batch_round_enabled) return payload;
+  const roundCount = calculateBatchRoundCount(values);
   return {
     ...payload,
     batch_round_enabled: true,
     batch_total_limit: Number(values.batch_total_limit),
     batch_round_size: Number(values.batch_round_size),
-    batch_round_count: Number(values.batch_round_count),
+    batch_round_count: roundCount,
   };
 }
 

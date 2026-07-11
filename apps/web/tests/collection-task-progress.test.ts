@@ -212,6 +212,17 @@ test("inserted vs target label is human readable", () => {
   );
 });
 
+test("collection task panel shows batch parent round progress in result cell", () => {
+  const source = readFileSync(
+    new URL("../src/components/collection-tasks/collection-tasks-panel.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /多轮采集 · 第/);
+  assert.match(source, /已入库/);
+  assert.match(source, /成功 \$\{successRounds\} 轮 \/ 失败 \$\{failedRounds\} 轮 \/ 跳过 \$\{skippedRounds\}/);
+});
+
 test("stale recoverable running task is flagged", () => {
   const staleTask = task({ stale: true, recoverable: true });
   assert.equal(isCollectionTaskRunningStale(staleTask), true);

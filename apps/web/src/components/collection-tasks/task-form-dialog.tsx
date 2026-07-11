@@ -14,6 +14,7 @@ import { COLLECTION_MODE_OPTIONS, COUNTRY_OPTIONS as ENGLISH_COUNTRY_OPTIONS, KE
 import {
   advancedFilterSummary,
   applyStableCollectionMode,
+  calculateBatchRoundCount,
   clearStableCollectionMode,
   applyDiscoverySource,
   createEmptyTaskForm,
@@ -288,6 +289,7 @@ export function TaskFormDialog({
     () => validateForm(form, platformCapabilities),
     [form, platformCapabilities],
   );
+  const batchRoundCount = useMemo(() => calculateBatchRoundCount(form), [form.batch_total_limit, form.batch_round_size]);
   const advancedSummary = useMemo(() => advancedFilterSummary(form), [form]);
   const linkImportHintGroups = useMemo(
     () => formatLinkImportPlatformHints(platformCapabilities),
@@ -719,7 +721,7 @@ export function TaskFormDialog({
                             ...prev,
                             batch_round_enabled: e.target.checked,
                             batch_total_limit: e.target.checked
-                              ? prev.batch_total_limit || String(Number(prev.batch_round_size || 50) * Number(prev.batch_round_count || 3))
+                              ? prev.batch_total_limit || String(Number(prev.batch_round_size || 50) * 20)
                               : prev.batch_total_limit,
                           }))
                         }
@@ -727,7 +729,7 @@ export function TaskFormDialog({
                       <span>
                         <span className="font-medium">启用多轮采集</span>
                         <span className="mt-0.5 block text-xs text-muted-foreground">
-                          系统会自动拆成多个轮次，创建后可一键排队运行。
+                          每轮独立执行，失败轮次会跳过并继续后续轮次。
                         </span>
                       </span>
                     </label>
@@ -739,7 +741,7 @@ export function TaskFormDialog({
                             id="batch_total_limit"
                             type="number"
                             min={1}
-                            max={500}
+                            max={100000}
                             value={form.batch_total_limit}
                             onChange={(e) => setForm({ ...form, batch_total_limit: e.target.value })}
                           />
@@ -756,15 +758,10 @@ export function TaskFormDialog({
                           />
                         </div>
                         <div className="space-y-1.5">
-                          <Label htmlFor="batch_round_count">轮数</Label>
-                          <Input
-                            id="batch_round_count"
-                            type="number"
-                            min={1}
-                            max={20}
-                            value={form.batch_round_count}
-                            onChange={(e) => setForm({ ...form, batch_round_count: e.target.value })}
-                          />
+                          <Label>预计轮数</Label>
+                          <div className="flex h-10 items-center rounded-md border bg-background px-3 text-sm">
+                            {batchRoundCount == null ? "-" : `${batchRoundCount} 轮`}
+                          </div>
                         </div>
                       </div>
                     ) : null}

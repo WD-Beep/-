@@ -127,12 +127,35 @@ function formatKeywordFilters(task: CollectionTask): string | null {
   return parts.length ? parts.join(" · ") : null;
 }
 
+function batchProgressLines(task: CollectionTask): { headline: string; counts: string } | null {
+  if (task.parent_task_id || (task.batch_round_count ?? 0) <= 1) return null;
+  const children = task.child_tasks ?? [];
+  const roundCount = task.batch_round_count ?? children.length;
+  const activeChild = children.find((child) => child.status === "running" || child.status === "queued");
+  const terminalChildren = children.filter((child) =>
+    ["completed", "completed_with_results", "completed_no_results", "failed", "partial_failed"].includes(child.status),
+  );
+  const currentRound = activeChild?.batch_round_index ?? Math.min(roundCount, terminalChildren.length + 1);
+  const successRounds = children.filter((child) =>
+    ["completed", "completed_with_results", "completed_no_results"].includes(child.status),
+  ).length;
+  const failedRounds = children.filter((child) => child.status === "failed" || child.status === "partial_failed").length;
+  const skippedRounds = children.reduce((sum, child) => sum + (child.skipped_count ?? 0), task.skipped_count ?? 0);
+  const inserted = task.inserted_count ?? task.result_count ?? 0;
+  const total = task.discovery_limit ?? 0;
+  return {
+    headline: `多轮采集 · 第 ${currentRound}/${roundCount} 轮 · 已入库 ${inserted} / ${total}`,
+    counts: `成功 ${successRounds} 轮 / 失败 ${failedRounds} 轮 / 跳过 ${skippedRounds}`,
+  };
+}
+
 function formatCollectionResultCell(
   task: CollectionTask,
   options: { isStaleRunning?: boolean; elapsedMs?: number; slowThresholdMs?: number } = {},
 ) {
   const { isStaleRunning = false, elapsedMs = 0, slowThresholdMs = COLLECTION_TASK_SLOW_HINT_MS } = options;
   const lines = formatCollectionResultLines(task);
+  const batchLines = batchProgressLines(task);
   const runningHint = collectionTaskRunningHint(task, {
     elapsedMs,
     slowThresholdMs,
@@ -200,6 +223,19 @@ function formatCollectionResultCell(
 
   const inserted = task.inserted_count ?? task.result_count ?? 0;
   const breakdown = buildTaskResultBreakdown(task);
+  if (batchLines) {
+    return (
+      <div className="space-y-1 text-xs">
+        <span className="block text-sm font-medium">{batchLines.headline}</span>
+        <span className="block text-muted-foreground">{batchLines.counts}</span>
+        {task.status_summary ? (
+          <span className="block line-clamp-2 text-muted-foreground" title={task.status_summary}>
+            {task.status_summary}
+          </span>
+        ) : null}
+      </div>
+    );
+  }
   if (inserted > 0) {
     return (
       <div className="space-y-1 text-xs">
@@ -1422,8 +1458,8 @@ export function CollectionTasksPanel() {
                                   variant="ghost"
                                   className={COLLECTION_TASK_TABLE_LAYOUT.actionButton}
                                   disabled={isBusy || batchChildren.length === 0}
-                                  onClick={() => void handleRunBatch(task)}
-                                  title="运行全部轮次"
+                                  onClick={() => handleRun(task)}
+                                  title="启动多轮采集"
                                 >
                                   {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                                 </Button>

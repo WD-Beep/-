@@ -47,6 +47,8 @@ backups/
 *.crt
 
 # Local probes / scratch files
+.codex-logs/
+.playwright-cli/
 tmp_*
 probe_*.txt
 *_result.txt

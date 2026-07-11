@@ -103,6 +103,8 @@ class CollectionQueueService:
         for task in iterable:
             if exclude_id is not None and task.id == exclude_id:
                 continue
+            if CollectionTaskService._is_batch_parent(task):
+                continue
             if not CollectionTaskService.is_running_stale(task):
                 tasks.append(task)
         return tasks
@@ -249,6 +251,8 @@ class CollectionQueueService:
 
                     made_progress = False
                     for task in queued_tasks:
+                        if CollectionTaskService._is_batch_parent(task):
+                            continue
                         reasons = await CollectionQueueService.queue_reasons(db, task)
                         if reasons:
                             checkpoint = dict(task.run_checkpoint or {})

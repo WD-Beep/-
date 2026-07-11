@@ -399,6 +399,7 @@ export type CollectionTaskChild = {
   result_count: number;
   deduped_count: number;
   failed_count: number;
+  skipped_count?: number;
   last_run_at: string | null;
   status_summary: string | null;
   error_message: string | null;

@@ -1,3 +1,4 @@
+import math
 from datetime import datetime
 from typing import Any, Literal
 
@@ -281,7 +282,7 @@ class CollectionTaskBase(BaseModel):
     input_urls: list[str] = Field(default_factory=list)
     country: str | None = Field(default=None, max_length=100)
     category: str | None = Field(default=None, max_length=100)
-    discovery_limit: int | None = Field(default=100, ge=1, le=500)
+    discovery_limit: int | None = Field(default=100, ge=1)
     min_engagement_rate: float | None = Field(default=None, ge=0, le=100)
     min_followers_count: int | None = Field(default=HIGH_VALUE_FIRST_MIN_FOLLOWERS, ge=0)
     max_followers_count: int | None = Field(default=None, ge=0)
@@ -351,9 +352,9 @@ class CollectionTaskBase(BaseModel):
 class CollectionTaskCreate(BaseModel):
     stable_collection_mode: bool = False
     batch_round_enabled: bool = False
-    batch_total_limit: int | None = Field(default=None, ge=1, le=500)
+    batch_total_limit: int | None = Field(default=None, ge=1, le=100000)
     batch_round_size: int | None = Field(default=None, ge=1, le=500)
-    batch_round_count: int | None = Field(default=None, ge=1, le=20)
+    batch_round_count: int | None = Field(default=None, ge=1, le=1000)
     name: str = Field(..., max_length=255)
     collection_mode: CollectionMode = CollectionMode.KEYWORD
     platform: str = Field(default="instagram", max_length=50)
@@ -523,11 +524,10 @@ class CollectionTaskCreate(BaseModel):
         if self.batch_round_enabled:
             if self.batch_round_size is None:
                 raise ValueError("多轮采集需要填写每轮数量")
-            if self.batch_round_count is None:
-                raise ValueError("多轮采集需要填写轮数")
             total = self.batch_total_limit or self.discovery_limit or (
-                self.batch_round_size * self.batch_round_count
+                self.batch_round_size * (self.batch_round_count or 1)
             )
+            self.batch_round_count = math.ceil(total / self.batch_round_size)
             if self.batch_round_size * self.batch_round_count < total:
                 raise ValueError("每轮数量 × 轮数不能小于总目标数量")
             self.batch_total_limit = total
@@ -540,6 +540,10 @@ class CollectionTaskCreate(BaseModel):
 
 
 class CollectionTaskUpdate(BaseModel):
+    batch_round_enabled: bool | None = None
+    batch_total_limit: int | None = Field(default=None, ge=1, le=100000)
+    batch_round_size: int | None = Field(default=None, ge=1, le=500)
+    batch_round_count: int | None = Field(default=None, ge=1, le=1000)
     name: str | None = Field(default=None, max_length=255)
     collection_mode: CollectionMode | None = None
     platform: str | None = Field(default=None, max_length=50)
@@ -618,6 +622,14 @@ class CollectionTaskUpdate(BaseModel):
             and self.min_followers_count > self.max_followers_count
         ):
             raise ValueError("最低粉丝数不能大于最高粉丝数")
+        if self.batch_round_enabled:
+            total = self.batch_total_limit or self.discovery_limit
+            if self.batch_round_size is None:
+                raise ValueError("batch_round_size is required when batch rounds are enabled")
+            if total is not None:
+                self.batch_round_count = math.ceil(total / self.batch_round_size)
+                self.batch_total_limit = total
+                self.discovery_limit = total
         for field_name in ("filter_include_keywords", "filter_exclude_keywords"):
             value = getattr(self, field_name)
             if value is not None:

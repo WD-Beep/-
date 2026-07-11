@@ -5,6 +5,7 @@ import type { CollectionTask, PlatformCapability } from "../src/lib/api.ts";
 import { formatLinkImportPlatformHints, parseLinkImportPreview } from "../src/lib/collection-sources.ts";
 import {
   applyStableCollectionMode,
+  calculateBatchRoundCount,
   applyDiscoverySource,
   applyFormTemplate,
   createEmptyTaskForm,
@@ -448,6 +449,92 @@ test("batch round collection submits batch payload fields", () => {
   assert.equal(payload.batch_total_limit, 200);
   assert.equal(payload.batch_round_size, 50);
   assert.equal(payload.batch_round_count, 4);
+});
+
+test("batch round count is calculated from total and round size", () => {
+  const form = keywordForm({
+    name: "large batch",
+    keywordsText: "makeup bag",
+    discovery_limit: "50",
+    batch_round_enabled: true,
+    batch_total_limit: "10000",
+    batch_round_size: "500",
+    batch_round_count: "1",
+  });
+  const payload = formValuesToPayload(form, noopCaps);
+
+  assert.equal(calculateBatchRoundCount(form), 20);
+  assert.equal(validateForm(form, noopCaps), null);
+  assert.equal(payload.batch_round_enabled, true);
+  assert.equal(payload.batch_total_limit, 10000);
+  assert.equal(payload.batch_round_size, 500);
+  assert.equal(payload.batch_round_count, 20);
+});
+
+test("editing batch parent initializes and submits calculated batch fields", () => {
+  const form = getInitialForm(
+    true,
+    collectionTask({
+      parent_task_id: null,
+      batch_round_count: 3,
+      discovery_limit: 120,
+      child_tasks: [
+        {
+          id: 11,
+          name: "round 1",
+          status: "draft",
+          batch_round_index: 1,
+          batch_round_count: 3,
+          discovery_limit: 50,
+          keywords: ["home decor"],
+          result_count: 0,
+          inserted_count: 0,
+          deduped_count: 0,
+          failed_count: 0,
+          skipped_count: 0,
+          last_run_at: null,
+          status_summary: null,
+          error_message: null,
+        },
+      ],
+    }),
+    "keyword_discovery",
+  );
+  const payload = formValuesToPayload(
+    {
+      ...form,
+      batch_round_count: "1",
+    },
+    noopCaps,
+  );
+
+  assert.equal(form.batch_round_enabled, true);
+  assert.equal(form.batch_total_limit, "120");
+  assert.equal(form.batch_round_size, "50");
+  assert.equal(calculateBatchRoundCount(form), 3);
+  assert.equal(payload.batch_round_enabled, true);
+  assert.equal(payload.batch_total_limit, 120);
+  assert.equal(payload.batch_round_size, 50);
+  assert.equal(payload.batch_round_count, 3);
+});
+
+test("single round collection omits batch payload fields", () => {
+  const payload = formValuesToPayload(
+    keywordForm({
+      name: "single run",
+      keywordsText: "makeup bag",
+      batch_round_enabled: false,
+      batch_total_limit: "10000",
+      batch_round_size: "500",
+      batch_round_count: "20",
+    }),
+    noopCaps,
+  );
+
+  assert.equal("batch_round_enabled" in payload, false);
+  assert.equal("batch_total_limit" in payload, false);
+  assert.equal("batch_round_size" in payload, false);
+  assert.equal("batch_round_count" in payload, false);
 });
 
 test("created batch task message reports generated round count", () => {

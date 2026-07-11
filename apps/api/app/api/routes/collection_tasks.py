@@ -60,6 +60,27 @@ router = APIRouter(prefix="/collection-tasks", tags=["collection-tasks"])
 logger = logging.getLogger(__name__)
 
 
+async def _start_next_batch_child(
+    parent: CollectionTask,
+    background_tasks: BackgroundTasks | None,
+    db: AsyncSession,
+) -> CollectionTaskStatus | None:
+    child = await CollectionTaskService.next_batch_child_to_run(db, parent.id)
+    if child is None:
+        await CollectionTaskService.refresh_batch_parent_state(db, parent)
+        return None
+    stale_running = CollectionTaskService.is_running_stale(child)
+    resume = child.status == CollectionTaskStatus.RUNNING.value and stale_running
+    result_status = await CollectionQueueService.queue_or_start(db, child, resume=resume)
+    await CollectionTaskService.refresh_batch_parent_state(db, parent)
+    if result_status == CollectionTaskStatus.RUNNING:
+        if background_tasks is not None:
+            background_tasks.add_task(_run_collection_task_in_background, child.id, resume=resume)
+        else:
+            await CollectionQueueService.start_background(child.id, resume=resume)
+    return result_status
+
+
 def _run_result_snapshot(task, *, message: str | None = None) -> CollectionRunResult:
     return CollectionRunResult(
         task_id=task.id,
@@ -104,6 +125,13 @@ async def _run_collection_task_in_background(task_id: int, *, resume: bool = Fal
         except Exception as exc:
             logger.exception("Background collection task %s failed: %s", task_id, exc)
         finally:
+            if task.parent_task_id:
+                parent = await CollectionTaskService.get_task(bg_db, task.parent_task_id)
+                if parent:
+                    try:
+                        await _start_next_batch_child(parent, None, bg_db)
+                    except Exception as exc:
+                        logger.exception("Failed to continue batch parent %s after child %s: %s", parent.id, task_id, exc)
             await CollectionQueueService.dispatch_queued_tasks()
 
 
@@ -261,7 +289,10 @@ async def update_collection_task(
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> CollectionTaskRead:
     task = ensure_task_access(await CollectionTaskService.get_task(db, task_id), ctx)
-    updated = await CollectionTaskService.update_task(db, task, data)
+    try:
+        updated = await CollectionTaskService.update_task(db, task, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     await refresh_scheduler()
     return CollectionTaskService.task_read(updated)
 
@@ -604,8 +635,14 @@ async def bulk_run_collection_tasks(
             continue
         ensure_task_access(task, ctx)
         if CollectionTaskService._is_batch_parent(task):
-            skipped_ids.append(task_id)
-            skipped_reasons[str(task_id)] = "parent_batch_task"
+            result_status = await _start_next_batch_child(task, background_tasks, db)
+            if result_status == CollectionTaskStatus.RUNNING:
+                started_ids.append(task_id)
+            elif result_status == CollectionTaskStatus.QUEUED:
+                queued_ids.append(task_id)
+            else:
+                skipped_ids.append(task_id)
+                skipped_reasons[str(task_id)] = "batch_completed"
             continue
         stale_running = CollectionTaskService.is_running_stale(task)
         if task.status == CollectionTaskStatus.RUNNING.value and not stale_running:
@@ -681,7 +718,12 @@ async def run_collection_task(
 ) -> CollectionRunResult:
     task = ensure_task_access(await CollectionTaskService.get_task(db, task_id), ctx)
     if CollectionTaskService._is_batch_parent(task):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="parent_batch_task")
+        result_status = await _start_next_batch_child(task, background_tasks, db)
+        await db.refresh(task)
+        message = task.status_summary or "多轮采集已启动"
+        if result_status is None:
+            message = task.status_summary or "多轮采集已完成"
+        return _run_result_snapshot(task, message=message)
 
     stale_running = CollectionTaskService.is_running_stale(task)
     if task.status == CollectionTaskStatus.RUNNING.value and not stale_running:
