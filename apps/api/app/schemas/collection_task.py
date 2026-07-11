@@ -266,6 +266,10 @@ def validate_platform_field(value: str | None) -> str:
 
 
 class CollectionTaskBase(BaseModel):
+    parent_task_id: int | None = None
+    batch_group_id: str | None = None
+    batch_round_index: int | None = Field(default=None, ge=1)
+    batch_round_count: int | None = Field(default=None, ge=1)
     user_id: int | None = None
     workspace_id: int | None = None
     product_id: int | None = None
@@ -346,6 +350,10 @@ class CollectionTaskBase(BaseModel):
 
 class CollectionTaskCreate(BaseModel):
     stable_collection_mode: bool = False
+    batch_round_enabled: bool = False
+    batch_total_limit: int | None = Field(default=None, ge=1, le=500)
+    batch_round_size: int | None = Field(default=None, ge=1, le=500)
+    batch_round_count: int | None = Field(default=None, ge=1, le=20)
     name: str = Field(..., max_length=255)
     collection_mode: CollectionMode = CollectionMode.KEYWORD
     platform: str = Field(default="instagram", max_length=50)
@@ -512,6 +520,18 @@ class CollectionTaskCreate(BaseModel):
             and self.min_followers_count > self.max_followers_count
         ):
             raise ValueError("最低粉丝数不能大于最高粉丝数")
+        if self.batch_round_enabled:
+            if self.batch_round_size is None:
+                raise ValueError("多轮采集需要填写每轮数量")
+            if self.batch_round_count is None:
+                raise ValueError("多轮采集需要填写轮数")
+            total = self.batch_total_limit or self.discovery_limit or (
+                self.batch_round_size * self.batch_round_count
+            )
+            if self.batch_round_size * self.batch_round_count < total:
+                raise ValueError("每轮数量 × 轮数不能小于总目标数量")
+            self.batch_total_limit = total
+            self.discovery_limit = total
         self.filter_include_keywords = [k.strip() for k in self.filter_include_keywords if k and k.strip()]
         self.filter_exclude_keywords = [k.strip() for k in self.filter_exclude_keywords if k and k.strip()]
         validate_seed_only_discovery_mode(self.collection_mode, self.platform, self.platforms)
@@ -645,6 +665,7 @@ class CollectionTaskRead(CollectionTaskBase, TimestampMixin, ORMModel):
     has_retention_traces: bool = False
     management_tags: list[str] = Field(default_factory=list)
     is_possible_duplicate: bool = False
+    child_tasks: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CollectionTaskFilter(BaseModel):

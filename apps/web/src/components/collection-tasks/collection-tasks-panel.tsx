@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Loader2, List, Mail, Pencil, Play, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { ChevronDown, Loader2, List, Mail, Pencil, Play, Plus, RefreshCw, Trash2, X } from "lucide-react";
 
 import { AdminShell } from "@/components/layout/admin-shell";
 import { useActiveProductId } from "@/components/providers/product-provider";
@@ -45,6 +45,7 @@ import {
   isCollectionTaskRunningStale,
   isCollectionTaskSettled,
   runCollectionTask,
+  runCollectionTaskBatch,
   runLinkImportBatch,
   sendCollectionTaskEmail,
   updateCollectionTask,
@@ -84,6 +85,7 @@ import {
 import {
   canCreateCollectionTaskForProduct,
   collectionTaskCreateDisabledReason,
+  getCreatedCollectionTaskMessage,
 } from "@/lib/task-form-payload";
 
 function formatDate(value: string | null): string {
@@ -351,6 +353,7 @@ export function CollectionTasksPanel() {
   const [maxRunningTasks, setMaxRunningTasks] = useState(2);
   const [staleAfterSeconds, setStaleAfterSeconds] = useState(180);
   const [bulkRunSubmitting, setBulkRunSubmitting] = useState(false);
+  const [expandedBatchIds, setExpandedBatchIds] = useState<number[]>([]);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const prevStatusRef = useRef<Map<number, CollectionTaskStatus>>(new Map());
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -550,8 +553,9 @@ export function CollectionTasksPanel() {
         if (!canCreateCollectionTaskForProduct(productId)) {
           throw new Error(createDisabledReason ?? "请先选择具体产品/品牌");
         }
-        await createCollectionTask(payload);
+        const created = await createCollectionTask(payload);
         setMessage("任务创建成功");
+        setMessage(getCreatedCollectionTaskMessage(created));
       } else if (editingTask) {
         await updateCollectionTask(editingTask.id, payload);
         setMessage("任务更新成功");
@@ -629,6 +633,27 @@ export function CollectionTasksPanel() {
       showToast({ tone: "error", message: errMsg });
       setError(errMsg);
       await loadTasks({ silent: true });
+    } finally {
+      setActionTaskId(null);
+    }
+  }
+
+  async function handleRunBatch(task: CollectionTask, failedOnly = false) {
+    setActionTaskId(task.id);
+    setMessage(null);
+    setError(null);
+    try {
+      const result = await runCollectionTaskBatch(task.id, { failedOnly });
+      setMessage(result.message);
+      showToast({
+        tone: result.started_ids.length > 0 ? "info" : "warning",
+        message: result.message,
+      });
+      await loadTasks({ silent: true });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : "批次运行失败";
+      showToast({ tone: "error", message: errMsg });
+      setError(errMsg);
     } finally {
       setActionTaskId(null);
     }
@@ -1235,9 +1260,16 @@ export function CollectionTasksPanel() {
                     const showModeBadge =
                       taskModeBadgeLabel(mode) !== taskSourceLabelForMode(mode);
                     const managementTags = taskManagementTags(task);
+                    const batchChildren = task.child_tasks ?? [];
+                    const isBatchParent = !task.parent_task_id && (task.batch_round_count ?? 0) > 1;
+                    const batchExpanded = expandedBatchIds.includes(task.id);
+                    const failedBatchChildren = batchChildren.filter((child) =>
+                      child.status === "failed" || child.status === "partial_failed"
+                    );
 
                     return (
-                      <tr key={task.id} className="group border-b align-middle last:border-0 hover:bg-muted/20">
+                      <Fragment key={task.id}>
+                      <tr className="group border-b align-middle last:border-0 hover:bg-muted/20">
                         <td className="px-2 py-3">
                           <input
                             type="checkbox"
@@ -1251,6 +1283,22 @@ export function CollectionTasksPanel() {
                           <div className="line-clamp-2 font-medium leading-snug" title={task.name}>
                             {task.name}
                           </div>
+                          {isBatchParent ? (
+                            <button
+                              type="button"
+                              className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                              onClick={() =>
+                                setExpandedBatchIds((prev) =>
+                                  prev.includes(task.id)
+                                    ? prev.filter((id) => id !== task.id)
+                                    : [...prev, task.id],
+                                )
+                              }
+                            >
+                              <ChevronDown className={`h-3.5 w-3.5 transition-transform ${batchExpanded ? "rotate-180" : ""}`} />
+                              {batchExpanded ? "收起轮次" : `展开 ${batchChildren.length || task.batch_round_count} 个轮次`}
+                            </button>
+                          ) : null}
                           <div className="mt-1 truncate text-xs text-muted-foreground">
                             {formatTargetLabel(task)}
                             {" · 互动率 ≥"}
@@ -1367,11 +1415,35 @@ export function CollectionTasksPanel() {
                             >
                               <List className="h-4 w-4" />
                             </Button>
+                            {isBatchParent ? (
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className={COLLECTION_TASK_TABLE_LAYOUT.actionButton}
+                                  disabled={isBusy || batchChildren.length === 0}
+                                  onClick={() => void handleRunBatch(task)}
+                                  title="运行全部轮次"
+                                >
+                                  {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className={COLLECTION_TASK_TABLE_LAYOUT.actionButton}
+                                  disabled={isBusy || failedBatchChildren.length === 0}
+                                  onClick={() => void handleRunBatch(task, true)}
+                                  title="只运行失败轮次"
+                                >
+                                  <RefreshCw className="h-4 w-4" />
+                                </Button>
+                              </>
+                            ) : null}
                             <Button
                               size="sm"
                               variant="ghost"
                               className={COLLECTION_TASK_TABLE_LAYOUT.actionButton}
-                              disabled={isBusy || runBlocked}
+                              disabled={isBusy || runBlocked || isBatchParent}
                               onClick={() => handleRun(task)}
                               title={
                                 isStaleRunning
@@ -1424,6 +1496,60 @@ export function CollectionTasksPanel() {
                           </div>
                         </td>
                       </tr>
+                      {isBatchParent && batchExpanded
+                        ? batchChildren.map((child) => {
+                            const childStatus = statusMeta(child.status);
+                            return (
+                              <tr key={`child-${child.id}`} className="border-b bg-muted/10 text-sm">
+                                <td className="px-2 py-2" />
+                                <td className="px-4 py-2 pl-8">
+                                  <div className="font-medium">{child.name}</div>
+                                  <div className="mt-1 text-xs text-muted-foreground">
+                                    第 {child.batch_round_index ?? "-"} / {child.batch_round_count ?? task.batch_round_count} 轮
+                                  </div>
+                                </td>
+                                <td className="px-4 py-2">
+                                  <Badge variant="outline" className="w-fit text-xs">子任务</Badge>
+                                </td>
+                                <td className="max-w-[160px] px-4 py-2">
+                                  <p className="line-clamp-2" title={(child.keywords ?? []).join(", ")}>
+                                    {(child.keywords ?? []).join(", ") || "-"}
+                                  </p>
+                                </td>
+                                <td className={COLLECTION_TASK_TABLE_LAYOUT.statusCell}>
+                                  <Badge variant={childStatus.variant} className={COLLECTION_TASK_TABLE_LAYOUT.statusBadge}>
+                                    {childStatus.label}
+                                  </Badge>
+                                </td>
+                                <td className="px-4 py-2 text-muted-foreground">
+                                  已入库 {child.inserted_count ?? 0} / 目标 {child.discovery_limit ?? "-"}
+                                  {child.deduped_count ? ` · 去重 ${child.deduped_count}` : ""}
+                                </td>
+                                <td className="whitespace-nowrap px-4 py-2 text-muted-foreground">
+                                  {formatDate(child.last_run_at)}
+                                </td>
+                                <td className={COLLECTION_TASK_TABLE_LAYOUT.actionsCell}>
+                                  <div className={COLLECTION_TASK_TABLE_LAYOUT.actionsGroup}>
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      className={COLLECTION_TASK_TABLE_LAYOUT.actionButton}
+                                      disabled={actionTaskId === child.id || child.status === "running"}
+                                      onClick={() => {
+                                        const childTask = { ...task, ...child, parent_task_id: task.id } as CollectionTask;
+                                        void handleRun(childTask);
+                                      }}
+                                      title="运行本轮"
+                                    >
+                                      {actionTaskId === child.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                                    </Button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })
+                        : null}
+                      </Fragment>
                     );
                   })}
                 </tbody>

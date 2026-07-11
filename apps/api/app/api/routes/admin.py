@@ -115,10 +115,18 @@ async def _last_active_at(db: AsyncSession, user: User, product_ids: list[int]) 
 
 
 async def _user_summary(db: AsyncSession, user: User) -> dict[str, Any]:
+    today = _today_start()
     product_ids = await _product_ids_for_user(db, user.id)
     bound_products = await _bound_products(db, user.id)
     collection_task_count = await _count(
         db, select(func.count(CollectionTask.id)).where(CollectionTask.user_id == user.id)
+    )
+    today_collection_task_count = await _count(
+        db,
+        select(func.count(CollectionTask.id)).where(
+            CollectionTask.user_id == user.id,
+            CollectionTask.created_at >= today,
+        ),
     )
     collection_success_count = await _count(
         db,
@@ -135,11 +143,19 @@ async def _user_summary(db: AsyncSession, user: User) -> dict[str, Any]:
         ),
     )
     influencer_count = 0
+    today_influencer_count = 0
     if product_ids:
         influencer_count = await _count(
             db,
             select(func.count(ProductInfluencer.id)).where(
                 ProductInfluencer.product_id.in_(product_ids)
+            ),
+        )
+        today_influencer_count = await _count(
+            db,
+            select(func.count(ProductInfluencer.id)).where(
+                ProductInfluencer.product_id.in_(product_ids),
+                ProductInfluencer.created_at >= today,
             ),
         )
     email_count = await _count(db, select(func.count(EmailLog.id)).where(EmailLog.user_id == user.id))
@@ -167,9 +183,11 @@ async def _user_summary(db: AsyncSession, user: User) -> dict[str, Any]:
         "product_count": len(product_ids),
         "bound_products": bound_products,
         "collection_task_count": collection_task_count,
+        "today_collection_task_count": today_collection_task_count,
         "collection_success_count": collection_success_count,
         "collection_failed_count": collection_failed_count,
         "influencer_count": influencer_count,
+        "today_influencer_count": today_influencer_count,
         "email_count": email_count,
         "email_failed_count": email_failed_count,
         "reply_count": reply_count,

@@ -2,9 +2,14 @@ import re
 import uuid
 
 from fastapi import HTTPException, status
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.collection_task import CollectionTask
+from app.models.collection_task_candidate import CollectionTaskCandidate
+from app.models.email_log import EmailLog
+from app.models.link_knowledge_base import LinkKnowledgeBase, LinkScriptJob
+from app.models.outreach_send_queue import OutreachSendQueueItem
 from app.models.tenant import Product, ProductMember, User, WorkspaceMember
 from app.schemas.tenant import ProductCreate, ProductRead, ProductUpdate, UserRead
 from app.services.product_visibility import infer_test_flags, is_product_visible
@@ -155,7 +160,8 @@ class TenantService:
         )
         db.add(row)
         if not is_admin:
-            db.add(ProductMember(user_id=user_id, product=row, role="owner"))
+            await db.flush()
+            db.add(ProductMember(user_id=user_id, product_id=row.id, role="owner"))
         await db.commit()
         await db.refresh(row)
         return ProductRead.model_validate(row)
@@ -230,5 +236,16 @@ class TenantService:
             if membership.scalar_one_or_none() is None:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this product")
 
+        await db.execute(
+            delete(OutreachSendQueueItem).where(OutreachSendQueueItem.product_id == product.id)
+        )
+        await db.execute(delete(EmailLog).where(EmailLog.product_id == product.id))
+        await db.execute(delete(LinkScriptJob).where(LinkScriptJob.product_id == product.id))
+        await db.execute(delete(LinkKnowledgeBase).where(LinkKnowledgeBase.product_id == product.id))
+        await db.execute(
+            delete(CollectionTaskCandidate).where(CollectionTaskCandidate.product_id == product.id)
+        )
+        await db.execute(delete(CollectionTask).where(CollectionTask.product_id == product.id))
+        await db.execute(delete(ProductMember).where(ProductMember.product_id == product.id))
         await db.delete(product)
         await db.commit()

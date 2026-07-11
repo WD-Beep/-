@@ -695,6 +695,7 @@ export function TaskFormDialog({
               ) : null}
 
               {!isLinkImport ? (
+                <div className="space-y-3">
                 <div className="space-y-2 sm:max-w-xs">
                   <Label htmlFor="discovery_limit">采集数量上限</Label>
                   <Input
@@ -705,6 +706,70 @@ export function TaskFormDialog({
                     value={form.discovery_limit}
                     onChange={(e) => setForm({ ...form, discovery_limit: e.target.value })}
                   />
+                </div>
+                {mode === "create" ? (
+                  <div className="space-y-3 rounded-md border bg-muted/20 px-3 py-3">
+                    <label className="flex items-start gap-3 text-sm">
+                      <input
+                        type="checkbox"
+                        className="mt-1"
+                        checked={form.batch_round_enabled}
+                        onChange={(e) =>
+                          setForm((prev) => ({
+                            ...prev,
+                            batch_round_enabled: e.target.checked,
+                            batch_total_limit: e.target.checked
+                              ? prev.batch_total_limit || String(Number(prev.batch_round_size || 50) * Number(prev.batch_round_count || 3))
+                              : prev.batch_total_limit,
+                          }))
+                        }
+                      />
+                      <span>
+                        <span className="font-medium">启用多轮采集</span>
+                        <span className="mt-0.5 block text-xs text-muted-foreground">
+                          系统会自动拆成多个轮次，创建后可一键排队运行。
+                        </span>
+                      </span>
+                    </label>
+                    {form.batch_round_enabled ? (
+                      <div className="grid gap-3 sm:grid-cols-3">
+                        <div className="space-y-1.5">
+                          <Label htmlFor="batch_total_limit">总目标数量</Label>
+                          <Input
+                            id="batch_total_limit"
+                            type="number"
+                            min={1}
+                            max={500}
+                            value={form.batch_total_limit}
+                            onChange={(e) => setForm({ ...form, batch_total_limit: e.target.value })}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="batch_round_size">每轮数量</Label>
+                          <Input
+                            id="batch_round_size"
+                            type="number"
+                            min={1}
+                            max={500}
+                            value={form.batch_round_size}
+                            onChange={(e) => setForm({ ...form, batch_round_size: e.target.value })}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="batch_round_count">轮数</Label>
+                          <Input
+                            id="batch_round_count"
+                            type="number"
+                            min={1}
+                            max={20}
+                            value={form.batch_round_count}
+                            onChange={(e) => setForm({ ...form, batch_round_count: e.target.value })}
+                          />
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
                 </div>
               ) : null}
             </section>

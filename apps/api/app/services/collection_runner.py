@@ -305,6 +305,34 @@ class CollectionRunnerService:
         return None
 
     @staticmethod
+    def _keyword_no_result_summary(task: CollectionTask, funnel: CollectionFunnelStats) -> str | None:
+        mode = (task.collection_mode or "").lower()
+        if mode not in {"keyword", "discovery", "category_discovery", "mixed"}:
+            return None
+        if (funnel.discovered_count or 0) > 0 or (funnel.inserted_count or 0) > 0:
+            return None
+        checkpoint = task.run_checkpoint if isinstance(task.run_checkpoint, dict) else {}
+        expansion = checkpoint.get("keyword_expansion")
+        if not isinstance(expansion, dict):
+            return None
+        attempted = expansion.get("attempted_keywords")
+        if not isinstance(attempted, list):
+            return None
+        terms = [str(item).strip() for item in attempted if str(item).strip()]
+        if not terms:
+            return None
+        count = expansion.get("expanded_keyword_count")
+        if not isinstance(count, int) or count <= 0:
+            count = len(terms)
+        preview = "、".join(terms[:8])
+        if len(terms) > 8:
+            preview = f"{preview}..."
+        return (
+            f"任务完成，但未发现候选账号。系统已尝试 {count} 个发现词：{preview}；"
+            "建议降低粉丝门槛或改用链接导入/竞品发现。"
+        )
+
+    @staticmethod
     def _build_candidate_rows(
         task: CollectionTask,
         pipeline_result: InstagramPipelineResult,
@@ -1864,6 +1892,13 @@ class CollectionRunnerService:
                 filtered_excluded=funnel.filtered_excluded_keyword_count,
                 filtered_out=funnel.filtered_out_count,
             )
+            keyword_no_result_summary = (
+                CollectionRunnerService._keyword_no_result_summary(task, funnel)
+                if instagram_only
+                else None
+            )
+            if keyword_no_result_summary:
+                task.status_summary = keyword_no_result_summary
             if competitor_timed_out and task.status_summary:
                 task.status_summary = (
                     f"{task.status_summary}。已达到任务最大耗时，部分平台/API 响应慢，已结束本轮采集"

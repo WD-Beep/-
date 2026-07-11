@@ -52,9 +52,6 @@ def looks_like_test_product(*, name: str, slug: str, brand: str | None = None) -
         if keyword.lower() in combined:
             return True
 
-    if _HASH_SUFFIX_RE.search(name) or _HASH_SUFFIX_RE.search(slug):
-        return True
-
     if slug.startswith(("test-product", "dup-slug-")) or slug.startswith(_TEST_PREFIXES):
         return True
 

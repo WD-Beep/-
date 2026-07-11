@@ -46,7 +46,7 @@ async def discover_candidates_from_keywords(
     task: CollectionTask,
     *,
     limit: int = 100,
-    max_hashtags: int = 12,
+    max_hashtags: int = 15,
     max_posts_for_comments: int = 8,
     include_comments: bool = True,
     checkpoint: RunCheckpoint | None = None,
@@ -63,6 +63,12 @@ async def discover_candidates_from_keywords(
     hashtags = expand_keywords_to_hashtags(keywords, max_hashtags=max_hashtags)
     if not hashtags:
         return KeywordDiscoveryResult(errors=["未能从关键词生成有效 hashtag"])
+
+    checkpoint.extra["keyword_expansion"] = {
+        "original_keyword_count": len(keywords),
+        "expanded_keyword_count": len(hashtags),
+        "attempted_keywords": list(hashtags),
+    }
 
     pending_tags = [tag for tag in hashtags if not checkpoint.hashtag_done(tag)]
     if db is not None:

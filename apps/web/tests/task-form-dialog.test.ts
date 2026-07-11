@@ -10,6 +10,7 @@ import {
   createEmptyTaskForm,
   extractFormTemplate,
   formValuesToPayload,
+  getCreatedCollectionTaskMessage,
   getInitialForm,
   getMultiPlatformAutoPlatforms,
   isKeywordPlatformSelectable,
@@ -418,6 +419,42 @@ test("stable collection mode relaxes filters and submits one conservative platfo
   assert.equal(payload.insert_qualified_only, false);
   assert.equal(payload.platform, "youtube");
   assert.deepEqual(payload.platforms, ["youtube"]);
+});
+
+test("new keyword task defaults to disabled batch rounds with suggested round values", () => {
+  const form = getInitialForm(true, null, "keyword_discovery");
+
+  assert.equal(form.batch_round_enabled, false);
+  assert.equal(form.batch_total_limit, "");
+  assert.equal(form.batch_round_size, "50");
+  assert.equal(form.batch_round_count, "3");
+});
+
+test("batch round collection submits batch payload fields", () => {
+  const payload = formValuesToPayload(
+    keywordForm({
+      name: "EPEDAL24-化妆包",
+      keywordsText: "makeup bag\ncosmetic bag",
+      discovery_limit: "50",
+      batch_round_enabled: true,
+      batch_total_limit: "200",
+      batch_round_size: "50",
+      batch_round_count: "4",
+    }),
+    noopCaps,
+  );
+
+  assert.equal(payload.batch_round_enabled, true);
+  assert.equal(payload.batch_total_limit, 200);
+  assert.equal(payload.batch_round_size, 50);
+  assert.equal(payload.batch_round_count, 4);
+});
+
+test("created batch task message reports generated round count", () => {
+  assert.equal(
+    getCreatedCollectionTaskMessage({ batch_round_count: 4, parent_task_id: null }),
+    "批次任务创建成功，已生成 4 个轮次",
+  );
 });
 
 test("switching back to keyword collection keeps candidate-first defaults", () => {

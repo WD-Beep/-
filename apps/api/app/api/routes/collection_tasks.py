@@ -603,6 +603,10 @@ async def bulk_run_collection_tasks(
             skipped_reasons[str(task_id)] = "not_found"
             continue
         ensure_task_access(task, ctx)
+        if CollectionTaskService._is_batch_parent(task):
+            skipped_ids.append(task_id)
+            skipped_reasons[str(task_id)] = "parent_batch_task"
+            continue
         stale_running = CollectionTaskService.is_running_stale(task)
         if task.status == CollectionTaskStatus.RUNNING.value and not stale_running:
             skipped_ids.append(task_id)
@@ -640,6 +644,34 @@ async def bulk_run_collection_tasks(
     )
 
 
+@router.post("/{task_id}/run-batch", response_model=CollectionTaskBulkRunResult)
+async def run_collection_task_batch(
+    task_id: int,
+    background_tasks: BackgroundTasks,
+    failed_only: bool = Query(default=False),
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> CollectionTaskBulkRunResult:
+    parent = ensure_task_access(await CollectionTaskService.get_task(db, task_id), ctx)
+    if not CollectionTaskService._is_batch_parent(parent):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="not_batch_parent_task")
+    children = await CollectionTaskService.get_batch_children(db, parent.id)
+    if failed_only:
+        failed_statuses = {
+            CollectionTaskStatus.FAILED.value,
+            CollectionTaskStatus.PARTIAL_FAILED.value,
+        }
+        children = [child for child in children if child.status in failed_statuses]
+    if not children:
+        return CollectionTaskBulkRunResult(
+            capacity=CollectionRunnerService.collection_run_capacity(),
+            active_count=CollectionRunnerService.active_collection_run_count(),
+            message="没有可运行的批次轮次",
+        )
+    payload = CollectionTaskBulkRun(task_ids=[child.id for child in children])
+    return await bulk_run_collection_tasks(payload, background_tasks, db, ctx)
+
+
 @router.post("/{task_id}/run", response_model=CollectionRunResult)
 async def run_collection_task(
     task_id: int,
@@ -648,6 +680,8 @@ async def run_collection_task(
     ctx: TenantContext = Depends(get_tenant_context),
 ) -> CollectionRunResult:
     task = ensure_task_access(await CollectionTaskService.get_task(db, task_id), ctx)
+    if CollectionTaskService._is_batch_parent(task):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="parent_batch_task")
 
     stale_running = CollectionTaskService.is_running_stale(task)
     if task.status == CollectionTaskStatus.RUNNING.value and not stale_running:

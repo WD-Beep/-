@@ -1,10 +1,10 @@
-"""将任务关键词扩展为 hashtag 列表（用于真实 API 发现）。"""
+"""Runtime keyword expansion for Instagram discovery."""
 
 from __future__ import annotations
 
 import re
 
-# 常见 travel / lifestyle 等后缀，可按种子词组合
+# Common travel / lifestyle suffixes kept for one-word seeds.
 _HASHTAG_SUFFIXES = (
     "",
     "gram",
@@ -33,7 +33,6 @@ _HASHTAG_SUFFIXES = (
     "deals",
 )
 
-# 领域修饰词（与种子词组合）
 _DOMAIN_PREFIXES = (
     "luxury",
     "solo",
@@ -47,11 +46,42 @@ _DOMAIN_PREFIXES = (
     "amazon",
 )
 
+_PRODUCT_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "makeup bag": ("cosmetic bag", "toiletry bag", "makeup pouch", "cosmetic pouch"),
+    "cosmetic bag": ("makeup bag", "toiletry bag", "cosmetic pouch"),
+    "toiletry bag": ("travel toiletry bag", "toiletry pouch"),
+    "makeup organizer": ("cosmetic organizer", "makeup storage"),
+    "travel essentials": ("packing tips", "carry on essentials"),
+}
 
-def _normalize_seed(keyword: str) -> str:
-    text = keyword.strip().lower().lstrip("#")
+
+def _normalize_phrase(keyword: str) -> str:
+    text = str(keyword or "").strip().lower().lstrip("#")
+    text = re.sub(r"[^a-z0-9_#\s-]+", " ", text)
+    text = re.sub(r"[\s_-]+", " ", text)
+    return text.strip()
+
+
+def _normalize_hashtag(keyword: str) -> str:
+    text = str(keyword or "").strip().lower().lstrip("#")
     text = re.sub(r"[^a-z0-9_]+", "", text)
     return text
+
+
+def _words(phrase: str) -> list[str]:
+    return [word for word in phrase.split() if word]
+
+
+def _adjacent_phrases(words: list[str]) -> list[str]:
+    if len(words) < 2 or len(words) > 4:
+        return []
+    phrases: list[str] = []
+    for size in range(2, len(words)):
+        for start in range(0, len(words) - size + 1):
+            phrases.append(" ".join(words[start : start + size]))
+    if len(words) == 2:
+        phrases.append(" ".join(words))
+    return phrases
 
 
 def expand_keywords_to_hashtags(
@@ -59,32 +89,60 @@ def expand_keywords_to_hashtags(
     *,
     max_hashtags: int = 12,
 ) -> list[str]:
-    """关键词 → hashtag 列表，例如 travel → travel, travelgram, travelblogger…"""
-    seeds: list[str] = []
-    for raw in keywords:
-        seed = _normalize_seed(raw)
-        if seed and len(seed) >= 2 and seed not in seeds:
-            seeds.append(seed)
+    """Expand task keywords into ordered Instagram discovery terms.
 
-    if not seeds:
-        return []
-
+    The function is intentionally runtime-only: callers should use the returned
+    list for discovery without mutating CollectionTask.keywords.
+    """
     expanded: list[str] = []
     seen: set[str] = set()
 
-    def add(tag: str) -> None:
-        clean = _normalize_seed(tag)
-        if not clean or len(clean) < 2 or clean in seen:
+    def add(term: str) -> None:
+        clean = _normalize_phrase(term)
+        if not clean or len(clean.replace(" ", "")) < 2:
+            return
+        key = clean.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        expanded.append(clean)
+
+    def add_hashtag(term: str) -> None:
+        clean = _normalize_hashtag(term)
+        if not clean or len(clean) < 2:
+            return
+        if clean in seen:
             return
         seen.add(clean)
         expanded.append(clean)
 
-    for seed in seeds:
-        add(seed)
-        for suffix in _HASHTAG_SUFFIXES:
-            if suffix:
-                add(f"{seed}{suffix}")
-        for prefix in _DOMAIN_PREFIXES:
-            add(f"{prefix}{seed}")
+    def add_synonyms_for(term: str) -> None:
+        clean = _normalize_phrase(term)
+        for synonym in _PRODUCT_SYNONYMS.get(clean, ()):
+            add(synonym)
 
-    return expanded[:max_hashtags]
+    for raw in keywords:
+        phrase = _normalize_phrase(raw)
+        if not phrase:
+            continue
+        words = _words(phrase)
+
+        add(phrase)
+        if len(words) > 1:
+            add_hashtag(phrase)
+            adjacent = _adjacent_phrases(words)
+            for item in adjacent:
+                add(item)
+            for item in adjacent:
+                add_hashtag(item)
+            add_synonyms_for(phrase)
+            for item in adjacent:
+                add_synonyms_for(item)
+        else:
+            seed = _normalize_hashtag(phrase)
+            for suffix in _HASHTAG_SUFFIXES:
+                add_hashtag(f"{seed}{suffix}")
+            for prefix in _DOMAIN_PREFIXES:
+                add_hashtag(f"{prefix}{seed}")
+
+    return expanded[: max(0, max_hashtags)]

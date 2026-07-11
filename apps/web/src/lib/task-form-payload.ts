@@ -37,6 +37,10 @@ export type TaskFormValues = {
   country: string;
   category: string;
   discovery_limit: string;
+  batch_round_enabled: boolean;
+  batch_total_limit: string;
+  batch_round_size: string;
+  batch_round_count: string;
   min_engagement_rate: string;
   min_followers_count: string;
   max_followers_count: string;
@@ -78,6 +82,10 @@ const emptyForm: TaskFormValues = {
   country: "",
   category: "",
   discovery_limit: "50",
+  batch_round_enabled: false,
+  batch_total_limit: "",
+  batch_round_size: "50",
+  batch_round_count: "3",
   min_engagement_rate: KEYWORD_HIGH_VALUE_DEFAULTS.min_engagement_rate,
   min_followers_count: KEYWORD_HIGH_VALUE_DEFAULTS.min_followers_count,
   max_followers_count: "",
@@ -444,6 +452,23 @@ function validateQualityAndDelivery(values: TaskFormValues): string | null {
   if (!Number.isFinite(discoveryLimit) || discoveryLimit < 1 || discoveryLimit > 500) {
     return "采集数量上限需在 1-500 之间";
   }
+  if (values.batch_round_enabled) {
+    const total = Number(values.batch_total_limit);
+    const roundSize = Number(values.batch_round_size);
+    const roundCount = Number(values.batch_round_count);
+    if (!Number.isFinite(total) || total < 1 || total > 500) {
+      return "多轮采集总目标数量需在 1-500 之间";
+    }
+    if (!Number.isFinite(roundSize) || roundSize < 1 || roundSize > 500) {
+      return "多轮采集每轮数量需在 1-500 之间";
+    }
+    if (!Number.isFinite(roundCount) || roundCount < 1 || roundCount > 20 || !Number.isInteger(roundCount)) {
+      return "多轮采集轮数需为 1-20 的整数";
+    }
+    if (roundSize * roundCount < total) {
+      return "每轮数量 × 轮数不能小于总目标数量";
+    }
+  }
   const minEngagementText = values.min_engagement_rate.trim();
   if (minEngagementText) {
     const minEngagement = Number(minEngagementText);
@@ -643,13 +668,27 @@ function withStablePayloadDefaults(
   };
 }
 
+function withBatchRoundPayload(
+  payload: CollectionTaskPayload,
+  values: TaskFormValues,
+): CollectionTaskPayload {
+  if (!values.batch_round_enabled) return payload;
+  return {
+    ...payload,
+    batch_round_enabled: true,
+    batch_total_limit: Number(values.batch_total_limit),
+    batch_round_size: Number(values.batch_round_size),
+    batch_round_count: Number(values.batch_round_count),
+  };
+}
+
 export function formValuesToPayload(
   values: TaskFormValues,
   platformCapabilities: PlatformCapability[] = [],
 ): CollectionTaskPayload {
   const taskName = values.name.trim() || suggestTaskName(values);
   if (isLinkImportTaskForm(values)) {
-    return withStablePayloadDefaults({
+    return withBatchRoundPayload(withStablePayloadDefaults({
       name: taskName,
       collection_mode: "link_import",
       platform: "instagram",
@@ -669,7 +708,7 @@ export function formValuesToPayload(
       outreach_dry_run: values.outreach_dry_run,
       outreach_templates: formToTemplates(values),
       comment_discovery_enabled: false,
-    }, values);
+    }, values), values);
   }
 
   if (values.collection_mode === "competitor_product") {
@@ -682,7 +721,7 @@ export function formValuesToPayload(
     if (website) input_urls.push(website);
     const platforms = filterKeywordSubmissionPlatforms(values.platforms, platformCapabilities);
     const { platform, platforms: selectedPlatforms } = resolvePlatformFields(platforms);
-    return withStablePayloadDefaults({
+    return withBatchRoundPayload(withStablePayloadDefaults({
       name: taskName,
       collection_mode: values.collection_mode,
       platform,
@@ -702,7 +741,7 @@ export function formValuesToPayload(
       outreach_dry_run: values.outreach_dry_run,
       outreach_templates: formToTemplates(values),
       comment_discovery_enabled: false,
-    }, values);
+    }, values), values);
   }
 
   if (values.collection_mode === "link_seed_discovery") {
@@ -713,7 +752,7 @@ export function formValuesToPayload(
     const resolvedSeedPlatforms =
       seedPlatforms.length > 0 ? seedPlatforms : [...SEED_DISCOVERY_PLATFORMS];
     const { platform, platforms: selectedPlatforms } = resolvePlatformFields(resolvedSeedPlatforms);
-    return withStablePayloadDefaults({
+    return withBatchRoundPayload(withStablePayloadDefaults({
       name: taskName,
       collection_mode: "link_seed_discovery",
       platform,
@@ -733,13 +772,13 @@ export function formValuesToPayload(
       outreach_dry_run: values.outreach_dry_run,
       outreach_templates: formToTemplates(values),
       comment_discovery_enabled: false,
-    }, values);
+    }, values), values);
   }
 
   const platforms = filterKeywordSubmissionPlatforms(values.platforms, platformCapabilities);
   if (isSeedOnlyDiscoverySelection(platforms)) {
     const { platform, platforms: selectedPlatforms } = resolvePlatformFields(platforms);
-    return withStablePayloadDefaults({
+    return withBatchRoundPayload(withStablePayloadDefaults({
       name: taskName,
       collection_mode: "link_seed_discovery",
       platform,
@@ -759,11 +798,11 @@ export function formValuesToPayload(
       outreach_dry_run: values.outreach_dry_run,
       outreach_templates: formToTemplates(values),
       comment_discovery_enabled: false,
-    }, values);
+    }, values), values);
   }
   const { platform, platforms: selectedPlatforms } = resolvePlatformFields(platforms);
 
-  return withStablePayloadDefaults({
+  return withBatchRoundPayload(withStablePayloadDefaults({
     name: taskName,
     collection_mode: values.collection_mode,
     platform,
@@ -783,7 +822,7 @@ export function formValuesToPayload(
     outreach_dry_run: values.outreach_dry_run,
     outreach_templates: formToTemplates(values),
     comment_discovery_enabled: values.comment_discovery_enabled,
-  }, values);
+  }, values), values);
 }
 
 export function taskToFormValues(task: CollectionTask): TaskFormValues {
@@ -838,6 +877,13 @@ export function taskToFormValues(task: CollectionTask): TaskFormValues {
     country: task.country ?? "",
     category: task.category ?? "",
     discovery_limit: String(task.discovery_limit ?? 100),
+    batch_round_enabled: Boolean(task.batch_round_count && !task.parent_task_id),
+    batch_total_limit: task.batch_round_count && !task.parent_task_id ? String(task.discovery_limit ?? "") : "",
+    batch_round_size:
+      task.child_tasks?.[0]?.discovery_limit != null
+        ? String(task.child_tasks[0].discovery_limit)
+        : "50",
+    batch_round_count: task.batch_round_count != null ? String(task.batch_round_count) : "3",
     min_engagement_rate: task.min_engagement_rate != null ? String(task.min_engagement_rate) : "",
     min_followers_count: task.min_followers_count != null ? String(task.min_followers_count) : "",
     max_followers_count: task.max_followers_count != null ? String(task.max_followers_count) : "",
@@ -860,6 +906,15 @@ export function taskToFormValues(task: CollectionTask): TaskFormValues {
     competitorBrandText,
     competitorWebsiteText,
   };
+}
+
+export function getCreatedCollectionTaskMessage(
+  task: Pick<CollectionTask, "batch_round_count" | "parent_task_id">,
+): string {
+  if (task.parent_task_id == null && (task.batch_round_count ?? 0) > 1) {
+    return `批次任务创建成功，已生成 ${task.batch_round_count} 个轮次`;
+  }
+  return "任务创建成功";
 }
 
 export function getInitialForm(

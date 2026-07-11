@@ -5,9 +5,13 @@ from __future__ import annotations
 import asyncio
 import uuid
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from app.db.session import async_session_factory
+from app.models.collection_task import CollectionTask
+from app.models.collection_task_candidate import CollectionTaskCandidate
+from app.models.email_log import EmailLog
+from app.models.link_knowledge_base import LinkKnowledgeBase
 from app.models.tenant import Product, ProductMember, User, WorkspaceMember
 
 
@@ -212,6 +216,175 @@ def test_sales_can_delete_own_product():
                 await db_session.execute(delete(ProductMember).where(ProductMember.product_id == product_id))
                 await db_session.execute(delete(Product).where(Product.id == product_id))
                 await db_session.execute(delete(User).where(User.username == username))
+                await db_session.commit()
+
+    asyncio.run(_run())
+
+
+def test_delete_product_removes_product_scoped_collection_data():
+    async def _run() -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        from app.main import app
+
+        suffix = uuid.uuid4().hex[:8]
+        username = f"sales-delete-scoped-{suffix}"
+
+        async with async_session_factory() as db_session:
+            user = User(username=username, display_name="Scoped Delete Sales", is_admin=False)
+            db_session.add(user)
+            await db_session.flush()
+            db_session.add(WorkspaceMember(workspace_id=1, user_id=user.id, role="member"))
+
+            product = Product(
+                workspace_id=1,
+                name=f"Scoped Delete Brand {suffix}",
+                slug=f"scoped-delete-brand-{suffix}",
+                brand="Scoped",
+                is_default=False,
+            )
+            other_product = Product(
+                workspace_id=1,
+                name=f"Other Brand {suffix}",
+                slug=f"other-brand-{suffix}",
+                brand="Other",
+                is_default=False,
+            )
+            db_session.add_all([product, other_product])
+            await db_session.flush()
+            db_session.add(ProductMember(user_id=user.id, product_id=product.id, role="owner"))
+            db_session.add(ProductMember(user_id=user.id, product_id=other_product.id, role="owner"))
+
+            task = CollectionTask(
+                user_id=user.id,
+                workspace_id=1,
+                product_id=product.id,
+                name=f"Scoped Task {suffix}",
+                platform="instagram",
+                platforms=["instagram"],
+                keywords=["makeup bag"],
+            )
+            other_task = CollectionTask(
+                user_id=user.id,
+                workspace_id=1,
+                product_id=other_product.id,
+                name=f"Other Task {suffix}",
+                platform="instagram",
+                platforms=["instagram"],
+                keywords=["travel bag"],
+            )
+            db_session.add_all([task, other_task])
+            await db_session.flush()
+            candidate = CollectionTaskCandidate(
+                task_id=task.id,
+                user_id=user.id,
+                product_id=product.id,
+                username=f"scoped_candidate_{suffix}",
+                profile_url=f"https://instagram.com/scoped_candidate_{suffix}",
+                platform="instagram",
+            )
+            other_candidate = CollectionTaskCandidate(
+                task_id=other_task.id,
+                user_id=user.id,
+                product_id=other_product.id,
+                username=f"other_candidate_{suffix}",
+                profile_url=f"https://instagram.com/other_candidate_{suffix}",
+                platform="instagram",
+            )
+            email_log = EmailLog(
+                user_id=user.id,
+                product_id=product.id,
+                task_id=task.id,
+                recipients=[f"scoped-{suffix}@example.com"],
+                subject="Scoped outreach",
+            )
+            other_email_log = EmailLog(
+                user_id=user.id,
+                product_id=other_product.id,
+                task_id=other_task.id,
+                recipients=[f"other-{suffix}@example.com"],
+                subject="Other outreach",
+            )
+            link_knowledge = LinkKnowledgeBase(
+                workspace_id=1,
+                user_id=user.id,
+                product_id=product.id,
+                name=f"Scoped Link {suffix}",
+                url=f"https://example.com/scoped-{suffix}",
+            )
+            other_link_knowledge = LinkKnowledgeBase(
+                workspace_id=1,
+                user_id=user.id,
+                product_id=other_product.id,
+                name=f"Other Link {suffix}",
+                url=f"https://example.com/other-{suffix}",
+            )
+            db_session.add_all(
+                [
+                    candidate,
+                    other_candidate,
+                    email_log,
+                    other_email_log,
+                    link_knowledge,
+                    other_link_knowledge,
+                ]
+            )
+            await db_session.commit()
+            user_id = user.id
+            product_id = product.id
+            other_product_id = other_product.id
+            task_id = task.id
+            other_task_id = other_task.id
+            candidate_id = candidate.id
+            other_candidate_id = other_candidate.id
+            email_log_id = email_log.id
+            other_email_log_id = other_email_log.id
+            link_knowledge_id = link_knowledge.id
+            other_link_knowledge_id = other_link_knowledge.id
+
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.delete(
+                    f"/api/tenant/products/{product_id}",
+                    headers={"X-User-Id": str(user_id), "X-Product-Id": str(product_id)},
+                )
+                assert response.status_code == 204, response.text
+
+            async with async_session_factory() as db_session:
+                assert await db_session.get(Product, product_id) is None
+                assert await db_session.get(CollectionTask, task_id) is None
+                assert await db_session.get(CollectionTaskCandidate, candidate_id) is None
+                assert await db_session.get(EmailLog, email_log_id) is None
+                assert await db_session.get(LinkKnowledgeBase, link_knowledge_id) is None
+
+                assert await db_session.get(Product, other_product_id) is not None
+                assert await db_session.get(CollectionTask, other_task_id) is not None
+                assert await db_session.get(CollectionTaskCandidate, other_candidate_id) is not None
+                assert await db_session.get(EmailLog, other_email_log_id) is not None
+                assert await db_session.get(LinkKnowledgeBase, other_link_knowledge_id) is not None
+        finally:
+            async with async_session_factory() as db_session:
+                product_ids = [product_id, other_product_id]
+                await db_session.execute(delete(LinkKnowledgeBase).where(LinkKnowledgeBase.product_id.in_(product_ids)))
+                await db_session.execute(delete(EmailLog).where(EmailLog.product_id.in_(product_ids)))
+                await db_session.execute(
+                    delete(CollectionTaskCandidate).where(CollectionTaskCandidate.product_id.in_(product_ids))
+                )
+                await db_session.execute(delete(CollectionTask).where(CollectionTask.product_id.in_(product_ids)))
+                await db_session.execute(delete(ProductMember).where(ProductMember.product_id.in_(product_ids)))
+                await db_session.execute(delete(Product).where(Product.id.in_(product_ids)))
+                await db_session.execute(delete(User).where(User.username == username))
+                stale_tasks = await db_session.execute(
+                    select(CollectionTask.id).where(CollectionTask.name.like(f"%{suffix}%"))
+                )
+                stale_task_ids = list(stale_tasks.scalars().all())
+                if stale_task_ids:
+                    await db_session.execute(
+                        delete(CollectionTaskCandidate).where(CollectionTaskCandidate.task_id.in_(stale_task_ids))
+                    )
+                    await db_session.execute(delete(EmailLog).where(EmailLog.task_id.in_(stale_task_ids)))
+                    await db_session.execute(delete(CollectionTask).where(CollectionTask.id.in_(stale_task_ids)))
                 await db_session.commit()
 
     asyncio.run(_run())

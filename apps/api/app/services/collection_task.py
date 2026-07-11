@@ -1,5 +1,6 @@
 import math
 import re
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, or_, select
@@ -38,6 +39,7 @@ from app.services.task_retention import (
 )
 from app.services.task_run_progress import STAGE_FAILED
 from app.schemas.common import PaginatedResponse
+from app.services.hashtag_expansion import expand_keywords_to_hashtags
 
 
 class CollectionTaskService:
@@ -177,6 +179,8 @@ class CollectionTaskService:
         effectiveness_category: str | None = None,
         management_tags: list[str] | None = None,
         is_possible_duplicate: bool = False,
+        child_tasks: list[dict] | None = None,
+        aggregate_update: dict | None = None,
     ) -> CollectionTaskRead:
         stale = CollectionTaskService.is_running_stale(task)
         retention = (
@@ -193,8 +197,7 @@ class CollectionTaskService:
             CollectionTaskStatus.COMPLETED_WITH_RESULTS.value,
             CollectionTaskStatus.COMPLETED_NO_RESULTS.value,
         }
-        return CollectionTaskRead.model_validate(task).model_copy(
-            update={
+        update = {
                 "stale": stale,
                 "recoverable": (not terminal_success)
                 and (
@@ -213,11 +216,90 @@ class CollectionTaskService:
                     duplicate=is_possible_duplicate,
                 ),
                 "is_possible_duplicate": is_possible_duplicate,
-            }
+                "child_tasks": child_tasks or [],
+        }
+        if aggregate_update:
+            update.update(aggregate_update)
+        return CollectionTaskRead.model_validate(task).model_copy(update=update)
+
+    @staticmethod
+    def _is_batch_parent(task: CollectionTask) -> bool:
+        return bool(
+            getattr(task, "batch_group_id", None)
+            and getattr(task, "batch_round_count", None)
+            and getattr(task, "parent_task_id", None) is None
         )
 
     @staticmethod
+    def _batch_child_summary(child: CollectionTask) -> dict:
+        return {
+            "id": child.id,
+            "name": child.name,
+            "status": child.status,
+            "batch_round_index": child.batch_round_index,
+            "batch_round_count": child.batch_round_count,
+            "keywords": child.keywords or [],
+            "discovery_limit": child.discovery_limit,
+            "inserted_count": child.inserted_count or 0,
+            "result_count": child.result_count or 0,
+            "deduped_count": child.deduped_count or 0,
+            "failed_count": child.failed_count or 0,
+            "last_run_at": child.last_run_at,
+            "status_summary": child.status_summary,
+            "error_message": child.error_message,
+        }
+
+    @staticmethod
+    def _batch_parent_aggregate(parent: CollectionTask, children: list[CollectionTask]) -> dict:
+        if not children:
+            return {}
+        status_values = [child.status for child in children]
+        if any(status == CollectionTaskStatus.RUNNING.value for status in status_values):
+            status_value = CollectionTaskStatus.RUNNING.value
+        elif any(status == CollectionTaskStatus.QUEUED.value for status in status_values):
+            status_value = CollectionTaskStatus.QUEUED.value
+        elif any(status == CollectionTaskStatus.FAILED.value for status in status_values):
+            status_value = CollectionTaskStatus.PARTIAL_FAILED.value
+        elif all(status in {
+            CollectionTaskStatus.COMPLETED.value,
+            CollectionTaskStatus.COMPLETED_WITH_RESULTS.value,
+            CollectionTaskStatus.COMPLETED_NO_RESULTS.value,
+        } for status in status_values):
+            status_value = (
+                CollectionTaskStatus.COMPLETED_WITH_RESULTS.value
+                if sum(child.inserted_count or 0 for child in children) > 0
+                else CollectionTaskStatus.COMPLETED_NO_RESULTS.value
+            )
+        else:
+            status_value = parent.status
+        return {
+            "status": status_value,
+            "discovery_limit": parent.discovery_limit
+            or sum(child.discovery_limit or 0 for child in children),
+            "result_count": sum(child.result_count or 0 for child in children),
+            "inserted_count": sum(child.inserted_count or 0 for child in children),
+            "deduped_count": sum(child.deduped_count or 0 for child in children),
+            "discovered_count": sum(child.discovered_count or 0 for child in children),
+            "profile_fetched_count": sum(child.profile_fetched_count or 0 for child in children),
+            "profile_failed_count": sum(child.profile_failed_count or 0 for child in children),
+            "filtered_out_count": sum(child.filtered_out_count or 0 for child in children),
+            "failed_count": sum(child.failed_count or 0 for child in children),
+            "skipped_count": sum(child.skipped_count or 0 for child in children),
+            "last_run_at": max(
+                (child.last_run_at for child in children if child.last_run_at),
+                default=parent.last_run_at,
+            ),
+        }
+
+    @staticmethod
     def _serialize_task_data(data: dict) -> dict:
+        for field in (
+            "batch_round_enabled",
+            "batch_total_limit",
+            "batch_round_size",
+            "batch_round_count",
+        ):
+            data.pop(field, None)
         if "status" in data and data["status"] is not None:
             data["status"] = data["status"].value if hasattr(data["status"], "value") else data["status"]
         if "collection_mode" in data and data["collection_mode"] is not None:
@@ -226,6 +308,32 @@ class CollectionTaskService:
         if "email_recipients" in data and data["email_recipients"] is not None:
             data["email_recipients"] = [str(email) for email in data["email_recipients"]]
         return data
+
+    @staticmethod
+    def _batch_round_keyword_groups(keywords: list[str], round_count: int) -> list[list[str]]:
+        normalized = [str(item).strip() for item in keywords if str(item).strip()]
+        per_seed: list[list[str]] = []
+        for keyword in normalized:
+            expanded = expand_keywords_to_hashtags([keyword], max_hashtags=8)
+            if not expanded:
+                expanded = [keyword]
+            per_seed.append(expanded)
+        if not per_seed:
+            return [[] for _ in range(round_count)]
+
+        groups: list[list[str]] = []
+        for index in range(round_count):
+            seed_terms = per_seed[index % len(per_seed)]
+            group: list[str] = []
+            for term in seed_terms:
+                if term not in group:
+                    group.append(term)
+                if len(group) >= 3:
+                    break
+            if not group:
+                group = [normalized[index % len(normalized)]]
+            groups.append(group)
+        return groups
 
     @staticmethod
     def _apply_high_value_first_defaults(payload: dict, fields_set: set[str]) -> dict:
@@ -332,6 +440,7 @@ class CollectionTaskService:
 
     @staticmethod
     def _apply_filters(query, filters: CollectionTaskFilter):
+        query = query.where(CollectionTask.parent_task_id.is_(None))
         if filters.task_view == "archived":
             query = query.where(CollectionTask.is_archived.is_(True))
         else:
@@ -421,6 +530,17 @@ class CollectionTaskService:
         query = base_query.order_by(CollectionTask.updated_at.desc()).offset((page - 1) * page_size).limit(page_size)
         result = await db.execute(query)
         rows = result.scalars().all()
+        child_rows_by_parent: dict[int, list[CollectionTask]] = {}
+        parent_ids = [row.id for row in rows if CollectionTaskService._is_batch_parent(row)]
+        if parent_ids:
+            child_result = await db.execute(
+                select(CollectionTask)
+                .where(CollectionTask.parent_task_id.in_(parent_ids))
+                .order_by(CollectionTask.batch_round_index.asc(), CollectionTask.id.asc())
+            )
+            for child in child_result.scalars().all():
+                if child.parent_task_id is not None:
+                    child_rows_by_parent.setdefault(child.parent_task_id, []).append(child)
         duplicate_ids = await CollectionTaskService._duplicate_ids_for_rows(
             db,
             rows,
@@ -441,6 +561,16 @@ class CollectionTaskService:
                 has_retention_traces=retention_flags.get(row.id, False),
                 effectiveness_category=categories.get(row.id, "no_result"),
                 is_possible_duplicate=row.id in duplicate_ids,
+                child_tasks=[
+                    CollectionTaskService._batch_child_summary(child)
+                    for child in child_rows_by_parent.get(row.id, [])
+                ],
+                aggregate_update=CollectionTaskService._batch_parent_aggregate(
+                    row,
+                    child_rows_by_parent.get(row.id, []),
+                )
+                if CollectionTaskService._is_batch_parent(row)
+                else None,
             )
             for row in rows
         ]
@@ -466,6 +596,16 @@ class CollectionTaskService:
         return await db.get(CollectionTask, task_id)
 
     @staticmethod
+    async def get_batch_children(db: AsyncSession, parent_task_id: int) -> list[CollectionTask]:
+        result = await db.execute(
+            select(CollectionTask)
+            .where(CollectionTask.parent_task_id == parent_task_id)
+            .where(CollectionTask.is_archived.is_(False))
+            .order_by(CollectionTask.batch_round_index.asc(), CollectionTask.id.asc())
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
     async def create_task(
         db: AsyncSession,
         data: CollectionTaskCreate,
@@ -474,6 +614,14 @@ class CollectionTaskService:
         workspace_id: int | None = None,
         product_id: int | None = None,
     ) -> CollectionTask:
+        if data.batch_round_enabled:
+            return await CollectionTaskService.create_batch_task(
+                db,
+                data,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                product_id=product_id,
+            )
         payload = CollectionTaskService._serialize_task_data(data.model_dump())
         payload = CollectionTaskService._apply_high_value_first_defaults(
             payload,
@@ -491,6 +639,78 @@ class CollectionTaskService:
         await db.commit()
         await db.refresh(task)
         return task
+
+    @staticmethod
+    async def create_batch_task(
+        db: AsyncSession,
+        data: CollectionTaskCreate,
+        *,
+        user_id: int | None = None,
+        workspace_id: int | None = None,
+        product_id: int | None = None,
+    ) -> CollectionTask:
+        round_count = int(data.batch_round_count or 1)
+        round_size = int(data.batch_round_size or data.discovery_limit or 50)
+        total_limit = int(data.batch_total_limit or data.discovery_limit or round_count * round_size)
+        base_payload = CollectionTaskService._serialize_task_data(data.model_dump())
+        base_payload = CollectionTaskService._apply_high_value_first_defaults(
+            base_payload,
+            set(data.model_fields_set),
+        )
+        base_payload = CollectionTaskService._apply_stable_collection_defaults(base_payload)
+        if user_id is not None:
+            base_payload["user_id"] = user_id
+        if workspace_id is not None:
+            base_payload["workspace_id"] = workspace_id
+        if product_id is not None:
+            base_payload["product_id"] = product_id
+
+        batch_group_id = uuid.uuid4().hex
+        parent_payload = {
+            **base_payload,
+            "discovery_limit": total_limit,
+            "batch_group_id": batch_group_id,
+            "batch_round_index": None,
+            "batch_round_count": round_count,
+            "status": CollectionTaskStatus.DRAFT.value,
+        }
+        checkpoint = dict(parent_payload.get("run_checkpoint") or {})
+        checkpoint["batch_round_parent"] = True
+        checkpoint["batch_total_limit"] = total_limit
+        checkpoint["batch_round_size"] = round_size
+        parent_payload["run_checkpoint"] = checkpoint
+
+        parent = CollectionTask(**parent_payload)
+        db.add(parent)
+        await db.flush()
+
+        keyword_groups = CollectionTaskService._batch_round_keyword_groups(
+            list(base_payload.get("keywords") or []),
+            round_count,
+        )
+        for index in range(1, round_count + 1):
+            child_payload = {
+                **base_payload,
+                "name": f"{data.name} - 第{index}轮",
+                "keywords": keyword_groups[index - 1],
+                "discovery_limit": round_size,
+                "parent_task_id": parent.id,
+                "batch_group_id": batch_group_id,
+                "batch_round_index": index,
+                "batch_round_count": round_count,
+                "status": CollectionTaskStatus.DRAFT.value,
+            }
+            child_checkpoint = dict(child_payload.get("run_checkpoint") or {})
+            child_checkpoint["batch_group_id"] = batch_group_id
+            child_checkpoint["batch_round_index"] = index
+            child_checkpoint["batch_round_count"] = round_count
+            child_checkpoint["batch_parent_task_id"] = parent.id
+            child_payload["run_checkpoint"] = child_checkpoint
+            db.add(CollectionTask(**child_payload))
+
+        await db.commit()
+        await db.refresh(parent)
+        return parent
 
     @staticmethod
     async def update_task(

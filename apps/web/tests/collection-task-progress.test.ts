@@ -874,3 +874,40 @@ test("candidate dialog wires recrawl buttons to API and refreshes list", () => {
   assert.doesNotMatch(dialogSource, /platform\s*!==\s*["']instagram["']/);
   assert.doesNotMatch(dialogSource, /title="[^"]*后续支持[^"]*"/);
 });
+test("zero-result keyword task surfaces backend summary and attempted discovery terms", () => {
+  const backendSummary =
+    "任务完成，但未发现候选账号。系统已尝试 8 个发现词：makeup bag、makeupbag、cosmetic bag；建议降低粉丝门槛或改用链接导入/竞品发现。";
+  const lines = formatCollectionResultLines(
+    task({
+      status: "completed_no_results",
+      status_summary: backendSummary,
+      run_checkpoint: {
+        keyword_expansion: {
+          original_keyword_count: 2,
+          expanded_keyword_count: 8,
+          attempted_keywords: ["makeup bag", "makeupbag", "cosmetic bag"],
+        },
+      },
+    }),
+  );
+
+  assert.equal(lines.hint, backendSummary);
+
+  const breakdown = buildTaskResultBreakdown(
+    task({
+      status: "completed_no_results",
+      status_summary: null,
+      run_checkpoint: {
+        keyword_expansion: {
+          original_keyword_count: 2,
+          expanded_keyword_count: 8,
+          attempted_keywords: ["makeup bag", "makeupbag", "cosmetic bag"],
+        },
+      },
+    }),
+  );
+
+  assert.ok(breakdown.reason);
+  assert.match(breakdown.reason!, /makeupbag/);
+  assert.match(breakdown.reason!, /cosmetic bag/);
+});

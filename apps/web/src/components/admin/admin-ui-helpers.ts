@@ -286,14 +286,24 @@ export type SalesBrandProgress = {
 };
 
 export function buildSalesWorkbenchView(users: AdminUser[], now = new Date()): SalesWorkbenchView {
-  const hasPreciseTodayTaskData = users.some((user) => (user.recent_activity?.collection_tasks ?? []).some(hasCreatedOrUpdatedAt));
-  const hasPreciseTodayInfluencerData = users.some((user) => (getRecentInfluencers(user.recent_activity) ?? []).some(hasCreatedOrUpdatedAt));
+  const hasPreciseTodayTaskData =
+    users.some((user) => typeof user.today_collection_task_count === "number") ||
+    users.some((user) => (user.recent_activity?.collection_tasks ?? []).some(hasCreatedOrUpdatedAt));
+  const hasPreciseTodayInfluencerData =
+    users.some((user) => typeof user.today_influencer_count === "number") ||
+    users.some((user) => (getRecentInfluencers(user.recent_activity) ?? []).some(hasCreatedOrUpdatedAt));
   const rows = users
     .filter((user) => user.role === "sales")
     .map((user) => {
       const activeToday = isSameLocalDay(user.last_active_at, now);
-      const todayTaskCount = countRecentItemsForToday(user.recent_activity?.collection_tasks, now);
-      const todayInfluencerCount = countRecentItemsForToday(getRecentInfluencers(user.recent_activity), now);
+      const todayTaskCount =
+        typeof user.today_collection_task_count === "number"
+          ? user.today_collection_task_count
+          : countRecentItemsForToday(user.recent_activity?.collection_tasks, now);
+      const todayInfluencerCount =
+        typeof user.today_influencer_count === "number"
+          ? user.today_influencer_count
+          : countRecentItemsForToday(getRecentInfluencers(user.recent_activity), now);
       return {
         ...user,
         activityStatus: !user.is_active ? "disabled" : activeToday ? "active_today" : "inactive_today",

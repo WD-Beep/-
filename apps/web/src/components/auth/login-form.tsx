@@ -10,7 +10,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   AUTH_PASSWORD,
-  AUTH_USERNAME,
   defaultPathForSession,
   loadBackendAuthSession,
   resolveAuthAccount,
@@ -24,12 +23,14 @@ const inputClass = cn(
   "focus-visible:border-[#245E4F] focus-visible:ring-2 focus-visible:ring-[#245E4F]/14",
 );
 
+const DEFAULT_SALES_USERNAME = "sales1";
+
 export function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const redirectTo = searchParams.get("from") || "/";
 
-  const [username, setUsername] = useState(AUTH_USERNAME);
+  const [username, setUsername] = useState(DEFAULT_SALES_USERNAME);
   const [password, setPassword] = useState(AUTH_PASSWORD);
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
@@ -37,7 +38,7 @@ export function LoginForm() {
   const [submitting, setSubmitting] = useState(false);
 
   function fillDemoCredentials() {
-    setUsername(AUTH_USERNAME);
+    setUsername(DEFAULT_SALES_USERNAME);
     setPassword(AUTH_PASSWORD);
     setError(null);
   }
@@ -227,9 +228,9 @@ export function LoginForm() {
 
             <div className="mt-5 flex items-center justify-between gap-3 rounded-lg border border-[#d8dfd1] bg-[#f2f5ee] px-4 py-3">
               <div>
-                <p className="text-sm font-medium text-slate-700">演示访问凭证</p>
+                <p className="text-sm font-medium text-slate-700">业务员访问凭证</p>
                 <p className="mt-0.5 text-sm text-slate-500">
-                  {AUTH_USERNAME} / {AUTH_PASSWORD}；业务员 sales1-sales10 / {AUTH_PASSWORD}
+                  业务员 {DEFAULT_SALES_USERNAME} / {AUTH_PASSWORD}；管理员请使用管理员入口
                 </p>
               </div>
               <button
@@ -238,7 +239,7 @@ export function LoginForm() {
                 disabled={submitting}
                 className="shrink-0 rounded-lg border border-[#cfd8c8] bg-[#fbfcf8] px-3.5 py-1.5 text-xs font-medium text-slate-700 hover:border-[#aebda5] hover:bg-white disabled:opacity-50"
               >
-                一键填入
+                填入业务员账号
               </button>
             </div>
 

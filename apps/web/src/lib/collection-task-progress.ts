@@ -266,6 +266,21 @@ export function isHighValueTaskResult(task: CollectionTask): boolean {
   );
 }
 
+function keywordExpansionDiagnosticHint(task: CollectionTask): string | null {
+  const checkpoint = task.run_checkpoint ?? {};
+  const expansion = checkpoint.keyword_expansion;
+  if (!expansion || typeof expansion !== "object") return null;
+  const data = expansion as Record<string, unknown>;
+  const attempted = Array.isArray(data.attempted_keywords)
+    ? data.attempted_keywords.map(String).map((item) => item.trim()).filter(Boolean)
+    : [];
+  if (attempted.length === 0) return null;
+  const count = typeof data.expanded_keyword_count === "number" ? data.expanded_keyword_count : attempted.length;
+  const preview = attempted.slice(0, 8).join("、");
+  const suffix = attempted.length > 8 ? "..." : "";
+  return `已尝试发现词 ${count} 个：${preview}${suffix}`;
+}
+
 export function buildTaskResultBreakdown(task: CollectionTask): TaskResultBreakdown {
   const discovered = task.discovered_count ?? 0;
   const deduped = task.deduped_count ?? 0;
@@ -334,7 +349,9 @@ export function buildTaskResultBreakdown(task: CollectionTask): TaskResultBreakd
   if (failed > 0) contacts.push(`失败 ${failed}`);
   const diagnostic = collectionTaskSeedDiscoveryDiagnosticHint(task);
   const providerDiagnostic = collectionTaskProviderDiagnosticHint(task);
-  const reasonSource = diagnostic || providerDiagnostic || task.error_message || task.last_error || task.status_summary;
+  const keywordDiagnostic = keywordExpansionDiagnosticHint(task);
+  const reasonSource =
+    diagnostic || providerDiagnostic || task.error_message || task.last_error || task.status_summary || keywordDiagnostic;
   return {
     primary,
     funnel,

@@ -313,6 +313,10 @@ export type PlatformCapabilitiesResponse = {
 
 export type CollectionTask = {
   id: number;
+  parent_task_id?: number | null;
+  batch_group_id?: string | null;
+  batch_round_index?: number | null;
+  batch_round_count?: number | null;
   name: string;
   collection_mode: CollectionMode;
   platform: string;
@@ -378,8 +382,26 @@ export type CollectionTask = {
   status_summary: string | null;
   error_message: string | null;
   comment_discovery_enabled: boolean;
+  child_tasks?: CollectionTaskChild[];
   created_at: string;
   updated_at: string;
+};
+
+export type CollectionTaskChild = {
+  id: number;
+  name: string;
+  status: CollectionTaskStatus;
+  batch_round_index: number | null;
+  batch_round_count: number | null;
+  keywords: string[];
+  discovery_limit: number | null;
+  inserted_count: number;
+  result_count: number;
+  deduped_count: number;
+  failed_count: number;
+  last_run_at: string | null;
+  status_summary: string | null;
+  error_message: string | null;
 };
 
 export type CollectionTaskPayload = {
@@ -412,6 +434,10 @@ export type CollectionTaskPayload = {
   outreach_templates?: Record<string, string>;
   comment_discovery_enabled?: boolean;
   stable_collection_mode?: boolean;
+  batch_round_enabled?: boolean;
+  batch_total_limit?: number | null;
+  batch_round_size?: number | null;
+  batch_round_count?: number | null;
 };
 
 export type LinkImportBatchStatus = "pending" | "running" | "completed" | "failed";
@@ -2162,6 +2188,22 @@ export async function createTenantProduct(payload: TenantProductPayload): Promis
   return response.json();
 }
 
+export async function runCollectionTaskBatch(
+  id: number,
+  options: { failedOnly?: boolean } = {},
+): Promise<CollectionTaskBulkRunResult> {
+  const params = new URLSearchParams();
+  if (options.failedOnly) params.set("failed_only", "true");
+  const qs = params.toString();
+  const response = await apiFetch(`${API_URL}/api/collection-tasks/${id}/run-batch${qs ? `?${qs}` : ""}`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
 export async function deleteTenantProduct(productId: number): Promise<void> {
   const response = await apiFetch(`${API_URL}/api/tenant/products/${productId}`, {
     method: "DELETE",
@@ -2208,9 +2250,11 @@ export type AdminUser = {
     created_at: string | null;
   }>;
   collection_task_count: number;
+  today_collection_task_count?: number;
   collection_success_count: number;
   collection_failed_count: number;
   influencer_count: number;
+  today_influencer_count?: number;
   email_count: number;
   email_failed_count: number;
   reply_count: number;

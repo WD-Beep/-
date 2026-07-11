@@ -12,6 +12,12 @@ class CollectionTask(Base):
     __tablename__ = "collection_tasks"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    parent_task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("collection_tasks.id", ondelete="CASCADE"), index=True
+    )
+    batch_group_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    batch_round_index: Mapped[int | None] = mapped_column(Integer)
+    batch_round_count: Mapped[int | None] = mapped_column(Integer)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
     workspace_id: Mapped[int | None] = mapped_column(ForeignKey("workspaces.id", ondelete="SET NULL"), index=True)
     product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id", ondelete="SET NULL"), index=True)
@@ -82,4 +88,13 @@ class CollectionTask(Base):
     email_logs: Mapped[list["EmailLog"]] = relationship(back_populates="task", cascade="all, delete-orphan")
     candidates: Mapped[list["CollectionTaskCandidate"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
+    )
+    parent_task: Mapped["CollectionTask | None"] = relationship(
+        remote_side=[id],
+        back_populates="child_task_rows",
+    )
+    child_task_rows: Mapped[list["CollectionTask"]] = relationship(
+        back_populates="parent_task",
+        cascade="all, delete-orphan",
+        order_by="CollectionTask.batch_round_index",
     )
