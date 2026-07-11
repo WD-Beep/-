@@ -265,6 +265,71 @@ test("sales workbench view does not estimate today metrics from active accounts"
   assert.equal(view.hasPreciseTodayInfluencerData, false);
 });
 
+test("sales workbench view summarizes daily distribution and attention levels", () => {
+  const view = buildSalesWorkbenchView([
+    {
+      id: 1,
+      username: "active",
+      display_name: null,
+      email: "active@example.com",
+      role: "sales",
+      is_admin: false,
+      is_active: true,
+      product_count: 1,
+      bound_products: [{ id: 10, name: "Alpha", slug: "alpha", role: "owner", status: "active", created_at: null }],
+      collection_task_count: 1,
+      collection_success_count: 1,
+      collection_failed_count: 0,
+      influencer_count: 2,
+      email_count: 1,
+      email_failed_count: 0,
+      reply_count: 1,
+      pending_reply_count: 0,
+      last_active_at: "2026-07-09T08:00:00.000Z",
+      created_at: null,
+      updated_at: null,
+      status: "active",
+    },
+    {
+      id: 2,
+      username: "blocked",
+      display_name: null,
+      email: "blocked@example.com",
+      role: "sales",
+      is_admin: false,
+      is_active: true,
+      product_count: 1,
+      bound_products: [{ id: 11, name: "Beta", slug: "beta", role: "owner", status: "active", created_at: null }],
+      collection_task_count: 2,
+      collection_success_count: 0,
+      collection_failed_count: 1,
+      influencer_count: 12,
+      email_count: 2,
+      email_failed_count: 1,
+      reply_count: 0,
+      pending_reply_count: 2,
+      last_active_at: "2026-07-08T08:00:00.000Z",
+      created_at: null,
+      updated_at: null,
+      status: "active",
+    },
+  ], new Date("2026-07-09T12:00:00+08:00"));
+
+  assert.equal(view.kpis.inactiveTodayCount, 1);
+  assert.deepEqual(view.activityDistribution.map((item) => [item.key, item.count]), [
+    ["active_today", 1],
+    ["inactive_today", 1],
+    ["disabled", 0],
+  ]);
+  assert.deepEqual(view.riskDistribution.map((item) => [item.key, item.count]), [
+    ["needs_attention", 1],
+    ["working", 1],
+    ["stable", 0],
+  ]);
+  assert.equal(view.rows[0].attentionLevel, "working");
+  assert.equal(view.rows[1].attentionLevel, "needs_attention");
+});
+
 test("admin helpers identify brands with insufficient outreach", () => {
   assert.equal(isOutreachInsufficient({ influencerCount: 1, emailCount: 0, replyCount: 0 }), true);
   assert.equal(isOutreachInsufficient({ influencerCount: 12, emailCount: 5, replyCount: 1 }), true);

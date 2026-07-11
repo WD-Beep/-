@@ -244,9 +244,11 @@ export function buildAdminDashboardView(summary: AdminSummary) {
 }
 
 export type SalesWorkbenchActivityStatus = "active_today" | "inactive_today" | "disabled";
+export type SalesWorkbenchAttentionLevel = "needs_attention" | "working" | "stable" | "disabled";
 
 export type SalesWorkbenchRow = AdminUser & {
   activityStatus: SalesWorkbenchActivityStatus;
+  attentionLevel: SalesWorkbenchAttentionLevel;
   todayTaskCount: number;
   activeTaskCount: number;
   todayInfluencerCount: number;
@@ -259,6 +261,8 @@ export type SalesWorkbenchView = {
   kpis: {
     salesCount: number;
     activeTodayCount: number;
+    inactiveTodayCount: number;
+    disabledCount: number;
     productCount: number;
     todayTaskCount: number;
     successCount: number;
@@ -267,6 +271,8 @@ export type SalesWorkbenchView = {
     pendingReplyCount: number;
     outreachInsufficientCount: number;
   };
+  activityDistribution: Array<{ key: SalesWorkbenchActivityStatus; label: string; count: number; tone: AdminTone }>;
+  riskDistribution: Array<{ key: Exclude<SalesWorkbenchAttentionLevel, "disabled">; label: string; count: number; tone: AdminTone }>;
   hasPreciseTodayTaskData: boolean;
   hasPreciseTodayInfluencerData: boolean;
 };
@@ -304,18 +310,29 @@ export function buildSalesWorkbenchView(users: AdminUser[], now = new Date()): S
         typeof user.today_influencer_count === "number"
           ? user.today_influencer_count
           : countRecentItemsForToday(getRecentInfluencers(user.recent_activity), now);
+      const activityStatus: SalesWorkbenchActivityStatus = !user.is_active ? "disabled" : activeToday ? "active_today" : "inactive_today";
+      const exceptionCount = (user.collection_failed_count ?? 0) + (user.email_failed_count ?? 0);
+      const outreachInsufficient = isOutreachInsufficient({
+        influencerCount: user.influencer_count ?? 0,
+        emailCount: user.email_count ?? 0,
+        replyCount: user.reply_count ?? 0,
+      });
       return {
         ...user,
-        activityStatus: !user.is_active ? "disabled" : activeToday ? "active_today" : "inactive_today",
+        activityStatus,
+        attentionLevel: getSalesAttentionLevel({
+          activityStatus,
+          exceptionCount,
+          outreachInsufficient,
+          pendingReplyCount: user.pending_reply_count ?? 0,
+          todayTaskCount,
+          activeTaskCount: getRecentActivityCount(user.recent_activity?.collection_tasks, now),
+        }),
         todayTaskCount,
         activeTaskCount: getRecentActivityCount(user.recent_activity?.collection_tasks, now),
         todayInfluencerCount,
-        exceptionCount: (user.collection_failed_count ?? 0) + (user.email_failed_count ?? 0),
-        outreachInsufficient: isOutreachInsufficient({
-          influencerCount: user.influencer_count ?? 0,
-          emailCount: user.email_count ?? 0,
-          replyCount: user.reply_count ?? 0,
-        }),
+        exceptionCount,
+        outreachInsufficient,
       } satisfies SalesWorkbenchRow;
     });
 
@@ -331,6 +348,8 @@ export function buildSalesWorkbenchView(users: AdminUser[], now = new Date()): S
     kpis: {
       salesCount: rows.length,
       activeTodayCount: rows.filter((row) => row.activityStatus === "active_today").length,
+      inactiveTodayCount: rows.filter((row) => row.activityStatus === "inactive_today").length,
+      disabledCount: rows.filter((row) => row.activityStatus === "disabled").length,
       productCount: productIds.size || rows.reduce((sum, row) => sum + (row.product_count ?? 0), 0),
       todayTaskCount: rows.reduce((sum, row) => sum + row.todayTaskCount, 0),
       successCount: rows.reduce((sum, row) => sum + (row.collection_success_count ?? 0), 0),
@@ -339,9 +358,40 @@ export function buildSalesWorkbenchView(users: AdminUser[], now = new Date()): S
       pendingReplyCount: rows.reduce((sum, row) => sum + (row.pending_reply_count ?? 0), 0),
       outreachInsufficientCount: rows.filter((row) => row.outreachInsufficient).length,
     },
+    activityDistribution: [
+      { key: "active_today", label: "今日有动作", count: rows.filter((row) => row.activityStatus === "active_today").length, tone: "success" },
+      { key: "inactive_today", label: "今日未动作", count: rows.filter((row) => row.activityStatus === "inactive_today").length, tone: "warning" },
+      { key: "disabled", label: "账号停用", count: rows.filter((row) => row.activityStatus === "disabled").length, tone: "muted" },
+    ],
+    riskDistribution: [
+      { key: "needs_attention", label: "需要跟进", count: rows.filter((row) => row.attentionLevel === "needs_attention").length, tone: "danger" },
+      { key: "working", label: "今日推进中", count: rows.filter((row) => row.attentionLevel === "working").length, tone: "success" },
+      { key: "stable", label: "暂无风险", count: rows.filter((row) => row.attentionLevel === "stable").length, tone: "info" },
+    ],
     hasPreciseTodayTaskData,
     hasPreciseTodayInfluencerData,
   };
+}
+
+function getSalesAttentionLevel({
+  activityStatus,
+  exceptionCount,
+  outreachInsufficient,
+  pendingReplyCount,
+  todayTaskCount,
+  activeTaskCount,
+}: {
+  activityStatus: SalesWorkbenchActivityStatus;
+  exceptionCount: number;
+  outreachInsufficient: boolean;
+  pendingReplyCount: number;
+  todayTaskCount: number;
+  activeTaskCount: number;
+}): SalesWorkbenchAttentionLevel {
+  if (activityStatus === "disabled") return "disabled";
+  if (exceptionCount > 0 || outreachInsufficient || pendingReplyCount > 0 || activityStatus === "inactive_today") return "needs_attention";
+  if (todayTaskCount > 0 || activeTaskCount > 0 || activityStatus === "active_today") return "working";
+  return "stable";
 }
 
 export function buildSalesWorkbenchDetailView({
