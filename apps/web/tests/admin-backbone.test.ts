@@ -96,6 +96,17 @@ test("admin dashboard and lists expose required real-data fields", () => {
   }
 });
 
+test("browser long-running API calls use the public proxy by default", () => {
+  const api = source("../src/lib/api.ts");
+  const dockerfile = source("../Dockerfile");
+  const compose = source("../../../docker-compose.yml");
+
+  assert.doesNotMatch(api, /NEXT_PUBLIC_LONG_RUNNING_API_URL[\s\S]*127\.0\.0\.1:8000/);
+  assert.match(api, /NEXT_PUBLIC_LONG_RUNNING_API_URL[\s\S]*\?\? API_URL/);
+  assert.match(dockerfile, /ARG NEXT_PUBLIC_LONG_RUNNING_API_URL=\/api-proxy/);
+  assert.match(compose, /NEXT_PUBLIC_LONG_RUNNING_API_URL: \$\{NEXT_PUBLIC_LONG_RUNNING_API_URL:-\/api-proxy\}/);
+});
+
 test("admin placeholder modules were replaced with real data panels", () => {
   const collectionTasks = source("../src/app/admin/collection-tasks/page.tsx");
   const influencers = source("../src/app/admin/influencers/page.tsx");

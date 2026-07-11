@@ -43,6 +43,8 @@ services:
       dockerfile: Dockerfile
       args:
         INTERNAL_API_URL: ${INTERNAL_API_URL:-http://api:8000}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api-proxy}
+        NEXT_PUBLIC_LONG_RUNNING_API_URL: ${NEXT_PUBLIC_LONG_RUNNING_API_URL:-/api-proxy}
     container_name: influencer-web
     restart: unless-stopped
     env_file:

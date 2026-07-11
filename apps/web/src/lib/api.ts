@@ -1,11 +1,11 @@
 ﻿import { ensureTenantProductId, tenantHeaders } from "./product-context.ts";
 import { collectionTaskSeedDiscoveryDiagnosticHint } from "./shopping-seed-diagnostics.ts";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api-proxy";
+const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "/api-proxy").replace(/\/$/, "");
 const SERVER_API_URL =
   process.env.INTERNAL_API_URL?.replace(/\/$/, "") ?? "http://127.0.0.1:8000";
 const LONG_RUNNING_API_URL =
-  process.env.NEXT_PUBLIC_LONG_RUNNING_API_URL?.replace(/\/$/, "") ?? "http://127.0.0.1:8000";
+  process.env.NEXT_PUBLIC_LONG_RUNNING_API_URL?.replace(/\/$/, "") ?? API_URL;
 
 const API_FETCH_TIMEOUT_MS = 30_000;
 const PREVIEW_FETCH_TIMEOUT_MS = 600_000;
