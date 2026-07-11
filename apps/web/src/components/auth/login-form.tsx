@@ -23,22 +23,32 @@ const inputClass = cn(
   "focus-visible:border-[#245E4F] focus-visible:ring-2 focus-visible:ring-[#245E4F]/14",
 );
 
-const DEFAULT_SALES_USERNAME = "sales1";
+const LAST_LOGIN_USERNAME_STORAGE_KEY = "influencer_intel_last_login_username";
+
+function readLastLoginUsername(): string {
+  if (typeof window === "undefined") return "";
+  return window.localStorage.getItem(LAST_LOGIN_USERNAME_STORAGE_KEY)?.trim() ?? "";
+}
+
+function writeLastLoginUsername(username: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(LAST_LOGIN_USERNAME_STORAGE_KEY, username);
+}
 
 export function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const redirectTo = searchParams.get("from") || "/";
 
-  const [username, setUsername] = useState(DEFAULT_SALES_USERNAME);
+  const [username, setUsername] = useState(readLastLoginUsername);
   const [password, setPassword] = useState(AUTH_PASSWORD);
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  function fillDemoCredentials() {
-    setUsername(DEFAULT_SALES_USERNAME);
+  function fillLastUsername() {
+    setUsername(readLastLoginUsername());
     setPassword(AUTH_PASSWORD);
     setError(null);
   }
@@ -71,6 +81,7 @@ export function LoginForm() {
 
     try {
       const session = await loadBackendAuthSession(account);
+      writeLastLoginUsername(trimmedUsername);
       setAuthSession(session);
       const target = redirectTo.startsWith("/") && redirectTo !== "/" ? redirectTo : defaultPathForSession(session);
       router.replace(target);
@@ -230,16 +241,16 @@ export function LoginForm() {
               <div>
                 <p className="text-sm font-medium text-slate-700">业务员访问凭证</p>
                 <p className="mt-0.5 text-sm text-slate-500">
-                  业务员 {DEFAULT_SALES_USERNAME} / {AUTH_PASSWORD}；管理员请使用管理员入口
+                  用户名由业务员自行填写；退出后会保留上次登录账号
                 </p>
               </div>
               <button
                 type="button"
-                onClick={fillDemoCredentials}
+                onClick={fillLastUsername}
                 disabled={submitting}
                 className="shrink-0 rounded-lg border border-[#cfd8c8] bg-[#fbfcf8] px-3.5 py-1.5 text-xs font-medium text-slate-700 hover:border-[#aebda5] hover:bg-white disabled:opacity-50"
               >
-                填入业务员账号
+                填入上次账号
               </button>
             </div>
 

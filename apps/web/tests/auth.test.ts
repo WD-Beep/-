@@ -27,3 +27,16 @@ test("admin login only accepts the admin account with the admin password", () =>
   assert.equal(resolveAdminAuthAccount("sales1", ADMIN_AUTH_PASSWORD), null);
   assert.equal(resolveAdminAuthAccount("admin", AUTH_PASSWORD), null);
 });
+
+test("sales login form does not hard-code sales1 as the default username", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const source = readFileSync(
+    fileURLToPath(new URL("../src/components/auth/login-form.tsx", import.meta.url)),
+    "utf8",
+  );
+
+  assert.doesNotMatch(source, /DEFAULT_SALES_USERNAME/);
+  assert.doesNotMatch(source, /setUsername\("sales1"\)/);
+  assert.match(source, /LAST_LOGIN_USERNAME_STORAGE_KEY/);
+});
