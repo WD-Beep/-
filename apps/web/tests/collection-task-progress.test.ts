@@ -139,6 +139,9 @@ test("candidate dialog avoids opening jitter from filter reset and loading layou
   assert.match(dialogSource, /filtersReady/);
   assert.match(dialogSource, /if \(!open \|\| !task \|\| !filtersReady\) return/);
   assert.match(dialogSource, /h-\[90vh\] max-h-\[760px\]/);
+  assert.match(dialogSource, /void loadCandidates\(items\.length > 0\)/);
+  assert.doesNotMatch(dialogSource, /task\?\.updated_at/);
+  assert.doesNotMatch(dialogSource, /task\?\.inserted_count,\s*\n\s*buildCandidateQuery/);
   assert.doesNotMatch(dialogSource, /queueMicrotask\(\(\) => \{\s*setExportError/);
 });
 
@@ -221,6 +224,23 @@ test("collection task panel shows batch parent round progress in result cell", (
   assert.match(source, /多轮采集 · 第/);
   assert.match(source, /已入库/);
   assert.match(source, /成功 \$\{successRounds\} 轮 \/ 失败 \$\{failedRounds\} 轮 \/ 跳过 \$\{skippedRounds\}/);
+});
+
+test("collection tasks support pause and resume without resetting progress", () => {
+  const apiSource = readFileSync(new URL("../src/lib/api.ts", import.meta.url), "utf8");
+  assert.match(apiSource, /pauseCollectionTask/);
+  assert.match(apiSource, /collection-tasks\/\$\{id\}\/pause/);
+  assert.match(apiSource, /resumeCollectionTask/);
+  assert.match(apiSource, /collection-tasks\/\$\{id\}\/resume/);
+
+  const panelSource = readFileSync(
+    new URL("../src/components/collection-tasks/collection-tasks-panel.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(panelSource, /handlePause/);
+  assert.match(panelSource, /handleResume/);
+  assert.match(panelSource, /暂停采集，保留已采集数据和进度/);
+  assert.match(panelSource, /继续采集，从上次进度恢复/);
 });
 
 test("stale recoverable running task is flagged", () => {

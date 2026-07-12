@@ -25,8 +25,8 @@ COLLECTOR_MESSAGES = {
 @router.get("/status", response_model=SettingsStatusResponse)
 async def get_settings_status() -> SettingsStatusResponse:
     mode = settings.collector_mode.lower()
-    if mode not in ("apify", "auto"):
-        mode = "apify"
+    if mode not in ("api_direct", "apify", "auto"):
+        mode = "api_direct"
 
     ig_provider = settings.active_instagram_provider
     ig_configured = settings.is_instagram_collector_configured

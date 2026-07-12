@@ -144,6 +144,11 @@ class OutreachCampaignQueueRequest(BaseModel):
     influencer_ids: list[int] | None = None
 
 
+class OutreachCampaignSendNowRequest(BaseModel):
+    confirm: bool = False
+    influencer_ids: list[int] | None = None
+
+
 class OutreachCampaignQueueResponse(BaseModel):
     queued: int
     skipped: int

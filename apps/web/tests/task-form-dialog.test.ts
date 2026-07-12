@@ -471,6 +471,28 @@ test("batch round count is calculated from total and round size", () => {
   assert.equal(payload.batch_round_count, 20);
 });
 
+test("keyword task allows discovery limit up to 10000", () => {
+  const form = keywordForm({
+    name: "large single run",
+    keywordsText: "amazon finds creator",
+    discovery_limit: "10000",
+  });
+  const payload = formValuesToPayload(form, noopCaps);
+
+  assert.equal(validateForm(form, noopCaps), null);
+  assert.equal(payload.discovery_limit, 10000);
+});
+
+test("keyword task rejects discovery limit above 10000", () => {
+  const form = keywordForm({
+    name: "too large single run",
+    keywordsText: "amazon finds creator",
+    discovery_limit: "10001",
+  });
+
+  assert.match(validateForm(form, noopCaps) ?? "", /1-10000/);
+});
+
 test("editing batch parent initializes and submits calculated batch fields", () => {
   const form = getInitialForm(
     true,

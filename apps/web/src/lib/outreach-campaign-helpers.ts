@@ -85,10 +85,7 @@ export function buildScheduledOutreachQueuePayload(input: {
   return {
     campaign_id: input.campaignId,
     items: input.preview.items
-      .filter((item) => {
-        const approved = item.draft_status ? item.draft_status === "approved" : item.can_queue;
-        return approved && item.can_queue && item.recipient && item.subject && item.body;
-      })
+      .filter((item) => item.can_queue && item.recipient && item.subject && item.body)
       .map((item) => ({
         product_influencer_id: item.influencer_id,
         recipient: item.recipient as string,
@@ -182,7 +179,7 @@ export type OneClickQueueStatus = "not_queued" | "ready_to_send" | "waiting" | "
 export type OneClickPrimaryActionKind = "preview" | "send" | "queue" | "progress" | "retry";
 
 export const OUTREACH_DRAFT_STATUS_LABELS: Record<string, string> = {
-  pending_review: "待审核",
+  pending_review: "已生成",
   modified: "已修改",
   approved: "已批准",
   skipped: "已跳过",
@@ -218,7 +215,7 @@ export function countApprovedOutreachDrafts(
 }
 
 export function buildApprovedDraftSendConfirmMessage(count: number): string {
-  return `本次将发送 ${count} 封已批准邮件。确认后邮件会进入发送队列，并按发送间隔、每日上限和发送时间窗口执行。`;
+  return `本次将发送 ${count} 封 AI 生成邮件。确认后邮件会进入发送队列，并按发送间隔、每日上限和发送时间窗口执行。`;
 }
 
 export type OneClickQueueCampaignInput = {
@@ -368,12 +365,14 @@ export function buildScheduledSendCompletionMessage(input: {
   queuedCount: number;
   sentCount: number;
   failedCount: number;
+  sendMode?: OneClickSendMode;
 }): string | null {
   if (input.sentCount <= 0 && input.failedCount <= 0) return null;
+  const prefix = input.sendMode === "now" ? "发送已完成" : "定时发送已完成";
   if (input.failedCount > 0) {
-    return `定时发送已完成，发送成功 ${input.sentCount} 封，失败 ${input.failedCount} 封。请到发送队列查看失败原因。`;
+    return `${prefix}，发送成功 ${input.sentCount} 封，失败 ${input.failedCount} 封。请到发送队列查看失败原因。`;
   }
-  return `定时发送已完成，发送成功：已发出 ${input.sentCount} 封邮件。`;
+  return `${prefix}，发送成功：已发出 ${input.sentCount} 封邮件。`;
 }
 
 export function buildImmediateSendStartedMessage(): string {
@@ -460,6 +459,9 @@ export function buildOneClickCampaignName(now: Date = new Date()): string {
 export function humanizeOutreachFailureReason(message: string | null | undefined): string {
   const text = (message || "").trim();
   if (!text) return "-";
+  if (/insufficient balance|exceeded_current_quota|quota|account suspended|额度|余额不足|充值/i.test(text)) {
+    return "AI 账户余额不足或额度受限，请充值 DeepSeek/API 账户或更换可用密钥后重试。";
+  }
   if (/SMTP|535|authentication|auth|认证失败/i.test(text)) {
     return "邮箱授权码或 SMTP 配置不对，邮件没有发出去";
   }

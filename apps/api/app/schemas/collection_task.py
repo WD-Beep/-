@@ -363,7 +363,7 @@ class CollectionTaskCreate(BaseModel):
     input_urls: list[str] = Field(default_factory=list)
     country: str | None = Field(default=None, max_length=100)
     category: str | None = Field(default=None, max_length=100)
-    discovery_limit: int | None = Field(default=100, ge=1, le=500)
+    discovery_limit: int | None = Field(default=100, ge=1, le=10000)
     min_engagement_rate: float | None = Field(default=None, ge=0, le=100)
     min_followers_count: int | None = Field(default=HIGH_VALUE_FIRST_MIN_FOLLOWERS, ge=0)
     max_followers_count: int | None = Field(default=None, ge=0)
@@ -569,7 +569,7 @@ class CollectionTaskUpdate(BaseModel):
     input_urls: list[str] | None = None
     country: str | None = Field(default=None, max_length=100)
     category: str | None = Field(default=None, max_length=100)
-    discovery_limit: int | None = Field(default=None, ge=1, le=500)
+    discovery_limit: int | None = Field(default=None, ge=1, le=10000)
     min_engagement_rate: float | None = Field(default=None, ge=0, le=100)
     min_followers_count: int | None = Field(default=None, ge=0)
     max_followers_count: int | None = Field(default=None, ge=0)

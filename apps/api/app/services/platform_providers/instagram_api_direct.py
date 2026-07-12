@@ -5,7 +5,13 @@ from __future__ import annotations
 from app.core.config import settings
 from app.services.platform_types import PlatformCapability, PlatformDiscoveryResult
 
-ENDPOINTS = ["/v1/instagram/user", "/v1/instagram/posts"]
+ENDPOINTS = [
+    "/v1/instagram/posts",
+    "/v1/instagram/users",
+    "/v1/instagram/user",
+    "/v1/instagram/user/posts",
+    "/v1/instagram/post",
+]
 
 
 class InstagramApiDirectProvider:

@@ -391,13 +391,6 @@ export function OutreachCampaignDetailPanel({ campaignId }: { campaignId: number
                               </Button>
                               <Button
                                 size="sm"
-                                onClick={() => void runDraftAction(row.influencer_id, "approve")}
-                                disabled={busyInfluencerId === row.influencer_id || row.draft_status === "approved" || row.draft_status === "queued" || row.draft_status === "sent"}
-                              >
-                                批准
-                              </Button>
-                              <Button
-                                size="sm"
                                 variant="outline"
                                 onClick={() => void runDraftAction(row.influencer_id, "skip")}
                                 disabled={busyInfluencerId === row.influencer_id || row.draft_status === "queued" || row.draft_status === "sent"}

@@ -294,7 +294,7 @@ export function AdminCompactActions({
 }: {
   primaryHref?: string;
   primaryLabel?: string;
-  items: Array<{ label: string; href?: string; danger?: boolean; disabled?: boolean }>;
+  items: Array<{ label: string; href?: string; danger?: boolean; disabled?: boolean; onClick?: () => void }>;
 }) {
   return (
     <div className="flex w-full items-center gap-2">
@@ -307,7 +307,7 @@ export function AdminCompactActions({
 export function AdminMoreMenu({
   items,
 }: {
-  items: Array<{ label: string; href?: string; danger?: boolean; disabled?: boolean }>;
+  items: Array<{ label: string; href?: string; danger?: boolean; disabled?: boolean; onClick?: () => void }>;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -349,6 +349,10 @@ export function AdminMoreMenu({
                 key={item.label}
                 type="button"
                 disabled={item.disabled}
+                onClick={() => {
+                  item.onClick?.();
+                  setOpen(false);
+                }}
                 className={cn(
                   "block w-full rounded px-2.5 py-1.5 text-left text-sm transition hover:bg-[#F4F7FB] disabled:cursor-not-allowed disabled:text-[#98A2B3]",
                   item.danger ? "text-[#B42318]" : "text-[#344054]",

@@ -203,7 +203,11 @@ curl -X POST http://localhost:8000/api/collection-tasks \
   -d '{"name":"测试发现","platform":"instagram","keywords":["travelgear"],"collection_mode":"discovery"}'
 
 curl -X POST http://localhost:8000/api/collection-tasks/{id}/run
+curl -X POST http://localhost:8000/api/collection-tasks/{id}/pause
+curl -X POST http://localhost:8000/api/collection-tasks/{id}/resume
 ```
+
+Collection tasks can be paused and resumed. Pausing keeps the candidate pool, counters, inserted influencers, and saved progress, so resume continues from the last checkpoint instead of collecting from the beginning.
 
 ---
 

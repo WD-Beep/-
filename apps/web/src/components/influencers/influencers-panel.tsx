@@ -71,6 +71,7 @@ import {
   buildOneClickCampaignPayload,
   resolveBulkDeleteSelection,
   resolveBulkOutreachSelection,
+  resolveCurrentPageSelectedIds,
   type InfluencerSelectionMode,
 } from "@/lib/influencer-selection-helpers";
 
@@ -483,12 +484,16 @@ export function InfluencersPanel() {
   };
 
   const exportFilters = apiFilters;
+  const currentPageSelectedIds = resolveCurrentPageSelectedIds(
+    [...selectedIds],
+    items.map((item) => item.id),
+  );
   const allPageSelected = items.length > 0 && items.every((item) => selectedIds.has(item.id));
-  const hasSelection = selectionMode === "filter_all" || selectedIds.size > 0;
+  const hasSelection = selectionMode === "filter_all" || currentPageSelectedIds.length > 0;
   const bulkOutreachSelection = hasSelection
     ? resolveBulkOutreachSelection({
         mode: selectionMode,
-        selectedIds: [...selectedIds],
+        selectedIds: currentPageSelectedIds,
         total,
         filters: apiFilters,
       })
@@ -496,8 +501,8 @@ export function InfluencersPanel() {
   const selectedCount =
     selectionMode === "filter_all"
       ? total
-      : bulkOutreachSelection?.count ?? selectedIds.size;
-  const bulkDeleteIds = resolveBulkDeleteSelection([...selectedIds], selectionMode);
+      : bulkOutreachSelection?.count ?? currentPageSelectedIds.length;
+  const bulkDeleteIds = resolveBulkDeleteSelection(currentPageSelectedIds, selectionMode);
 
   function clearSelection() {
     setSelectedIds(new Set());
@@ -552,7 +557,7 @@ export function InfluencersPanel() {
     const label =
       selectionMode === "filter_all"
         ? `当前筛选全部 ${total} 个红人`
-        : `已选 ${selectedIds.size} 个红人`;
+        : `已选 ${currentPageSelectedIds.length} 个红人`;
     if (
       !window.confirm(
         `确认对${label}一键生成并发送邮件？系统会自动跳过无邮箱、已发送、已回复、黑名单和无效红人，并为每位可发送红人生成不同邮件。`,
@@ -732,7 +737,7 @@ export function InfluencersPanel() {
             {selectionMode === "filter_all" ? (
               <>已选择当前筛选全部 {total} 个红人</>
             ) : (
-              <>已选择 {selectedIds.size} 个红人（当前页）</>
+              <>已选择 {currentPageSelectedIds.length} 个红人（当前页）</>
             )}
           </div>
           <div className="flex flex-wrap gap-2">
@@ -749,15 +754,19 @@ export function InfluencersPanel() {
               variant="outline"
               onClick={() => {
                 if (bulkOutreachSelection?.selectAll) {
+                  clearSelection();
                   router.push(
                     buildOutreachCampaignsUrl({
                       selectAll: true,
                       filters: bulkOutreachSelection.filters,
                       total: bulkOutreachSelection.count,
+                      productId,
                     }),
                   );
                 } else {
-                  router.push(buildOutreachCampaignsUrl({ ids: bulkOutreachSelection?.ids ?? [...selectedIds] }));
+                  const ids = bulkOutreachSelection?.ids ?? currentPageSelectedIds;
+                  clearSelection();
+                  router.push(buildOutreachCampaignsUrl({ ids, productId }));
                 }
               }}
             >

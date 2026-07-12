@@ -38,12 +38,9 @@ logger = logging.getLogger(__name__)
 
 
 ENDPOINTS = [
-
+    "/v1/facebook/posts",
     "/v1/facebook/pages",
-
-    "/v1/facebook/page",
-
-    "/v1/facebook/page/videos",
+    "/v1/facebook/post/comments",
 
 ]
 
@@ -388,9 +385,9 @@ class FacebookApiDirectProvider:
 
                 data = await ad_get(
 
-                    "/v1/facebook/page",
+                    "/v1/facebook/pages",
 
-                    params={"url": url},
+                    params={"query": url, "pages": 1},
 
                     platform="facebook",
 
@@ -433,10 +430,13 @@ class FacebookApiDirectProvider:
                 continue
 
             page = (data or {}).get("page")
+            if not isinstance(page, dict):
+                results = (data or {}).get("results") or (data or {}).get("pages") or []
+                page = next((row for row in results if isinstance(row, dict)), None)
 
             if isinstance(page, dict):
 
-                profile = _profile_from_page_details(page, input_url=url, endpoint="/v1/facebook/page")
+                profile = _profile_from_page_details(page, input_url=url, endpoint="/v1/facebook/pages")
 
                 if profile:
 
@@ -501,8 +501,8 @@ class FacebookApiDirectProvider:
                 break
             try:
                 data = await ad_get(
-                    "/v1/facebook/page",
-                    params={"url": profile.profile_url},
+                    "/v1/facebook/pages",
+                    params={"query": profile.profile_url, "pages": 1},
                     platform="facebook",
                 )
             except ApiDirectError as exc:
@@ -510,11 +510,14 @@ class FacebookApiDirectProvider:
                 continue
             page = (data or {}).get("page")
             if not isinstance(page, dict):
+                results = (data or {}).get("results") or (data or {}).get("pages") or []
+                page = next((row for row in results if isinstance(row, dict)), None)
+            if not isinstance(page, dict):
                 continue
             detail = _profile_from_page_details(
                 page,
                 input_url=profile.profile_url,
-                endpoint="/v1/facebook/page",
+                endpoint="/v1/facebook/pages",
             )
             if not detail:
                 continue

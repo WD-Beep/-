@@ -370,6 +370,49 @@ async def test_queue_skips_whitespace_only_subject_or_body():
 
 
 @pytest.mark.asyncio
+async def test_queue_reuses_existing_active_queue_item_for_same_recipient():
+    suffix = _suffix()
+    async with async_session_factory() as db:
+        influencer = await _create_influencer(
+            db, suffix=suffix, email=f"reuse_{suffix}@example.com"
+        )
+        await db.commit()
+        ctx = TenantContext(user_id=1, workspace_id=1, product_id=1, is_admin=True)
+        old_campaign = await _create_campaign(db, ctx=ctx, influencer_ids=[influencer.id])
+        new_campaign = await _create_campaign(db, ctx=ctx, influencer_ids=[influencer.id])
+        old_queue = OutreachSendQueueItem(
+            product_id=1,
+            user_id=1,
+            product_influencer_id=influencer.id,
+            campaign_id=old_campaign.id,
+            recipient=f"reuse_{suffix}@example.com",
+            subject="Old subject",
+            body="Old body",
+            status="queued",
+            scheduled_at=datetime.now(UTC),
+            generated_by_ai=True,
+            allow_resend=True,
+        )
+        db.add(old_queue)
+        await db.commit()
+
+        await _preview_with_mock(
+            db,
+            product_id=1,
+            campaign_id=new_campaign.id,
+            generation=_mock_generation(subject="New subject", body="New body"),
+        )
+        result = await _queue_confirmed(db, ctx=ctx, campaign_id=new_campaign.id)
+
+        assert result.queued == 1
+        assert result.skipped == 0
+        await db.refresh(old_queue)
+        assert old_queue.campaign_id == new_campaign.id
+        assert old_queue.subject == "New subject"
+        assert old_queue.body == "New body"
+
+
+@pytest.mark.asyncio
 async def test_queue_requires_confirm_flag():
     suffix = _suffix()
     async with async_session_factory() as db:
@@ -456,7 +499,7 @@ def test_outreach_campaign_create_request_defaults_to_business_batch_limit():
 
 
 @pytest.mark.asyncio
-async def test_process_outside_send_window_rejected():
+async def test_manual_process_ignores_send_window():
     suffix = _suffix()
     async with async_session_factory() as db:
         influencer = await _create_influencer(
@@ -477,12 +520,15 @@ async def test_process_outside_send_window_rejected():
         with patch(
             "app.services.outreach_campaign_service.is_in_send_window",
             return_value=False,
+        ), patch(
+            "app.services.outreach_send_queue_service.EmailService._send_message",
+            new=AsyncMock(),
         ):
-            with pytest.raises(HTTPException) as exc:
-                await OutreachCampaignService.process_campaign(
-                    db, ctx=ctx, campaign_id=campaign.id
-                )
-        assert exc.value.detail
+            result = await OutreachCampaignService.process_campaign(
+                db, ctx=ctx, campaign_id=campaign.id
+            )
+
+        assert result.sent == 1
 
 
 def test_is_in_send_window_open_range():
@@ -1490,6 +1536,86 @@ async def test_process_sends_queue_item_saved_subject_body():
         assert outcome == "sent"
         assert captured["subject"] == "Queued subject line"
         assert "Queued body paragraph unique" in captured["body"]
+
+
+@pytest.mark.asyncio
+async def test_send_campaign_now_sends_directly_then_records_terminal_queue_rows():
+    suffix = _suffix()
+    async with async_session_factory() as db:
+        a = await _create_influencer(db, suffix=f"direct_a_{suffix}", email=f"direct_a_{suffix}@creator-mail.net")
+        b = await _create_influencer(db, suffix=f"direct_b_{suffix}", email=f"direct_b_{suffix}@creator-mail.net")
+        await db.commit()
+        ctx = TenantContext(user_id=1, workspace_id=1, product_id=1, is_admin=True)
+        campaign = await _create_campaign(
+            db,
+            ctx=ctx,
+            influencer_ids=[a.id, b.id],
+            daily_limit=10,
+            send_window_start="00:00",
+            send_window_end="23:59",
+        )
+
+        async def _generate_side_effect(_db, *, product_row, **_kwargs):
+            return _mock_generation(
+                subject=f"Direct subject {product_row.id}",
+                body=f"Direct body for influencer {product_row.id}",
+            )
+
+        captured: list[tuple[str, list[str]]] = []
+
+        async def _capture_send(message, recipients):
+            captured.append((message["Subject"], list(recipients)))
+
+        with patch(
+            "app.services.outreach_campaign_service.SpeechRecommendationService.generate_outreach_email",
+            new=AsyncMock(side_effect=_generate_side_effect),
+        ), patch(
+            "app.services.email.EmailService._send_message",
+            new=AsyncMock(side_effect=_capture_send),
+        ):
+            preview = await OutreachCampaignService.preview_campaign(
+                db, product_id=1, campaign_id=campaign.id
+            )
+            result = await OutreachCampaignService.send_campaign_now(
+                db,
+                ctx=ctx,
+                campaign_id=campaign.id,
+                influencer_ids=[item.influencer_id for item in preview.items],
+            )
+
+        assert result.processed == 2
+        assert result.sent == 2
+        assert result.failed == 0
+        assert result.skipped == 0
+        assert {subject for subject, _recipients in captured} == {
+            f"Direct subject {a.id}",
+            f"Direct subject {b.id}",
+        }
+
+        queue_rows = list(
+            (
+                await db.scalars(
+                    select(OutreachSendQueueItem).where(
+                        OutreachSendQueueItem.campaign_id == campaign.id
+                    )
+                )
+            ).all()
+        )
+        assert len(queue_rows) == 2
+        assert {row.status for row in queue_rows} == {"sent"}
+        assert not [row for row in queue_rows if row.status in {"queued", "scheduled", "sending"}]
+
+        recipients = list(
+            (
+                await db.scalars(
+                    select(OutreachCampaignRecipient).where(
+                        OutreachCampaignRecipient.campaign_id == campaign.id
+                    )
+                )
+            ).all()
+        )
+        assert {rec.draft_status for rec in recipients} == {"sent"}
+        assert all(rec.queue_item_id for rec in recipients)
 
 
 @pytest.mark.asyncio

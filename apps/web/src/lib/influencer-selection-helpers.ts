@@ -39,6 +39,14 @@ export function resolveBulkDeleteSelection(
   return Array.from(new Set(selectedIds));
 }
 
+export function resolveCurrentPageSelectedIds(
+  selectedIds: number[],
+  currentPageIds: number[],
+): number[] {
+  const currentPageIdSet = new Set(currentPageIds);
+  return Array.from(new Set(selectedIds)).filter((id) => currentPageIdSet.has(id));
+}
+
 export function encodeFiltersForCampaign(
   filters: Omit<InfluencerListFilters, "page" | "pageSize">,
 ): Record<string, string | number | boolean> {
@@ -97,8 +105,12 @@ export function buildOutreachCampaignsUrl(options: {
   selectAll?: boolean;
   filters?: Omit<InfluencerListFilters, "page" | "pageSize">;
   total?: number;
+  productId?: number | null;
 }): string {
   const params = new URLSearchParams();
+  if (options.productId != null && Number.isFinite(options.productId) && options.productId > 0) {
+    params.set("product_id", String(options.productId));
+  }
   if (options.selectAll && options.filters) {
     params.set("select_all", "1");
     if (options.total != null) params.set("total", String(options.total));

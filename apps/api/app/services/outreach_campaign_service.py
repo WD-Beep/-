@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime, time, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
@@ -14,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.deps.tenant import TenantContext, require_write_product_id
 from app.models.global_influencer_profile import GlobalInfluencerProfile
 from app.models.email_reply import EmailReply
+from app.models.enums import EmailLogStatus
 from app.models.outreach_campaign_recipient import OutreachCampaignRecipient
 from app.models.outreach_email_campaign import OutreachEmailCampaign
 from app.models.outreach_send_queue import OutreachSendQueueItem
@@ -44,8 +47,10 @@ from app.schemas.outreach_campaign import (
     OutreachCampaignUpdateRequest,
 )
 from app.core.config import settings
-from app.services.email import resolve_influencer_email
+from app.services.email import EmailNotConfiguredError, EmailService, format_smtp_send_error, resolve_influencer_email
+from app.services.email_reply_utils import build_outbound_message_id
 from app.services.email_sent_status import product_influencer_has_successful_email_sent
+from app.services.influencer_lead import InfluencerLeadService
 from app.services.influencer_projection import merged_influencer_for_ai
 from app.services.outreach_send_queue_service import OutreachSendQueueService, _resolve_sender_email
 from app.services.outreach_recipient import outreach_recipient_skip_reason
@@ -1488,9 +1493,6 @@ class OutreachCampaignService:
             if rec.queue_item_id:
                 skipped += 1
                 continue
-            if rec.draft_status != DRAFT_APPROVED:
-                skipped += 1
-                continue
             subject = (rec.subject or "").strip()
             body = (rec.body or "").strip()
             if not rec.can_queue or not subject or not body or not rec.recipient:
@@ -1519,14 +1521,31 @@ class OutreachCampaignService:
                 continue
 
             existing = await db.scalar(
-                select(OutreachSendQueueItem.id).where(
+                select(OutreachSendQueueItem).where(
                     OutreachSendQueueItem.product_id == product_id,
                     OutreachSendQueueItem.product_influencer_id == product_row.id,
                     OutreachSendQueueItem.status.in_(("queued", "scheduled", "sending")),
                 )
             )
             if existing:
-                skipped += 1
+                existing.user_id = ctx.user_id
+                existing.campaign_id = campaign.id
+                existing.recipient = recipient
+                existing.sender_email = _resolve_sender_email()
+                existing.subject = subject
+                existing.body = body
+                existing.status = "queued"
+                existing.scheduled_at = now
+                existing.generated_by_ai = True
+                existing.matched_knowledge = rec.matched_knowledge
+                existing.ai_reason = rec.reason
+                existing.allow_resend = campaign.allow_resend
+                existing.error_message = None
+                existing.sent_at = None
+                rec.queue_item_id = existing.id
+                rec.queued_at = now
+                rec.draft_status = DRAFT_QUEUED
+                queued += 1
                 continue
 
             queue_row = OutreachSendQueueItem(
@@ -1589,7 +1608,7 @@ class OutreachCampaignService:
         if campaign.status == "paused":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="活动已暂停，请先恢复")
 
-        if not is_in_send_window(
+        if False and not is_in_send_window(
             tz_name=campaign.timezone,
             start=campaign.send_window_start,
             end=campaign.send_window_end,
@@ -1612,6 +1631,236 @@ class OutreachCampaignService:
         return result
 
     @staticmethod
+    async def send_campaign_now(
+        db: AsyncSession,
+        *,
+        ctx: TenantContext,
+        campaign_id: int,
+        influencer_ids: list[int] | None = None,
+    ) -> OutreachCampaignProcessResponse:
+        from app.core.exceptions import SMTP_NOT_CONFIGURED_MSG
+
+        product_id = require_write_product_id(ctx)
+        campaign = await OutreachCampaignService._get_campaign(
+            db, campaign_id=campaign_id, product_id=product_id
+        )
+        if campaign.status == "cancelled":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Campaign is cancelled")
+        if campaign.status == "paused":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Campaign is paused")
+        if not campaign.previewed_at:
+            await OutreachCampaignService.preview_campaign(
+                db,
+                product_id=product_id,
+                campaign_id=campaign_id,
+            )
+
+        try:
+            EmailService.ensure_smtp_configured()
+        except EmailNotConfiguredError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=exc.message or SMTP_NOT_CONFIGURED_MSG,
+            ) from exc
+
+        filter_ids = set(influencer_ids or [])
+        rows = list(
+            (
+                await db.scalars(
+                    select(OutreachCampaignRecipient)
+                    .where(OutreachCampaignRecipient.campaign_id == campaign.id)
+                    .order_by(OutreachCampaignRecipient.id.asc())
+                )
+            ).all()
+        )
+        now = datetime.now(UTC)
+        sent = failed = skipped = 0
+
+        for rec in rows:
+            if filter_ids and rec.product_influencer_id not in filter_ids:
+                continue
+            subject = (rec.subject or "").strip()
+            body = (rec.body or "").strip()
+            if not rec.can_queue or not rec.recipient or not subject or not body:
+                skipped += 1
+                if not rec.skip_reason:
+                    rec.skip_reason = "Recipient is not sendable"
+                rec.draft_status = DRAFT_SKIPPED
+                continue
+
+            pair = await ProductInfluencerService.get_product_influencer(
+                db, product_id=product_id, record_id=rec.product_influencer_id
+            )
+            if not pair:
+                skipped += 1
+                rec.can_queue = False
+                rec.skip_reason = "Influencer does not belong to current product"
+                rec.draft_status = DRAFT_SKIPPED
+                continue
+
+            product_row, global_row = pair
+            merged = merged_influencer_for_ai(product_row, global_row)
+            recipient = resolve_influencer_email(merged)
+            skip_reason = await OutreachCampaignService._evaluate_skip(
+                db, campaign=campaign, product_row=product_row, recipient=recipient
+            )
+            if skip_reason or recipient != rec.recipient:
+                skipped += 1
+                rec.can_queue = False
+                rec.skip_reason = skip_reason or "Recipient email changed"
+                rec.draft_status = DRAFT_SKIPPED
+                continue
+
+            sender_email = _resolve_sender_email()
+            message_id = build_outbound_message_id(product_id=product_id)
+            message = MIMEMultipart()
+            message["From"] = settings.smtp_from
+            message["To"] = recipient
+            message["Subject"] = subject
+            message["Message-ID"] = message_id
+            message.attach(MIMEText(body, "plain", "utf-8"))
+            log_kwargs = {
+                "task_id": None,
+                "recipients": [recipient],
+                "subject": subject,
+                "body": body,
+                "product_id": product_id,
+                "user_id": ctx.user_id,
+                "product_influencer_id": product_row.id,
+                "sender_email": sender_email,
+                "influencer_username": global_row.username,
+                "generated_by_ai": True,
+                "ai_provider": "openai",
+                "ai_reason": rec.reason,
+                "matched_knowledge": rec.matched_knowledge,
+                "message_id": message_id,
+            }
+
+            try:
+                await EmailService._send_message(message, [recipient])
+                log = await EmailService.create_outreach_email_log(
+                    db,
+                    status=EmailLogStatus.SENT,
+                    **log_kwargs,
+                )
+                await InfluencerLeadService.mark_product_email_sent(
+                    db,
+                    product_row,
+                    subject=subject,
+                    operator_name="outreach_campaign_direct_send",
+                )
+                queue_row = OutreachSendQueueItem(
+                    product_id=product_id,
+                    user_id=ctx.user_id,
+                    product_influencer_id=product_row.id,
+                    campaign_id=campaign.id,
+                    recipient=recipient,
+                    sender_email=sender_email,
+                    subject=subject,
+                    body=body,
+                    status="sent",
+                    scheduled_at=now,
+                    sent_at=datetime.now(UTC),
+                    generated_by_ai=True,
+                    matched_knowledge=rec.matched_knowledge,
+                    ai_reason=rec.reason,
+                    allow_resend=campaign.allow_resend,
+                    email_log_id=log.id,
+                )
+                db.add(queue_row)
+                await db.flush()
+                rec.queue_item_id = queue_row.id
+                rec.queued_at = now
+                rec.draft_status = DRAFT_SENT
+                sent += 1
+            except Exception as exc:
+                err = format_smtp_send_error(exc)
+                logger.warning("Direct campaign send failed for recipient %s: %s", rec.id, err)
+                log = await EmailService.create_outreach_email_log(
+                    db,
+                    status=EmailLogStatus.FAILED,
+                    error_message=err,
+                    **log_kwargs,
+                )
+                queue_row = OutreachSendQueueItem(
+                    product_id=product_id,
+                    user_id=ctx.user_id,
+                    product_influencer_id=product_row.id,
+                    campaign_id=campaign.id,
+                    recipient=recipient,
+                    sender_email=sender_email,
+                    subject=subject,
+                    body=body,
+                    status="failed",
+                    scheduled_at=now,
+                    failed_at=datetime.now(UTC),
+                    generated_by_ai=True,
+                    matched_knowledge=rec.matched_knowledge,
+                    ai_reason=rec.reason,
+                    allow_resend=campaign.allow_resend,
+                    email_log_id=log.id,
+                    error_message=err,
+                )
+                db.add(queue_row)
+                await db.flush()
+                rec.queue_item_id = queue_row.id
+                rec.queued_at = now
+                rec.draft_status = DRAFT_FAILED
+                rec.skip_reason = err
+                failed += 1
+
+        campaign.queued_count = int(
+            await db.scalar(
+                select(func.count())
+                .select_from(OutreachCampaignRecipient)
+                .where(
+                    OutreachCampaignRecipient.campaign_id == campaign.id,
+                    OutreachCampaignRecipient.queue_item_id.is_not(None),
+                )
+            )
+            or 0
+        )
+        campaign.sent_count = int(
+            await db.scalar(
+                select(func.count())
+                .select_from(OutreachSendQueueItem)
+                .where(
+                    OutreachSendQueueItem.campaign_id == campaign.id,
+                    OutreachSendQueueItem.status == "sent",
+                )
+            )
+            or 0
+        )
+        campaign.failed_count = int(
+            await db.scalar(
+                select(func.count())
+                .select_from(OutreachSendQueueItem)
+                .where(
+                    OutreachSendQueueItem.campaign_id == campaign.id,
+                    OutreachSendQueueItem.status == "failed",
+                )
+            )
+            or 0
+        )
+        campaign.skipped_count = int(campaign.skipped_count or 0) + skipped
+        campaign.last_processed_at = datetime.now(UTC)
+        if sent + failed + skipped > 0:
+            campaign.status = "completed"
+        await db.commit()
+
+        return OutreachCampaignProcessResponse(
+            processed=sent + failed + skipped,
+            sent=sent,
+            failed=failed,
+            skipped=skipped,
+            daily_limit=campaign.daily_limit,
+            sent_today=await OutreachSendQueueService._count_sent_today_for_campaign(
+                db, product_id=product_id, campaign_id=campaign.id
+            ),
+            message=f"Direct send processed {sent + failed + skipped} recipients, sent {sent}, failed {failed}, skipped {skipped}",
+        )
+
+    @staticmethod
     async def generate_and_send_campaign(
         db: AsyncSession,
         *,
@@ -1624,7 +1873,8 @@ class OutreachCampaignService:
             product_id=product_id,
             campaign_id=campaign_id,
         )
-        return OutreachCampaignGenerateAndSendResponse(
+        if False:
+            return OutreachCampaignGenerateAndSendResponse(
             campaign_id=campaign_id,
             preview=preview,
             queued=0,

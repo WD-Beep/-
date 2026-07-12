@@ -15,6 +15,9 @@ from app.models.email_reply import EmailReply
 from app.models.global_influencer_profile import GlobalInfluencerProfile
 from app.models.product_influencer import ProductInfluencer
 from app.models.tenant import Product, ProductMember, User
+from app.scheduler import refresh_scheduler
+from app.schemas.collection_task import CollectionTaskBulkDelete, CollectionTaskBulkDeleteResult
+from app.services.collection_task import CollectionTaskService
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -520,10 +523,55 @@ async def list_admin_collection_tasks(
         select(CollectionTask, Product, User)
         .outerjoin(Product, Product.id == CollectionTask.product_id)
         .outerjoin(User, User.id == CollectionTask.user_id)
+        .where(CollectionTask.is_archived.is_(False))
         .order_by(CollectionTask.created_at.desc(), CollectionTask.id.desc())
         .limit(200)
     )
     return [_task_row(task, product, user) for task, product, user in rows]
+
+
+@router.post("/collection-tasks/bulk-delete", response_model=CollectionTaskBulkDeleteResult)
+async def bulk_delete_admin_collection_tasks(
+    data: CollectionTaskBulkDelete,
+    _ctx: UserContext = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> CollectionTaskBulkDeleteResult:
+    tasks: list[CollectionTask] = []
+    for task_id in data.task_ids:
+        task = await db.get(CollectionTask, task_id)
+        if task and not task.is_archived and task.parent_task_id is None:
+            tasks.append(task)
+    result = await CollectionTaskService.delete_tasks_bulk(
+        db,
+        tasks,
+        require_ineffective=False,
+    )
+    await refresh_scheduler()
+    return CollectionTaskBulkDeleteResult(
+        deleted_count=len(result["deleted_ids"]),
+        archived_count=len(result["archived_ids"]),
+        skipped_count=len(result["skipped_ids"]),
+        deleted_ids=result["deleted_ids"],
+        archived_ids=result["archived_ids"],
+        skipped_ids=result["skipped_ids"],
+    )
+
+
+@router.delete("/collection-tasks/{task_id}")
+async def delete_admin_collection_task(
+    task_id: int,
+    _ctx: UserContext = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    task = await db.get(CollectionTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Collection task not found")
+    try:
+        action = await CollectionTaskService.dispose_task(db, task, require_ineffective=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    await refresh_scheduler()
+    return {"action": action, "task_id": task_id}
 
 
 @router.get("/influencers")
@@ -582,6 +630,7 @@ async def _collection_tasks_for_product(db: AsyncSession, product_id: int) -> li
         .outerjoin(Product, Product.id == CollectionTask.product_id)
         .outerjoin(User, User.id == CollectionTask.user_id)
         .where(CollectionTask.product_id == product_id)
+        .where(CollectionTask.is_archived.is_(False))
         .order_by(CollectionTask.created_at.desc(), CollectionTask.id.desc())
         .limit(100)
     )

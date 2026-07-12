@@ -12,9 +12,42 @@ from app.models.collection_task import CollectionTask
 from app.models.collection_task_candidate import CollectionTaskCandidate
 from app.models.enums import CollectionTaskStatus
 from app.models.product_influencer_source import ProductInfluencerSource
-from app.services.task_effectiveness import batch_task_has_valuable_insert, is_collection_task_ineffective
+from app.services.task_effectiveness import (
+    batch_task_has_valuable_insert,
+    has_insert_records,
+    is_collection_task_ineffective,
+    is_high_value_task,
+)
+from app.services.task_run_progress import STAGE_FAILED
 
 DisposalAction = Literal["deleted", "archived", "skipped"]
+
+
+def _running_task_can_be_disposed(
+    task: CollectionTask,
+    *,
+    has_valuable_insert: bool | None,
+) -> bool:
+    if is_high_value_task(task):
+        return False
+    if has_valuable_insert is True:
+        return False
+    return not has_insert_records(task)
+
+
+def _mark_running_task_interrupted_for_disposal(task: CollectionTask) -> None:
+    now = datetime.now(UTC)
+    reason = "用户批量删除时终止运行中任务"
+    task.status = CollectionTaskStatus.FAILED.value
+    task.current_stage = STAGE_FAILED
+    task.last_error = reason
+    task.error_message = reason
+    task.run_checkpoint = {
+        **(task.run_checkpoint or {}),
+        "disposed_while_running": True,
+        "disposed_while_running_at": now.isoformat(),
+        "disposed_while_running_reason": reason,
+    }
 
 
 def task_has_obvious_retention(task: CollectionTask) -> bool:
@@ -99,10 +132,21 @@ async def dispose_collection_task(
     """删除或归档单个任务。返回 (action, skip_reason)。"""
     if task.is_archived:
         return "skipped", "任务已归档"
+
+    valuable_flags: dict[int, bool] | None = None
     if task.status == CollectionTaskStatus.RUNNING.value:
-        return "skipped", "任务正在运行中"
+        if require_ineffective:
+            valuable_flags = await batch_task_has_valuable_insert(db, [task.id])
+            if not _running_task_can_be_disposed(
+                task,
+                has_valuable_insert=valuable_flags.get(task.id),
+            ):
+                return "skipped", "任务正在运行且已有有效结果"
+        _mark_running_task_interrupted_for_disposal(task)
+
     if require_ineffective:
-        valuable_flags = await batch_task_has_valuable_insert(db, [task.id])
+        if valuable_flags is None:
+            valuable_flags = await batch_task_has_valuable_insert(db, [task.id])
         if not is_collection_task_ineffective(task, has_valuable_insert=valuable_flags.get(task.id)):
             return "skipped", "只能删除无效果任务"
 

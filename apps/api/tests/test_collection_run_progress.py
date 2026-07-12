@@ -9,11 +9,16 @@ import httpx
 import pytest
 from fastapi import BackgroundTasks, HTTPException
 
-from app.api.routes.collection_tasks import bulk_run_collection_tasks, run_collection_task
+from app.api.routes.collection_tasks import (
+    bulk_run_collection_tasks,
+    pause_collection_task,
+    resume_collection_task,
+    run_collection_task,
+)
 from app.core.config import settings
 from app.deps.tenant import TenantContext
 from app.models.enums import CollectionTaskStatus
-from app.schemas.collection_task import CollectionTaskBulkRun
+from app.schemas.collection_task import CollectionTaskBulkRun, CollectionTaskFilter
 from app.services.collection_runner import CollectionRunCapacityError, CollectionRunnerService
 from app.services import collection_runner as collection_runner_module
 from app.services.collection_task import CollectionTaskService
@@ -464,6 +469,121 @@ def test_run_starts_after_stale_in_process_slots_reconciled(monkeypatch):
     anyio.run(_run)
     assert task.status == CollectionTaskStatus.RUNNING.value
     assert background_tasks.tasks[0].kwargs == {"resume": False}
+
+
+def test_list_tasks_reconciles_stale_running_rows(monkeypatch):
+    calls = []
+
+    async def _reconcile(db):
+        calls.append(db)
+        return 1
+
+    monkeypatch.setattr(CollectionTaskService, "reconcile_stale_running_tasks", _reconcile)
+
+    async def _run():
+        db = AsyncMock()
+        db.scalar = AsyncMock(return_value=0)
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        db.execute = AsyncMock(return_value=result)
+        page = await CollectionTaskService.list_tasks(db, CollectionTaskFilter(), 1, 20)
+        assert page.total == 0
+        return db
+
+    db = anyio.run(_run)
+    assert calls == [db]
+
+
+def test_pause_running_task_preserves_progress_and_checkpoint(monkeypatch):
+    task = _task(
+        id=2,
+        status=CollectionTaskStatus.RUNNING.value,
+        processed_count=7,
+        success_count=3,
+        inserted_count=3,
+        result_count=3,
+        run_checkpoint={"persisted_profiles": ["instagram:https://example.com/a"]},
+    )
+    db = AsyncMock()
+
+    async def _get_task(_db, task_id):
+        return task if task_id == 2 else None
+
+    monkeypatch.setattr(CollectionTaskService, "get_task", _get_task)
+
+    async def _run():
+        result = await pause_collection_task(2, db, ctx=_tenant_ctx())
+        assert result.status == CollectionTaskStatus.PAUSED.value
+
+    anyio.run(_run)
+
+    assert task.status == CollectionTaskStatus.PAUSED.value
+    assert task.processed_count == 7
+    assert task.success_count == 3
+    assert task.inserted_count == 3
+    assert task.result_count == 3
+    assert task.run_checkpoint["persisted_profiles"] == ["instagram:https://example.com/a"]
+    assert task.run_checkpoint["paused"] is True
+    db.commit.assert_awaited()
+
+
+def test_resume_paused_task_queues_with_resume_checkpoint(monkeypatch):
+    task = _task(
+        id=2,
+        status=CollectionTaskStatus.PAUSED.value,
+        processed_count=7,
+        run_checkpoint={"paused": True, "persisted_profiles": ["instagram:https://example.com/a"]},
+    )
+    db = AsyncMock()
+    background_tasks = BackgroundTasks()
+
+    async def _get_task(_db, task_id):
+        return task if task_id == 2 else None
+
+    async def _queue_or_start(_db, queued_task, *, resume=False):
+        assert queued_task is task
+        assert resume is True
+        queued_task.status = CollectionTaskStatus.RUNNING.value
+        return CollectionTaskStatus.RUNNING
+
+    monkeypatch.setattr(CollectionTaskService, "get_task", _get_task)
+    monkeypatch.setattr(CollectionQueueService, "queue_or_start", _queue_or_start)
+
+    async def _run():
+        result = await resume_collection_task(2, background_tasks, db, ctx=_tenant_ctx())
+        assert result.status == CollectionTaskStatus.RUNNING
+
+    anyio.run(_run)
+
+    assert task.run_checkpoint["persisted_profiles"] == ["instagram:https://example.com/a"]
+    assert task.run_checkpoint.get("paused") is None
+    assert background_tasks.tasks[0].kwargs == {"resume": True}
+
+
+def test_resume_paused_active_task_does_not_start_duplicate_background(monkeypatch):
+    task = _task(
+        id=2,
+        status=CollectionTaskStatus.PAUSED.value,
+        run_checkpoint={"paused": True, "persisted_profiles": ["instagram:https://example.com/a"]},
+    )
+    db = AsyncMock()
+    background_tasks = BackgroundTasks()
+
+    async def _get_task(_db, task_id):
+        return task if task_id == 2 else None
+
+    monkeypatch.setattr(CollectionTaskService, "get_task", _get_task)
+    monkeypatch.setattr(CollectionRunnerService, "is_task_active_in_process", lambda task_id: task_id == 2)
+
+    async def _run():
+        result = await resume_collection_task(2, background_tasks, db, ctx=_tenant_ctx())
+        assert result.status == CollectionTaskStatus.RUNNING
+
+    anyio.run(_run)
+
+    assert task.status == CollectionTaskStatus.RUNNING.value
+    assert task.run_checkpoint.get("paused") is None
+    assert background_tasks.tasks == []
 
 
 def test_run_rejects_when_in_process_collection_active(monkeypatch):

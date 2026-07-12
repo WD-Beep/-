@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from app.models.collection_task import CollectionTask
 
 DEFAULT_TARGET = 100
-MAX_DISCOVERY_LIMIT = 500
+MAX_DISCOVERY_LIMIT = 10000
 OVERFETCH_RATIO = 8
 MAX_OVERFETCH_ROUNDS = 3
 

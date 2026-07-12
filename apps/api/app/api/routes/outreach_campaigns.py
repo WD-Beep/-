@@ -17,6 +17,7 @@ from app.schemas.outreach_campaign import (
     OutreachCampaignRead,
     OutreachCampaignRecipientListResponse,
     OutreachCampaignReplyBoardResponse,
+    OutreachCampaignSendNowRequest,
     OutreachCampaignPreviewItem,
     OutreachOneClickWorkbenchResponse,
     OutreachCampaignUpdateRequest,
@@ -220,6 +221,27 @@ async def process_outreach_campaign(
     _require_product_scope(ctx)
     return await OutreachCampaignService.process_campaign(
         db, ctx=ctx, campaign_id=campaign_id
+    )
+
+
+@router.post("/{campaign_id}/send-now", response_model=OutreachCampaignProcessResponse)
+async def send_outreach_campaign_now(
+    campaign_id: int,
+    payload: OutreachCampaignSendNowRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> OutreachCampaignProcessResponse:
+    _require_product_scope(ctx)
+    if not payload.confirm:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Immediate send requires confirm=true",
+        )
+    return await OutreachCampaignService.send_campaign_now(
+        db,
+        ctx=ctx,
+        campaign_id=campaign_id,
+        influencer_ids=payload.influencer_ids,
     )
 
 

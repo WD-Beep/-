@@ -75,9 +75,7 @@ def test_reconcile_skips_fresh_running_tasks():
     assert fresh.status == CollectionTaskStatus.RUNNING.value
 
 
-def test_instagram_collector_available_with_apify_only():
-    from app.collectors import get_collector
-
+def test_instagram_collector_requires_api_direct_even_with_legacy_apify_config():
     task = CollectionTask(
         name="ig-apify",
         platform="instagram",
@@ -88,29 +86,26 @@ def test_instagram_collector_available_with_apify_only():
     with patch.object(settings, "instagram_data_provider", "apify"):
         with patch.object(settings, "apify_token", "apify_api_test_token"):
             with patch.object(settings, "api_direct_api_key", ""):
-                ensure_instagram_provider_ready()
-                collector = get_collector(task)
-    assert collector is not None
+                with pytest.raises(Exception):
+                    ensure_instagram_provider_ready()
 
 
-def test_instagram_capability_shows_apify_when_provider_is_apify():
+def test_instagram_capability_legacy_apify_config_uses_api_direct():
     with patch.object(settings, "instagram_data_provider", "apify"):
         with patch.object(settings, "apify_token", "apify_api_test_token"):
             with patch.object(settings, "api_direct_api_key", ""):
                 cap = get_platform_capability("instagram")
-    assert cap.status == "supported"
-    assert "Apify" in cap.message
-    assert "API Direct 已配置" not in cap.message
+    assert cap.status == "not_configured"
+    assert "API_DIRECT_API_KEY" in cap.message
 
 
-def test_tiktok_capability_uses_apify_when_configured():
+def test_tiktok_capability_legacy_apify_config_uses_api_direct():
     with patch.object(settings, "tiktok_data_provider", "apify"):
         with patch.object(settings, "apify_token", "apify_api_test_token"):
             with patch.object(settings, "api_direct_api_key", ""):
                 cap = get_platform_capability("tiktok")
-    assert cap.status == "supported"
-    assert "Apify" in cap.message
-    assert "未接入" not in cap.message
+    assert cap.status == "not_configured"
+    assert "API_DIRECT_API_KEY" in cap.message
 
 
 def test_tiktok_capability_falls_back_to_api_direct_when_configured():
@@ -121,34 +116,31 @@ def test_tiktok_capability_falls_back_to_api_direct_when_configured():
     assert "API Direct" in cap.message
 
 
-def test_tiktok_capability_apify_without_token_is_not_configured():
+def test_tiktok_capability_legacy_apify_without_api_direct_is_not_configured():
     with patch.object(settings, "tiktok_data_provider", "apify"):
-        with patch.object(settings, "apify_token", ""):
-            cap = get_platform_capability("tiktok")
+        with patch.object(settings, "api_direct_api_key", ""):
+            with patch.object(settings, "apify_token", "apify_api_test_token"):
+                cap = get_platform_capability("tiktok")
     assert cap.status == "not_configured"
-    assert "APIFY_TOKEN" in cap.message
+    assert "API_DIRECT_API_KEY" in cap.message
 
 
-def test_facebook_capability_apify_with_token():
+def test_facebook_capability_legacy_apify_config_uses_api_direct():
     with patch.object(settings, "facebook_data_provider", "apify"):
         with patch.object(settings, "apify_token", "apify_api_test_token"):
             cap = get_platform_capability("facebook")
     assert cap.status == "supported"
-    assert "Apify" in cap.message
-    assert "APIFY_TOKEN" in cap.message or "Apify" in cap.message
-    assert "未接入" not in cap.message
-    assert "Apify provider" not in cap.message
+    assert "API Direct" in cap.message
 
 
-def test_facebook_apify_preference_stays_apify_without_token_even_if_api_direct_configured():
+def test_facebook_legacy_apify_preference_resolves_to_api_direct():
     with patch.object(settings, "facebook_data_provider", "apify"):
         with patch.object(settings, "apify_token", ""):
             with patch.object(settings, "api_direct_api_key", "test-key"):
-                assert settings.active_facebook_provider == "apify"
+                assert settings.active_facebook_provider == "api_direct"
                 cap = get_platform_capability("facebook")
-    assert cap.status == "not_configured"
-    assert "APIFY_TOKEN" in cap.message
-    assert "API Direct" not in cap.message
+    assert cap.status == "supported"
+    assert "API Direct" in cap.message
 
 
 def test_facebook_capability_api_direct_without_key():
@@ -160,48 +152,47 @@ def test_facebook_capability_api_direct_without_key():
     assert "API_DIRECT_API_KEY" in cap.message
 
 
-def test_facebook_capability_falls_back_to_apify_when_api_direct_missing():
+def test_facebook_capability_does_not_fallback_to_apify_when_api_direct_missing():
     with patch.object(settings, "facebook_data_provider", "api_direct"):
         with patch.object(settings, "api_direct_api_key", ""):
             with patch.object(settings, "apify_token", "apify_api_test_token"):
                 cap = get_platform_capability("facebook")
-    assert cap.status == "supported"
-    assert "Apify" in cap.message
-    assert "API_DIRECT_API_KEY" not in cap.message
+    assert cap.status == "not_configured"
+    assert "API_DIRECT_API_KEY" in cap.message
 
 
-def test_facebook_provider_routes_to_apify_when_configured():
+def test_facebook_provider_uses_api_direct_when_legacy_apify_configured():
     from app.services.api_direct_provider import _provider_cls
 
     with patch.object(settings, "facebook_data_provider", "apify"):
         with patch.object(settings, "apify_token", "apify_api_test_token"):
-            assert _provider_cls("facebook").__name__ == "FacebookApifyProvider"
+            assert _provider_cls("facebook").__name__ == "FacebookApiDirectProvider"
 
 
-def test_youtube_provider_routes_to_official_in_auto_and_never_api_direct():
+def test_youtube_provider_routes_to_api_direct_by_default_and_official_when_requested():
     from app.services.api_direct_provider import _provider_cls
 
     with patch.object(settings, "youtube_data_provider", "auto"):
-        assert _provider_cls("youtube").__name__ == "YouTubeAutoProvider"
+        assert _provider_cls("youtube").__name__ == "YouTubeApiDirectProvider"
 
     with patch.object(settings, "youtube_data_provider", "official"):
         assert _provider_cls("youtube").__name__ == "YouTubeOfficialProvider"
 
     with patch.object(settings, "youtube_data_provider", "api_direct"):
-        assert _provider_cls("youtube").__name__ == "YouTubeAutoProvider"
+        assert _provider_cls("youtube").__name__ == "YouTubeApiDirectProvider"
 
 
-def test_facebook_provider_falls_back_to_apify_when_api_direct_unconfigured():
+def test_facebook_provider_stays_api_direct_when_api_direct_unconfigured():
     from app.services.api_direct_provider import _provider_cls
 
     with patch.object(settings, "facebook_data_provider", "api_direct"):
         with patch.object(settings, "api_direct_api_key", ""):
             with patch.object(settings, "apify_token", "apify_api_test_token"):
-                assert _provider_cls("facebook").__name__ == "FacebookApifyProvider"
+                assert _provider_cls("facebook").__name__ == "FacebookApiDirectProvider"
 
 
 @pytest.mark.anyio
-async def test_settings_status_reports_facebook_apify_source():
+async def test_settings_status_reports_facebook_legacy_apify_as_api_direct_source():
     with patch.object(settings, "facebook_data_provider", "apify"):
         with patch.object(settings, "apify_token", "apify_api_test_token"):
             with patch.object(settings, "api_direct_api_key", ""):
@@ -210,10 +201,9 @@ async def test_settings_status_reports_facebook_apify_source():
                     response = await client.get("/api/settings/status")
     assert response.status_code == 200
     data = response.json()
-    assert data["collection"]["facebook_data_provider"] == "apify"
-    assert data["collection"]["facebook_collector_configured"] is True
-    assert "Apify" in data["collection"]["facebook_message"]
-    assert "未接入" not in data["collection"]["facebook_message"]
+    assert data["collection"]["facebook_data_provider"] == "api_direct"
+    assert data["collection"]["facebook_collector_configured"] is False
+    assert "API_DIRECT_API_KEY" in data["collection"]["facebook_message"]
 
 
 @pytest.mark.anyio
@@ -232,7 +222,7 @@ async def test_settings_status_reports_facebook_api_direct_missing_key():
 
 
 @pytest.mark.anyio
-async def test_settings_status_reports_apify_tiktok_source():
+async def test_settings_status_reports_legacy_apify_as_api_direct_source():
     with patch.object(settings, "instagram_data_provider", "apify"):
         with patch.object(settings, "youtube_data_provider", "apify"):
             with patch.object(settings, "tiktok_data_provider", "apify"):
@@ -244,7 +234,8 @@ async def test_settings_status_reports_apify_tiktok_source():
     assert response.status_code == 200
     data = response.json()
     assert data["apify"]["configured"] is True
-    assert "TikTok" in data["apify"]["message"]
+    assert data["collection"]["tiktok_data_provider"] == "api_direct"
+    assert data["collection"]["youtube_data_provider"] == "api_direct"
 
 
 def test_list_platform_capabilities_includes_provider_metadata():

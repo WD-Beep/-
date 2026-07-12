@@ -617,6 +617,10 @@ export function aiModeLabel(mode: string): string {
 }
 
 const ERROR_TRANSLATIONS: Array<[RegExp, string]> = [
+  [
+    /insufficient balance|exceeded_current_quota|quota|account suspended|额度|余额不足|充值/i,
+    "AI 账户余额不足或额度受限，请充值 DeepSeek/API 账户或更换可用密钥后重试。",
+  ],
   [/OPENAI_API_KEY/i, "未配置 OpenAI API Key，请在 .env 中设置 OPENAI_API_KEY 与 OPENAI_MODEL 后重启后端"],
   [/OPENAI_MODEL/i, "OpenAI 模型不可用，请检查 OPENAI_MODEL 环境变量"],
   [/SMTP 认证失败/i, "SMTP 认证失败：请在腾讯企业邮箱后台生成「客户端专用密码」，更新 .env 的 SMTP_PASSWORD 后重启后端"],

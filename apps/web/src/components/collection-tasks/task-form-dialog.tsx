@@ -704,7 +704,7 @@ export function TaskFormDialog({
                     id="discovery_limit"
                     type="number"
                     min={1}
-                    max={500}
+                    max={10000}
                     value={form.discovery_limit}
                     onChange={(e) => setForm({ ...form, discovery_limit: e.target.value })}
                   />

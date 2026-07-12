@@ -25,13 +25,12 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   createOutreachCampaign,
-  bulkApproveOutreachCampaignDrafts,
   fetchOutreachWorkbench,
   fetchMessageTemplates,
-  processOutreachCampaign,
   previewOutreachCampaign,
   queueOutreachCampaign,
   scheduleOutreachSendQueue,
+  sendOutreachCampaignNow,
   sendManualOutreachEmail,
   type MessageTemplate,
   type ManualOutreachSendMode,
@@ -56,7 +55,7 @@ import {
   buildScheduledSendCompletionMessage,
   buildScheduledOutreachQueuePayload,
   buildSkipReasonBreakdown,
-  countApprovedOutreachDrafts,
+  countQueueablePreviewItems,
   deriveOneClickQueueStatusFromCampaign,
   estimateCampaignEndTime,
   formatOneClickDateTime,
@@ -113,6 +112,10 @@ function primaryIcon(action: OneClickPrimaryActionKind | "save") {
   return RefreshCw;
 }
 
+function isCrossProductSelectionError(message: string): boolean {
+  return /不存在或不属于当前产品|does not belong to current product/i.test(message);
+}
+
 function StepHeader({ step, title, desc }: { step: string; title: string; desc: string }) {
   return (
     <div className="campaign-step-header">
@@ -166,6 +169,13 @@ export function OutreachCampaignsPanel() {
   const selectAllByFilters = searchParams.get("select_all") === "1";
   const filterAllTotal = Number(searchParams.get("total") || "0");
   const filterSnapshot = useMemo(() => decodeFiltersFromSearchParams(searchParams), [searchParams]);
+  const sourceProductId = useMemo(() => {
+    const raw = searchParams.get("product_id");
+    const value = raw ? Number(raw) : null;
+    return value && Number.isFinite(value) && value > 0 ? value : null;
+  }, [searchParams]);
+  const selectionMatchesCurrentProduct = !sourceProductId || sourceProductId === productId;
+  const activePrefillIds = selectionMatchesCurrentProduct ? prefillIds : [];
 
   const [workbench, setWorkbench] = useState<OutreachOneClickWorkbench | null>(null);
   const [templates, setTemplates] = useState<MessageTemplate[]>([]);
@@ -177,7 +187,7 @@ export function OutreachCampaignsPanel() {
   const [message, setMessage] = useState<string | null>(null);
 
   const [sourceMode, setSourceMode] = useState<SourceMode>(
-    selectAllByFilters || prefillIds.length === 0 ? "filters" : "selected",
+    selectAllByFilters || activePrefillIds.length === 0 ? "filters" : "selected",
   );
   const [sendMode, setSendMode] = useState<SendMode>("scheduled");
   const [copyMode, setCopyMode] = useState<CopyMode>("manual");
@@ -207,7 +217,7 @@ export function OutreachCampaignsPanel() {
   const [manualTestResult, setManualTestResult] = useState<string | null>(null);
 
   const requiresProduct = productId === ALL_PRODUCTS_ID;
-  const selectedCount = prefillIds.length;
+  const selectedCount = activePrefillIds.length;
   const filterCount = filterAllTotal || workbench?.available_recipient_count || 0;
   const canUseFilters = Boolean(filterSnapshot || filterCount > 0);
   const canUseSelected = selectedCount > 0;
@@ -229,9 +239,9 @@ export function OutreachCampaignsPanel() {
     sourceCount: effectiveSendLimit,
     fallbackCount: effectiveSendLimit,
   });
-  const approvedDraftCount = preview ? countApprovedOutreachDrafts(preview.items) : 0;
+  const queueableDraftCount = preview ? countQueueablePreviewItems(preview.items) : 0;
   const sendCount = preview
-    ? approvedDraftCount
+    ? queueableDraftCount
     : Math.min(effectiveSendLimit, estimatedSourceCount || workbench?.available_recipient_count || 0);
   const skipBreakdown = preview ? buildSkipReasonBreakdown(preview.items) : { sent: 0, blacklisted: 0, invalid: 0, replied: 0, other: 0 };
   const scheduledAt = sendMode === "now" ? new Date() : buildLocalDateTime(scheduledDate, scheduledTime);
@@ -247,8 +257,12 @@ export function OutreachCampaignsPanel() {
         })
       : null;
   const hasPreview = Boolean(preview);
+  const latestCampaignHasSendResult = Boolean(
+    workbench?.latest_campaign &&
+      ((workbench.latest_campaign.sent_count ?? 0) > 0 || (workbench.latest_campaign.failed_count ?? 0) > 0),
+  );
   const effectiveQueueStatus =
-    preview && preview.can_queue_count > 0 && queueStatus === "completed"
+    preview && preview.can_queue_count > 0 && queueStatus === "completed" && !latestCampaignHasSendResult
       ? "ready_to_send"
       : queueStatus;
   const aiStatusText = outreachWorkbenchStatusLabel({
@@ -333,10 +347,18 @@ export function OutreachCampaignsPanel() {
     clearPreview();
   }
 
+  useEffect(() => {
+    if (!selectionMatchesCurrentProduct && sourceMode === "selected") {
+      setSourceMode("filters");
+      clearPreview();
+      setMessage("已切换到当前品牌的可发送邮箱；上一个品牌选中的红人不会用于本次发送。");
+    }
+  }, [selectionMatchesCurrentProduct, sourceMode]);
+
   function buildSourcePayload() {
     return buildOutreachCampaignPayload({
       name: buildOneClickCampaignName(),
-      influencerIds: sourceMode === "selected" ? prefillIds : undefined,
+      influencerIds: sourceMode === "selected" ? activePrefillIds : undefined,
       selectAllByFilters: sourceMode === "filters",
       influencerFilters:
         sourceMode === "filters"
@@ -394,15 +416,15 @@ export function OutreachCampaignsPanel() {
     preview: OutreachCampaignPreviewResponse;
     startAt: Date;
   }) {
-    const approvedIds = input.preview.items
-      .filter((item) => item.draft_status === "approved" && item.can_queue)
+    const queueableIds = input.preview.items
+      .filter((item) => item.can_queue)
       .map((item) => item.influencer_id);
-    if (approvedIds.length === 0) {
-      throw new Error("没有已批准草稿。请先审核并批准草稿，再发送。");
+    if (queueableIds.length === 0) {
+      throw new Error("没有可发送邮件。请先生成 AI 话术并检查跳过原因。");
     }
     return queueOutreachCampaign(input.campaignId, {
       confirm: true,
-      influencer_ids: approvedIds,
+      influencer_ids: queueableIds,
     });
   }
 
@@ -457,13 +479,13 @@ export function OutreachCampaignsPanel() {
           setQueueStatus("failed");
           throw new Error("没有邮件发出。所有收件人都被规则跳过，请查看跳过原因。");
         }
-        await queuePreviewItems({
-          campaignId: generated.campaignId,
-          preview: generated.preview,
-          startAt: new Date(),
-        });
         setMessage(buildImmediateSendStartedMessage());
-        const processed = await processOutreachCampaign(generated.campaignId);
+        const processed = await sendOutreachCampaignNow(generated.campaignId, {
+          confirm: true,
+          influencer_ids: generated.preview.items
+            .filter((item) => item.can_queue)
+            .map((item) => item.influencer_id),
+        });
         const skipped = generated.preview.skip_count + processed.skipped;
         setQueueStatus(processed.failed > 0 && processed.sent === 0 ? "failed" : "completed");
         const resultMessage = buildImmediateSendResultMessage({
@@ -523,6 +545,13 @@ export function OutreachCampaignsPanel() {
       await load({ syncLatestCampaign: true });
     } catch (err) {
       const nextError = translateErrorMessage(err instanceof Error ? err.message : "操作失败");
+      if (sourceMode === "selected" && isCrossProductSelectionError(nextError)) {
+        setSourceMode("filters");
+        clearPreview();
+        setMessage("已切换到当前品牌的可发送邮箱；上一个品牌选中的红人不会用于本次发送。");
+        setError(null);
+        return;
+      }
       setQueueStatus("failed");
       setLastFailureReason(nextError);
       setError(nextError);
@@ -550,7 +579,11 @@ export function OutreachCampaignsPanel() {
       setError(reason);
       return;
     }
-    if ((action === "send" || action === "queue") && !window.confirm(buildApprovedDraftSendConfirmMessage(sendCount))) {
+    const confirmMessage =
+      action === "send"
+        ? `确认立即发送给 ${sendCount} 位收件人？点击确认后邮件会马上发出。`
+        : buildApprovedDraftSendConfirmMessage(sendCount);
+    if ((action === "send" || action === "queue") && !window.confirm(confirmMessage)) {
       return;
     }
 
@@ -571,23 +604,23 @@ export function OutreachCampaignsPanel() {
           }),
         );
       } else if (action === "save") {
-        setMessage("草稿已保存，邮件尚未发出。请审核并批准草稿后再发送。");
+        setMessage("AI 话术已保存，邮件尚未发出。确认发送时间后可直接发送。");
       } else {
-        const approvedCount = countApprovedOutreachDrafts(actionPreview.items);
-        if (approvedCount <= 0) {
+        const queueableCount = countQueueablePreviewItems(actionPreview.items);
+        if (queueableCount <= 0) {
           setQueueStatus("failed");
-          throw new Error("没有已批准草稿。请先审核并批准草稿，再发送。");
+          throw new Error("没有可发送邮件。请先生成 AI 话术并检查跳过原因。");
         }
-        const queued = await queuePreviewItems({
-          campaignId: generated.campaignId,
-          preview: actionPreview,
-          startAt: action === "send" ? new Date() : buildLocalDateTime(scheduledDate, scheduledTime) ?? new Date(),
-        });
         if (action === "send") {
           setQueueStatus("sending");
           setMessage(buildImmediateSendStartedMessage());
-          const processed = await processOutreachCampaign(generated.campaignId);
-          const skipped = actionPreview.skip_count + processed.skipped + queued.skipped;
+          const processed = await sendOutreachCampaignNow(generated.campaignId, {
+            confirm: true,
+            influencer_ids: actionPreview.items
+              .filter((item) => item.can_queue)
+              .map((item) => item.influencer_id),
+          });
+          const skipped = actionPreview.skip_count + processed.skipped;
           setQueueStatus(processed.failed > 0 && processed.sent === 0 ? "failed" : "completed");
           const resultMessage = buildImmediateSendResultMessage({
             sent: processed.sent,
@@ -602,13 +635,25 @@ export function OutreachCampaignsPanel() {
             if (processed.failed > 0) setLastFailureReason(resultMessage);
           }
         } else {
+          const queued = await queuePreviewItems({
+            campaignId: generated.campaignId,
+            preview: actionPreview,
+            startAt: buildLocalDateTime(scheduledDate, scheduledTime) ?? new Date(),
+          });
           setQueueStatus("waiting");
-          setMessage(`已将 ${queued.queued} 封已批准邮件加入发送队列，跳过 ${queued.skipped} 封。`);
+          setMessage(`已将 ${queued.queued} 封 AI 生成邮件加入发送队列，跳过 ${queued.skipped} 封。`);
         }
       }
       await load({ syncLatestCampaign: true });
     } catch (err) {
       const nextError = translateErrorMessage(err instanceof Error ? err.message : "操作失败");
+      if (sourceMode === "selected" && isCrossProductSelectionError(nextError)) {
+        setSourceMode("filters");
+        clearPreview();
+        setMessage("已切换到当前品牌的可发送邮箱；上一个品牌选中的红人不会用于本次发送。");
+        setError(null);
+        return;
+      }
       setQueueStatus("failed");
       setLastFailureReason(nextError);
       setError(nextError);
@@ -618,26 +663,6 @@ export function OutreachCampaignsPanel() {
   }
 
   void runAction;
-
-  async function bulkApproveCurrentPreview() {
-    if (!previewCampaignId || !preview) {
-      setError("请先生成草稿预览。");
-      return;
-    }
-    setBusyAction("save");
-    setError(null);
-    setMessage(null);
-    try {
-      const result = await bulkApproveOutreachCampaignDrafts(previewCampaignId, { confirm: true });
-      const updated = await previewOutreachCampaign(previewCampaignId);
-      setPreview(updated);
-      setMessage(`${result.message}。高价值红人需要先打开草稿详情后手动批准。`);
-    } catch (err) {
-      setError(translateErrorMessage(err instanceof Error ? err.message : "批量批准失败"));
-    } finally {
-      setBusyAction(null);
-    }
-  }
 
   async function runManualTestSend() {
     setError(null);
@@ -710,6 +735,7 @@ export function OutreachCampaignsPanel() {
         queuedCount: workbench.latest_campaign.queued_count,
         sentCount: workbench.latest_campaign.sent_count,
         failedCount: workbench.latest_campaign.failed_count,
+        sendMode,
       })
     : null;
   const currentStatusLabel = getOneClickCurrentStatusLabel({
@@ -738,6 +764,7 @@ export function OutreachCampaignsPanel() {
       description="选择收件人，自己填写、选择话术库或使用 AI 生成，然后在当前页面立即发送或设置定时发送。"
     >
       {requiresProduct ? <ErrorAlert message="请先在左侧选择具体产品/品牌" className="mb-4" /> : null}
+      <div className="campaign-page">
       {error ? <ErrorAlert message={error} className="mb-4" /> : null}
       {!message && !error && scheduledCompletionMessage ? (
         <SuccessAlert message={scheduledCompletionMessage} className="mb-4" />
@@ -1164,16 +1191,8 @@ export function OutreachCampaignsPanel() {
                   <div className="space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
                       <span className="text-slate-600">
-                        已批准 {approvedDraftCount} 封。高价值红人必须打开草稿详情确认后才能批准。
+                        可发送 {queueableDraftCount} 封。AI 生成后无需审批草稿，点击发送会马上发出并留下发送记录。
                       </span>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => void bulkApproveCurrentPreview()}
-                        disabled={busyAction !== null}
-                      >
-                        批量批准普通草稿
-                      </Button>
                     </div>
                     {previewItems.map((item) => (
                       <div key={item.influencer_id} className="campaign-preview-item">
@@ -1337,6 +1356,7 @@ export function OutreachCampaignsPanel() {
             </Card>
           </aside>
         </div>
+      </div>
       </div>
     </AdminShell>
   );

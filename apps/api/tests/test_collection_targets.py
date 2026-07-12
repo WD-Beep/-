@@ -26,9 +26,15 @@ def test_discovery_fetch_limit_overfetch_for_target_30():
     assert discovery_fetch_limit(task, round_index=1) == 300
 
 
-def test_max_candidates_caps_at_500():
+def test_max_candidates_caps_at_10000():
     task = CollectionTask(name="t", platform="youtube", keywords=["a"], discovery_limit=100)
-    assert max_candidates_to_process(task) == 500
+    assert max_candidates_to_process(task) == 800
+
+
+def test_target_qualified_count_allows_10000():
+    task = CollectionTask(name="t", platform="youtube", keywords=["a"], discovery_limit=10_000)
+    assert target_qualified_count(task) == 10_000
+    assert max_candidates_to_process(task) == 10_000
 
 
 def test_run_context_overrides_fetch_limit():

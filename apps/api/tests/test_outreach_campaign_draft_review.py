@@ -212,7 +212,7 @@ async def test_high_value_must_be_opened_before_approval_but_normal_can_bulk_app
 
 
 @pytest.mark.asyncio
-async def test_edit_skip_regenerate_and_queue_only_approved_drafts():
+async def test_edit_skip_regenerate_and_queue_generated_drafts_without_approval():
     suffix = _suffix()
     async with async_session_factory() as db:
         a = await _create_influencer(db, suffix=f"a_{suffix}", email=f"a_{suffix}@example.com", score=10)
@@ -260,12 +260,6 @@ async def test_edit_skip_regenerate_and_queue_only_approved_drafts():
         )
         assert skipped.draft_status == "skipped"
 
-        await OutreachCampaignService.approve_campaign_draft(
-            db,
-            product_id=1,
-            campaign_id=campaign.id,
-            influencer_id=a.id,
-        )
         result = await OutreachCampaignService.queue_campaign(
             db,
             ctx=ctx,

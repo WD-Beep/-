@@ -449,8 +449,8 @@ function validateQualityAndDelivery(values: TaskFormValues): string | null {
     return "启用邮件发送时请填写收件人邮箱";
   }
   const discoveryLimit = Number(values.discovery_limit);
-  if (!Number.isFinite(discoveryLimit) || discoveryLimit < 1 || discoveryLimit > 500) {
-    return "采集数量上限需在 1-500 之间";
+  if (!Number.isFinite(discoveryLimit) || discoveryLimit < 1 || discoveryLimit > 10000) {
+    return "采集数量上限需在 1-10000 之间";
   }
   if (values.batch_round_enabled) {
     const total = Number(values.batch_total_limit);
@@ -586,8 +586,8 @@ export function validateForm(values: TaskFormValues, platformCapabilities: Platf
     return "启用邮件发送时请填写收件人邮箱";
   }
   const discoveryLimit = Number(values.discovery_limit);
-  if (!Number.isFinite(discoveryLimit) || discoveryLimit < 1 || discoveryLimit > 500) {
-    return "采集数量上限需在 1-500 之间";
+  if (!Number.isFinite(discoveryLimit) || discoveryLimit < 1 || discoveryLimit > 10000) {
+    return "采集数量上限需在 1-10000 之间";
   }
   const minEngagementText = values.min_engagement_rate.trim();
   if (minEngagementText) {

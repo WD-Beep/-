@@ -58,11 +58,11 @@ class Settings(BaseSettings):
     scandihome_pdf_path: str = r"C:\Users\Administrator\Desktop\ScandiHome_视觉手册_v1_2.pdf"
     scandihome_pptx_path: str = r"C:\Users\Administrator\Desktop\ScandiHome 2026 视觉升级 PPT新.pptx"
 
-    collector_mode: str = "apify"
-    instagram_data_provider: str = "apify"
-    youtube_data_provider: str = "auto"
-    tiktok_data_provider: str = "apify"
-    facebook_data_provider: str = "apify"
+    collector_mode: str = "api_direct"
+    instagram_data_provider: str = "api_direct"
+    youtube_data_provider: str = "api_direct"
+    tiktok_data_provider: str = "api_direct"
+    facebook_data_provider: str = "api_direct"
 
     youtube_api_key: str = ""
     youtube_official_timeout_seconds: int = 30
@@ -320,35 +320,32 @@ class Settings(BaseSettings):
 
     @property
     def active_instagram_provider(self) -> str:
-        name = (self.instagram_data_provider or "apify").strip().lower()
-        if name == "scrape_creators":
+        name = (self.instagram_data_provider or "api_direct").strip().lower()
+        if name in {"scrape_creators", "apify"}:
             return "api_direct"
         return name
 
     @property
     def active_youtube_provider(self) -> str:
-        name = (self.youtube_data_provider or "auto").strip().lower()
-        if name in {"auto", "official", "apify"}:
+        name = (self.youtube_data_provider or "api_direct").strip().lower()
+        if name in {"api_direct", "auto", "apify"}:
+            return "api_direct"
+        if name == "official":
             return name
-        if name == "api_direct":
-            return "auto"
-        return "auto"
+        return "api_direct"
 
     @property
     def active_tiktok_provider(self) -> str:
-        return (self.tiktok_data_provider or "apify").strip().lower()
+        name = (self.tiktok_data_provider or "api_direct").strip().lower()
+        if name == "apify":
+            return "api_direct"
+        return name
 
     @property
     def active_facebook_provider(self) -> str:
-        preferred = (self.facebook_data_provider or "apify").strip().lower()
+        preferred = (self.facebook_data_provider or "api_direct").strip().lower()
         if preferred == "apify":
-            return "apify"
-        if preferred == "api_direct":
-            return self._resolve_platform_data_provider(
-                preferred,
-                apify_available=self.is_apify_configured,
-                api_direct_available=self.is_api_direct_configured,
-            )
+            return "api_direct"
         return preferred
 
     @staticmethod

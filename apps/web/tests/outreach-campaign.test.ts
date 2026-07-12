@@ -58,6 +58,7 @@ import {
   filterCampaignDetailRows,
   paginateCampaignDetailRows,
 } from "../src/lib/outreach-campaign-detail-helpers.ts";
+import { translateErrorMessage } from "../src/lib/labels.ts";
 
 test("manual outreach test UI stays as a collapsed status-strip tool", () => {
   const source = readFileSync(
@@ -76,6 +77,66 @@ test("manual outreach test UI stays as a collapsed status-strip tool", () => {
   assert.ok(source.includes("manualTestOpen ?"), "manual test form should be collapsed by default");
   assert.ok(source.includes("rows={2}"), "recipient textarea should stay compact");
   assert.ok(source.includes("rows={4}"), "body textarea should stay compact");
+});
+
+test("immediate campaign send uses direct send api instead of queue processing", () => {
+  const source = readFileSync(
+    new URL("../src/components/outreach-campaigns/outreach-campaigns-panel.tsx", import.meta.url),
+    "utf8",
+  );
+  const sendApiIndex = source.indexOf("sendOutreachCampaignNow");
+  const processApiIndex = source.indexOf("processOutreachCampaign");
+  const reviewedActionIndex = source.indexOf("async function runReviewedAction");
+  const reviewedSendIndex = source.indexOf('if (action === "send")', reviewedActionIndex);
+  const reviewedQueueIndex = source.indexOf("queuePreviewItems({", reviewedSendIndex);
+  const reviewedDirectIndex = source.indexOf("sendOutreachCampaignNow(", reviewedSendIndex);
+
+  assert.ok(sendApiIndex >= 0, "direct send API should be imported");
+  assert.equal(processApiIndex, -1, "immediate send UI should not process queued campaign rows");
+  assert.ok(reviewedActionIndex >= 0, "reviewed send action should exist");
+  assert.ok(reviewedSendIndex > reviewedActionIndex, "reviewed send branch should exist");
+  assert.ok(reviewedDirectIndex > reviewedSendIndex, "reviewed immediate send should call direct send");
+  assert.ok(
+    reviewedQueueIndex === -1 || reviewedDirectIndex < reviewedQueueIndex,
+    "reviewed immediate send must not queue before direct sending",
+  );
+});
+
+test("completed send result does not fall back to pending confirmation status", () => {
+  const source = readFileSync(
+    new URL("../src/components/outreach-campaigns/outreach-campaigns-panel.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.ok(source.includes("latestCampaignHasSendResult"), "panel should detect real send results");
+  assert.ok(
+    source.includes('queueStatus === "completed" && !latestCampaignHasSendResult'),
+    "completed campaigns with send results should not be shown as waiting for confirmation",
+  );
+});
+
+test("AI batch email workbench has its own scroll container", () => {
+  const source = readFileSync(
+    new URL("../src/components/outreach-campaigns/outreach-campaigns-panel.tsx", import.meta.url),
+    "utf8",
+  );
+  const css = readFileSync(new URL("../src/app/globals.css", import.meta.url), "utf8");
+
+  assert.ok(source.includes('className="campaign-page"'), "page should wrap the email workbench in a scroll container");
+  assert.match(css, /\.campaign-page\s*{[\S\s]*?overflow-y:\s*auto;/);
+  assert.match(css, /\.campaign-workbench\s*{[\S\s]*?min-height:\s*100%;/);
+});
+
+test("AI batch email ignores selected ids from another product", () => {
+  const source = readFileSync(
+    new URL("../src/components/outreach-campaigns/outreach-campaigns-panel.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /const sourceProductId = useMemo/);
+  assert.match(source, /const selectionMatchesCurrentProduct = !sourceProductId \|\| sourceProductId === productId;/);
+  assert.match(source, /const activePrefillIds = selectionMatchesCurrentProduct \? prefillIds : \[\];/);
+  assert.match(source, /isCrossProductSelectionError\(nextError\)/);
 });
 
 test("resolveInfluencerEmail priority final > business > public > email", () => {
@@ -326,6 +387,7 @@ test("buildScheduledOutreachQueuePayload maps queueable preview rows to schedule
           subject: "Hello",
           body: "Body",
           can_queue: true,
+          draft_status: "pending_review",
           matched_knowledge: [{ document: "Guide", summary: "Point" }],
           reason: "good fit",
         },
@@ -363,6 +425,17 @@ test("buildScheduledOutreachQueuePayload maps queueable preview rows to schedule
   assert.equal(payload.schedule_config.interval_minutes, 7);
   assert.equal(payload.schedule_config.daily_limit, 30);
   assert.equal(payload.schedule_config.hourly_limit, 10);
+});
+
+test("one click AI send no longer requires approved drafts", () => {
+  const source = readFileSync(
+    new URL("../src/components/outreach-campaigns/outreach-campaigns-panel.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.doesNotMatch(source, /没有已批准草稿/);
+  assert.doesNotMatch(source, /draft_status === "approved" && item\.can_queue/);
+  assert.match(source, /\.filter\(\(item\) => item\.can_queue\)/);
 });
 
 test("one click workbench builds exact local scheduled datetime", () => {
@@ -559,6 +632,15 @@ test("one click workbench messages explain direct send and scheduled send clearl
 test("scheduled send completion message tells sales when mail actually went out", () => {
   assert.equal(
     buildScheduledSendCompletionMessage({
+      queuedCount: 3,
+      sentCount: 3,
+      failedCount: 0,
+      sendMode: "now",
+    }),
+    "发送已完成，发送成功：已发出 3 封邮件。",
+  );
+  assert.equal(
+    buildScheduledSendCompletionMessage({
       queuedCount: 12,
       sentCount: 12,
       failedCount: 0,
@@ -692,7 +774,7 @@ test("AI one-click workbench keeps the full selected generation batch", () => {
 
   assert.doesNotMatch(source, /AI_DEFAULT_BATCH_LIMIT/);
   assert.doesNotMatch(source, /prefillIds\.slice\(0,\s*effectiveSendLimit\)/);
-  assert.match(source, /influencerIds:\s*sourceMode === "selected" \? prefillIds : undefined/);
+  assert.match(source, /influencerIds:\s*sourceMode === "selected" \? activePrefillIds : undefined/);
   assert.match(source, /逐个生成不同邮件/);
 });
 
@@ -846,6 +928,17 @@ test("humanizeOutreachFailureReason translates technical causes for sales users"
   assert.equal(humanizeOutreachFailureReason("红人已回复，跟进中，已跳过"), "该红人已回复，进入跟进，不重复发送");
   assert.equal(humanizeOutreachFailureReason("收件人邮箱格式无效"), "邮箱格式或域名不符合规则");
   assert.equal(humanizeOutreachFailureReason("AI 生成失败：timeout"), "GPT 没有生成可用标题或正文");
+});
+
+test("AI quota errors tell users to recharge or change the AI key", () => {
+  assert.equal(
+    translateErrorMessage("OpenAI API error HTTP 429: insufficient balance, account suspended"),
+    "AI 账户余额不足或额度受限，请充值 DeepSeek/API 账户或更换可用密钥后重试。",
+  );
+  assert.equal(
+    humanizeOutreachFailureReason("AI 生成失败：exceeded_current_quota_error"),
+    "AI 账户余额不足或额度受限，请充值 DeepSeek/API 账户或更换可用密钥后重试。",
+  );
 });
 
 test("reply status labels are clear for sales follow-up", () => {

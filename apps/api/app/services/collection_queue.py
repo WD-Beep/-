@@ -179,6 +179,9 @@ class CollectionQueueService:
         checkpoint.pop("queue_reason_labels", None)
         checkpoint.pop("queued_at", None)
         queued_resume = bool(checkpoint.pop("queued_resume", False))
+        checkpoint.pop("paused", None)
+        checkpoint.pop("paused_at", None)
+        checkpoint.pop("pause_requested_at", None)
         task.run_checkpoint = checkpoint
         task.status = CollectionTaskStatus.RUNNING.value
         task.error_message = None

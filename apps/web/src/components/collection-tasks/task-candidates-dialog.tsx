@@ -261,7 +261,7 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
     return () => {
       cancelled = true;
     };
-  }, [open, taskId, taskResultCount]);
+  }, [open, taskId]);
 
   const buildCandidateQuery = useCallback((pageNumber = page) => {
     const minFollowers = minFollowersFilter.trim() ? Number(minFollowersFilter) : undefined;
@@ -358,7 +358,7 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
       }
     }
 
-    void loadCandidates();
+    void loadCandidates(items.length > 0);
     const pollId = isCollectionTaskRunning(activeTask)
       ? window.setInterval(() => {
           void loadCandidates(true);
@@ -370,7 +370,7 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
       if (pollId !== undefined) window.clearInterval(pollId);
     };
   }, [
-    task,
+    taskId,
     open,
     filtersReady,
     page,
@@ -387,9 +387,6 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
     maxEngagementFilter,
     search,
     task?.status,
-    task?.updated_at,
-    task?.discovered_count,
-    task?.inserted_count,
     buildCandidateQuery,
   ]);
   function resetFilters() {

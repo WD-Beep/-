@@ -23,7 +23,12 @@ from app.services.platform_utils import (
 
 logger = logging.getLogger(__name__)
 
-ENDPOINTS = ["/v1/tiktok/videos", "/v1/tiktok/users"]
+ENDPOINTS = [
+    "/v1/tiktok/videos",
+    "/v1/tiktok/users",
+    "/v1/tiktok/user",
+    "/v1/tiktok/video",
+]
 PROFILE_HYDRATION_UNAVAILABLE = "profile_hydration_unavailable"
 PROFILE_HYDRATION_USERS = "api_direct_users"
 PROFILE_HYDRATION_SKIPPED = "hydration_skipped_quota"
@@ -151,19 +156,21 @@ async def _hydrate_tiktok_profile(
         return profile
     try:
         data = await ad_get(
-            "/v1/tiktok/users",
-            params={"query": handle, "pages": 1},
+            "/v1/tiktok/user",
+            params={"username": handle},
             platform="tiktok",
         )
     except ApiDirectError as exc:
         errors.append(f"TikTok 主页补采 @{handle}: {exc}")
         return profile
 
-    users = data.get("users") or []
-    match = next(
-        (row for row in users if (row.get("username") or "").lower() == handle.lower()),
-        None,
-    )
+    match = data.get("user")
+    if not isinstance(match, dict):
+        users = data.get("users") or []
+        match = next(
+            (row for row in users if (row.get("username") or "").lower() == handle.lower()),
+            None,
+        )
     if not match:
         return profile
 
@@ -184,7 +191,7 @@ async def _hydrate_tiktok_profile(
         profile.profile_url = profile_url.strip()
     meta = dict(profile.source_meta or {})
     meta["profile_hydration"] = PROFILE_HYDRATION_USERS
-    meta["hydration_endpoint"] = "/v1/tiktok/users"
+    meta["hydration_endpoint"] = "/v1/tiktok/user"
     profile.source_meta = meta
     if profile.followers_count:
         profile.engagement_rate = engagement_rate_from_metrics(

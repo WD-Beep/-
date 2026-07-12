@@ -55,6 +55,8 @@ import {
   type AdminReply,
   type AdminUser,
   type TenantProduct,
+  bulkDeleteAdminCollectionTasks,
+  deleteAdminCollectionTask,
   fetchAdminCollectionTasks,
   fetchAdminEmails,
   fetchAdminInfluencers,
@@ -85,7 +87,109 @@ function SectionWithTable({
   );
 }
 
-function TasksTable({ items }: { items: AdminCollectionTask[] }) {
+function countBy<T>(items: T[], getKey: (item: T) => string | null | undefined): Array<{ key: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    const key = getKey(item)?.trim() || "暂无";
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return Array.from(counts, ([key, count]) => ({ key, count })).sort((a, b) => b.count - a.count || a.key.localeCompare(b.key, "zh-Hans-CN"));
+}
+
+function ProductDistributionPanel({
+  title,
+  items,
+  formatKey = (value) => value,
+}: {
+  title: string;
+  items: Array<{ key: string; count: number }>;
+  formatKey?: (value: string) => string;
+}) {
+  const total = items.reduce((sum, item) => sum + item.count, 0);
+  return (
+    <div className="rounded-lg border border-[#DDE6F0] bg-white p-4">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-[#102033]">{title}</h3>
+        <span className="text-xs tabular-nums text-[#667085]">{formatAdminNumber(total)} 条</span>
+      </div>
+      <div className="mt-3 space-y-2">
+        {items.length ? (
+          items.slice(0, 5).map((item) => {
+            const percent = total ? Math.round((item.count / total) * 100) : 0;
+            return (
+              <div key={item.key} className="space-y-1">
+                <div className="flex items-center justify-between gap-3 text-xs">
+                  <span className="truncate text-[#344054]">{formatKey(item.key)}</span>
+                  <span className="shrink-0 tabular-nums text-[#667085]">{formatAdminNumber(item.count)} · {percent}%</span>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-[#EEF2F7]">
+                  <div className="h-full rounded-full bg-[#2563EB]" style={{ width: `${Math.max(percent, item.count ? 4 : 0)}%` }} />
+                </div>
+              </div>
+            );
+          })
+        ) : (
+          <p className="text-sm text-[#667085]">暂无数据</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ProductExceptionList({ tasks, replies }: { tasks: AdminCollectionTask[]; replies: AdminReply[] }) {
+  const rows = [
+    ...tasks
+      .filter((item) => getCollectionTaskStatusMeta(item.status).tone === "danger" || getCollectionTaskStatusMeta(item.status).tone === "warning" || item.failed_count > 0)
+      .map((item) => ({
+        id: `task-${item.id}`,
+        title: item.name,
+        meta: `任务 #${item.id} · ${getPlatformLabel(item.platform)}`,
+        status: getCollectionTaskStatusMeta(item.status),
+      })),
+    ...replies
+      .filter((item) => getReplyProcessingStatusMeta(item.processing_status).tone === "warning")
+      .map((item) => ({
+        id: `reply-${item.id}`,
+        title: item.subject || item.from_address || "待处理回复",
+        meta: item.from_address || "回复记录",
+        status: getReplyProcessingStatusMeta(item.processing_status),
+      })),
+  ].slice(0, 6);
+
+  return (
+    <div className="rounded-lg border border-[#DDE6F0] bg-white p-4">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-[#102033]">需要关注</h3>
+        <span className="text-xs tabular-nums text-[#667085]">{formatAdminNumber(rows.length)} 条</span>
+      </div>
+      <div className="mt-3 space-y-2">
+        {rows.length ? (
+          rows.map((item) => (
+            <div key={item.id} className="flex items-center justify-between gap-3 rounded-md bg-[#F8FAFD] px-3 py-2">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium text-[#102033]">{item.title}</p>
+                <p className="mt-0.5 truncate text-xs text-[#667085]">{item.meta}</p>
+              </div>
+              <AdminStatusBadge meta={item.status} />
+            </div>
+          ))
+        ) : (
+          <p className="text-sm text-[#667085]">暂无异常或待处理事项</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TasksTable({
+  items,
+  onDeleteTask,
+  deletingTaskId,
+}: {
+  items: AdminCollectionTask[];
+  onDeleteTask?: (task: AdminCollectionTask) => void;
+  deletingTaskId?: number | null;
+}) {
   return (
     <AdminTable
       minWidth={1180}
@@ -107,6 +211,12 @@ function TasksTable({ items }: { items: AdminCollectionTask[] }) {
           items={[
             { label: "重新运行", disabled: true },
             { label: "导出结果", disabled: true },
+            {
+              label: deletingTaskId === item.id ? "删除中..." : "删除任务",
+              disabled: !onDeleteTask || deletingTaskId === item.id || item.status === "running",
+              danger: true,
+              onClick: () => onDeleteTask?.(item),
+            },
             { label: "标记异常", disabled: true, danger: true },
           ]}
         />,
@@ -409,6 +519,10 @@ export function AdminUserDetailPanel({ userId }: { userId: number }) {
 export function AdminProductDetailPanel({ productId }: { productId: number }) {
   const [product, setProduct] = useState<AdminProduct | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState("tasks");
+  const [deletingTaskId, setDeletingTaskId] = useState<number | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -427,6 +541,48 @@ export function AdminProductDetailPanel({ productId }: { productId: number }) {
   if (error) return <AdminState type="error" message={error} />;
   if (!product) return <AdminState type="loading" message="正在加载品牌详情..." />;
 
+  const tasks = product.collection_tasks ?? [];
+  const influencers = product.influencers ?? [];
+  const emails = product.emails ?? [];
+  const replies = product.replies ?? [];
+  const successTasks = tasks.filter((item) => getCollectionTaskStatusMeta(item.status).tone === "success").length;
+  const warningTasks = tasks.filter((item) => getCollectionTaskStatusMeta(item.status).tone === "warning").length;
+  const failedTasks = tasks.filter((item) => getCollectionTaskStatusMeta(item.status).tone === "danger" || item.failed_count > 0).length;
+  const contactedInfluencers = influencers.filter((item) => item.follow_status === "contacted" || item.follow_status === "replied").length;
+  const validEmails = influencers.filter((item) => item.email).length;
+  const exceptionCount = failedTasks + replies.filter((item) => getReplyProcessingStatusMeta(item.processing_status).tone === "warning").length;
+  const tabs = [
+    { key: "tasks", label: "采集任务", count: tasks.length },
+    { key: "influencers", label: "红人数据", count: influencers.length },
+    { key: "emails", label: "邮件记录", count: emails.length },
+    { key: "replies", label: "回复记录", count: replies.length },
+    { key: "exceptions", label: "异常记录", count: exceptionCount, tone: "danger" as AdminTone },
+  ];
+
+  async function handleDeleteTask(task: AdminCollectionTask) {
+    if (!window.confirm(`确定删除任务「${task.name}」吗？有追溯数据的任务会从后台列表归档隐藏，无追溯数据会直接删除。`)) return;
+    setDeletingTaskId(task.id);
+    setActionError(null);
+    setNotice(null);
+    try {
+      const result = await deleteAdminCollectionTask(task.id);
+      setProduct((prev) => {
+        if (!prev) return prev;
+        const nextTasks = (prev.collection_tasks ?? []).filter((item) => item.id !== task.id);
+        return {
+          ...prev,
+          collection_task_count: Math.max(0, (prev.collection_task_count ?? nextTasks.length + 1) - 1),
+          collection_tasks: nextTasks,
+        };
+      });
+      setNotice(result.action === "archived" ? "任务已归档隐藏，红人库和来源追溯数据仍保留。" : "任务已删除。");
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "删除任务失败。");
+    } finally {
+      setDeletingTaskId(null);
+    }
+  }
+
   return (
     <div className="space-y-5">
       <AdminPageHeader
@@ -437,17 +593,29 @@ export function AdminProductDetailPanel({ productId }: { productId: number }) {
       />
       <AdminKpiGrid>
         <AdminKpiCard label="状态" value={getProductStatusMeta(product.status).label} helper={product.slug ?? "暂无"} icon={ShoppingBag} tone={getProductStatusMeta(product.status).tone} />
-        <AdminKpiCard label="任务数" value={product.collection_task_count ?? 0} helper="采集任务" icon={RefreshCw} tone="info" />
-        <AdminKpiCard label="红人数" value={product.influencer_count ?? 0} helper="资料库" icon={Database} tone="info" />
-        <AdminKpiCard label="邮件 / 回复" value={`${formatAdminNumber(product.email_count)} / ${formatAdminNumber(product.reply_count)}`} helper="外联进度" icon={Mail} tone="success" />
+        <AdminKpiCard label="任务健康" value={`${formatAdminNumber(successTasks)} / ${formatAdminNumber(warningTasks + failedTasks)}`} helper="完成 / 需关注" icon={RefreshCw} tone={failedTasks ? "warning" : "success"} />
+        <AdminKpiCard label="红人资料" value={influencers.length} helper={`${formatAdminNumber(validEmails)} 个有邮箱`} icon={Database} tone="info" />
+        <AdminKpiCard label="外联进展" value={`${formatAdminNumber(emails.length)} / ${formatAdminNumber(replies.length)}`} helper={`${formatAdminNumber(contactedInfluencers)} 个已联系或回复`} icon={Mail} tone="success" />
       </AdminKpiGrid>
-      <SectionWithTable title="品牌成员">
+      {actionError ? <div className="rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-4 py-3 text-sm text-[#B42318]">{actionError}</div> : null}
+      {notice ? <div className="rounded-lg border border-[#BBF7D0] bg-[#F0FDF4] px-4 py-3 text-sm text-[#047857]">{notice}</div> : null}
+      <div className="grid gap-3 xl:grid-cols-4">
+        <ProductDistributionPanel title="任务状态分布" items={countBy(tasks, (item) => getCollectionTaskStatusMeta(item.status).label)} />
+        <ProductDistributionPanel title="平台分布" items={countBy(tasks, (item) => item.platform)} formatKey={getPlatformLabel} />
+        <ProductDistributionPanel title="业务员分布" items={countBy(tasks, (item) => item.username)} />
+        <ProductExceptionList tasks={tasks} replies={replies} />
+      </div>
+      <SectionWithTable title="品牌成员" description="先看这个品牌由谁负责，后面再按任务、红人、邮件和回复分类查看。">
         <AdminTable columns={["用户 ID", "用户名", "角色", "加入时间"]} rows={(product.members ?? []).map((item) => [`#${item.user_id}`, item.username ?? "暂无", getRoleLabel(item.role), "暂无"])} />
       </SectionWithTable>
-      <SectionWithTable title="采集任务"><TasksTable items={product.collection_tasks ?? []} /></SectionWithTable>
-      <SectionWithTable title="红人数据"><InfluencersTable items={product.influencers ?? []} /></SectionWithTable>
-      <SectionWithTable title="邮件记录"><EmailsTable items={product.emails ?? []} /></SectionWithTable>
-      <SectionWithTable title="回复记录"><RepliesTable items={product.replies ?? []} /></SectionWithTable>
+      <AdminSection title="品牌运营明细" description="按数据类型切换查看，避免任务、红人、邮件和回复全部堆在一个页面里。">
+        <DetailTabs tabs={tabs} activeTab={activeTab} onChange={setActiveTab} />
+        {activeTab === "tasks" ? <TasksTable items={tasks} onDeleteTask={handleDeleteTask} deletingTaskId={deletingTaskId} /> : null}
+        {activeTab === "influencers" ? <InfluencersTable items={influencers} /> : null}
+        {activeTab === "emails" ? <EmailsTable items={emails} /> : null}
+        {activeTab === "replies" ? <RepliesTable items={replies} /> : null}
+        {activeTab === "exceptions" ? <ExceptionsTable tasks={tasks} emails={emails} replies={replies} /> : null}
+      </AdminSection>
     </div>
   );
 }
@@ -455,7 +623,12 @@ export function AdminProductDetailPanel({ productId }: { productId: number }) {
 export function AdminCollectionTasksPanel() {
   const [items, setItems] = useState<AdminCollectionTask[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [activeTaskView, setActiveTaskView] = useState("all");
+  const [deletingTaskId, setDeletingTaskId] = useState<number | null>(null);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [filters, setFilters] = useState({ search: "", owner: "", brand: "", status: "", platform: "", startDate: "", endDate: "" });
 
   useEffect(() => {
@@ -465,7 +638,7 @@ export function AdminCollectionTasksPanel() {
       .finally(() => setLoading(false));
   }, []);
 
-  const rows = useMemo(
+  const filteredRows = useMemo(
     () =>
       filterAdminRows(
         items.map((item) => ({
@@ -481,22 +654,96 @@ export function AdminCollectionTasksPanel() {
       ),
     [items, filters],
   );
+  const rows = useMemo(
+    () =>
+      filteredRows.filter((item) => {
+        const meta = getCollectionTaskStatusMeta(item.status);
+        const inserted = item.inserted_count || item.result_count || 0;
+        if (activeTaskView === "running") return meta.tone === "info" || item.status === "queued" || item.status === "pending";
+        if (activeTaskView === "attention") return meta.tone === "warning" || meta.tone === "danger" || item.failed_count > 0;
+        if (activeTaskView === "completed") return meta.tone === "success";
+        if (activeTaskView === "empty") return inserted === 0 && item.status !== "running";
+        return true;
+      }),
+    [activeTaskView, filteredRows],
+  );
   const failed = items.filter((item) => getCollectionTaskStatusMeta(item.status).tone === "danger").length;
+  const warning = items.filter((item) => getCollectionTaskStatusMeta(item.status).tone === "warning").length;
+  const running = items.filter((item) => ["running", "processing", "collecting", "queued", "pending"].includes(item.status)).length;
+  const noResult = items.filter((item) => (item.inserted_count || item.result_count || 0) === 0 && item.status !== "running").length;
+  const cleanupCandidates = rows.filter((item) => !item.parent_task_id && (item.inserted_count || item.result_count || 0) === 0 && item.status !== "running");
+  const taskViewTabs = [
+    { key: "all", label: "全部", count: filteredRows.length },
+    { key: "running", label: "运行/排队", count: filteredRows.filter((item) => ["running", "processing", "collecting", "queued", "pending"].includes(item.status)).length },
+    { key: "attention", label: "需关注", count: filteredRows.filter((item) => {
+      const meta = getCollectionTaskStatusMeta(item.status);
+      return meta.tone === "warning" || meta.tone === "danger" || item.failed_count > 0;
+    }).length, tone: "danger" as AdminTone },
+    { key: "completed", label: "已完成", count: filteredRows.filter((item) => getCollectionTaskStatusMeta(item.status).tone === "success").length },
+    { key: "empty", label: "无入库", count: filteredRows.filter((item) => (item.inserted_count || item.result_count || 0) === 0 && item.status !== "running").length },
+  ];
+
+  async function handleDeleteTask(task: AdminCollectionTask) {
+    if (!window.confirm(`确定删除任务「${task.name}」吗？有追溯数据的任务会归档隐藏，无追溯数据会直接删除。`)) return;
+    setDeletingTaskId(task.id);
+    setActionError(null);
+    setNotice(null);
+    try {
+      const result = await deleteAdminCollectionTask(task.id);
+      setItems((prev) => prev.filter((item) => item.id !== task.id));
+      setNotice(result.action === "archived" ? "任务已归档隐藏，红人库和来源追溯数据仍保留。" : "任务已删除。");
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "删除任务失败。");
+    } finally {
+      setDeletingTaskId(null);
+    }
+  }
+
+  async function handleCleanupCurrentRows() {
+    if (!cleanupCandidates.length) return;
+    if (!window.confirm(`确定清理当前筛选下 ${cleanupCandidates.length} 个无入库、非运行任务吗？有追溯数据的会归档隐藏。`)) return;
+    setBulkDeleting(true);
+    setActionError(null);
+    setNotice(null);
+    try {
+      const result = await bulkDeleteAdminCollectionTasks(cleanupCandidates.map((task) => task.id));
+      const removedIds = [...result.deleted_ids, ...result.archived_ids];
+      setItems((prev) => prev.filter((item) => !removedIds.includes(item.id)));
+      setNotice(`已清理 ${removedIds.length} 个无入库任务${result.skipped_count ? `，跳过 ${result.skipped_count} 个运行中或不可删除任务` : ""}。`);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "批量清理失败。");
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
 
   return (
     <div className="space-y-5">
       <AdminPageHeader
         label="采集任务"
         title="任务监控中心"
-        description="集中查看任务队列、采集状态、入库结果和失败原因，支持管理员快速重跑、导出和标记异常。"
-        actions={<AdminActionButton><RefreshCw className="h-3.5 w-3.5" />批量重试</AdminActionButton>}
+        description="按状态、平台、品牌和业务员归纳任务进度，管理员可以快速定位异常和清理无用任务。"
+        actions={
+          <AdminActionButton onClick={() => void handleCleanupCurrentRows()} disabled={bulkDeleting || cleanupCandidates.length === 0}>
+            <RefreshCw className="h-3.5 w-3.5" />
+            {bulkDeleting ? "清理中..." : `清理无入库任务 (${cleanupCandidates.length})`}
+          </AdminActionButton>
+        }
       />
       <AdminKpiGrid>
         <AdminKpiCard label="任务总数" value={items.length} helper="全部任务" icon={RefreshCw} tone="info" />
         <AdminKpiCard label="已完成" value={items.filter((item) => getCollectionTaskStatusMeta(item.status).tone === "success").length} helper="完成或有结果" icon={ShieldCheck} tone="success" />
-        <AdminKpiCard label="失败任务" value={failed} helper="需要查看日志" icon={AlertTriangle} tone="danger" />
-        <AdminKpiCard label="入库总数" value={items.reduce((sum, item) => sum + (item.inserted_count || item.result_count || 0), 0)} helper="任务结果" icon={Database} tone="info" />
+        <AdminKpiCard label="需关注" value={failed + warning} helper={`${formatAdminNumber(running)} 个运行/排队`} icon={AlertTriangle} tone={failed ? "danger" : "warning"} />
+        <AdminKpiCard label="入库 / 无入库" value={`${formatAdminNumber(items.reduce((sum, item) => sum + (item.inserted_count || item.result_count || 0), 0))} / ${formatAdminNumber(noResult)}`} helper="结果沉淀 / 可清理线索" icon={Database} tone="info" />
       </AdminKpiGrid>
+      {actionError ? <div className="rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-4 py-3 text-sm text-[#B42318]">{actionError}</div> : null}
+      {notice ? <div className="rounded-lg border border-[#BBF7D0] bg-[#F0FDF4] px-4 py-3 text-sm text-[#047857]">{notice}</div> : null}
+      <div className="grid gap-3 xl:grid-cols-4">
+        <ProductDistributionPanel title="状态分布" items={countBy(items, (item) => getCollectionTaskStatusMeta(item.status).label)} />
+        <ProductDistributionPanel title="平台分布" items={countBy(items, (item) => item.platform)} formatKey={getPlatformLabel} />
+        <ProductDistributionPanel title="品牌分布" items={countBy(items, (item) => item.product_name)} />
+        <ProductDistributionPanel title="业务员分布" items={countBy(items, (item) => item.username)} />
+      </div>
       <AdminFilterBar>
         <AdminFilterField label="搜索任务" className="min-w-[220px] flex-1"><AdminInput value={filters.search} placeholder="任务名或品牌" onChange={(event) => setFilters((prev) => ({ ...prev, search: event.target.value }))} /></AdminFilterField>
         <AdminFilterField label="业务员"><AdminInput value={filters.owner} placeholder="业务员" onChange={(event) => setFilters((prev) => ({ ...prev, owner: event.target.value }))} /></AdminFilterField>
@@ -506,8 +753,9 @@ export function AdminCollectionTasksPanel() {
         <AdminFilterField label="开始时间"><AdminInput type="date" value={filters.startDate} onChange={(event) => setFilters((prev) => ({ ...prev, startDate: event.target.value }))} /></AdminFilterField>
         <AdminFilterField label="结束时间"><AdminInput type="date" value={filters.endDate} onChange={(event) => setFilters((prev) => ({ ...prev, endDate: event.target.value }))} /></AdminFilterField>
       </AdminFilterBar>
-      <AdminSection title="任务列表" description="状态已中文化，失败原因没有后端字段时兼容显示“暂无”。">
-        {loading ? <AdminState type="loading" message="正在加载采集任务..." /> : error ? <AdminState type="error" message={error} /> : <TasksTable items={rows} />}
+      <AdminSection title="任务列表" description="先按进度分类，再进入表格查看具体任务。删除后会立即从列表移除。">
+        <DetailTabs tabs={taskViewTabs} activeTab={activeTaskView} onChange={setActiveTaskView} />
+        {loading ? <AdminState type="loading" message="正在加载采集任务..." /> : error ? <AdminState type="error" message={error} /> : <TasksTable items={rows} onDeleteTask={handleDeleteTask} deletingTaskId={deletingTaskId} />}
       </AdminSection>
     </div>
   );

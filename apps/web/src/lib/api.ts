@@ -537,6 +537,10 @@ export function isCollectionTaskQueued(task: CollectionTask): boolean {
   return task.status === "queued";
 }
 
+export function isCollectionTaskPaused(task: CollectionTask): boolean {
+  return task.status === "paused";
+}
+
 export function isCollectionTaskActive(task: CollectionTask): boolean {
   return isCollectionTaskRunning(task) || isCollectionTaskQueued(task);
 }
@@ -1498,6 +1502,26 @@ export async function runCollectionTask(id: number): Promise<CollectionRunResult
   return response.json();
 }
 
+export async function pauseCollectionTask(id: number): Promise<CollectionTask> {
+  const response = await apiFetch(`${API_URL}/api/collection-tasks/${id}/pause`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function resumeCollectionTask(id: number): Promise<CollectionRunResult> {
+  const response = await apiFetch(`${API_URL}/api/collection-tasks/${id}/resume`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
 export async function enrichLinkSeedProfiles(taskId: number): Promise<CollectionRunResult> {
   const response = await apiFetch(`${API_URL}/api/collection-tasks/${taskId}/enrich-link-seeds`, {
     method: "POST",
@@ -2301,6 +2325,7 @@ export type AdminProduct = {
 
 export type AdminCollectionTask = {
   id: number;
+  parent_task_id?: number | null;
   name: string;
   status: string;
   platform: string;
@@ -2430,6 +2455,36 @@ export async function fetchAdminProduct(productId: number): Promise<AdminProduct
   const response = await apiFetch(`${API_URL}/api/admin/products/${productId}`, { cache: "no-store" });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
+}
+
+export async function deleteAdminCollectionTask(taskId: number): Promise<CollectionTaskDeleteResult> {
+  const response = await apiFetch(`${API_URL}/api/admin/collection-tasks/${taskId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  const result = await parseJsonResponse<Partial<CollectionTaskDeleteResult>>(response);
+  return {
+    action: result.action ?? "deleted",
+    task_id: result.task_id ?? taskId,
+  };
+}
+
+export async function bulkDeleteAdminCollectionTasks(taskIds: number[]): Promise<CollectionTaskBulkDeleteResult> {
+  const response = await apiFetch(`${API_URL}/api/admin/collection-tasks/bulk-delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_ids: taskIds }),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  const result = await parseJsonResponse<Partial<CollectionTaskBulkDeleteResult>>(response);
+  return {
+    deleted_count: result.deleted_count ?? 0,
+    archived_count: result.archived_count ?? 0,
+    skipped_count: result.skipped_count ?? 0,
+    deleted_ids: result.deleted_ids ?? [],
+    archived_ids: result.archived_ids ?? [],
+    skipped_ids: result.skipped_ids ?? [],
+  };
 }
 
 export async function fetchAdminCollectionTasks(): Promise<AdminCollectionTask[]> {
@@ -3652,6 +3707,23 @@ export async function processOutreachCampaign(
   const response = await apiFetch(`${API_URL}/api/outreach-campaigns/${campaignId}/process`, {
     method: "POST",
   });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function sendOutreachCampaignNow(
+  campaignId: number,
+  payload: { confirm: boolean; influencer_ids?: number[] },
+): Promise<OutreachSendQueueProcessResult> {
+  const response = await apiFetch(
+    `${LONG_RUNNING_API_URL}/api/outreach-campaigns/${campaignId}/send-now`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: PREVIEW_FETCH_TIMEOUT_MS },
+  );
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }

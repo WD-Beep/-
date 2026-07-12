@@ -12,6 +12,7 @@ import {
   buildOneClickCampaignPayload,
   buildOutreachCampaignResultUrl,
   buildOutreachCampaignsUrl,
+  resolveCurrentPageSelectedIds,
   resolveBulkDeleteSelection,
   resolveBulkOutreachSelection,
 } from "../src/lib/influencer-selection-helpers.ts";
@@ -67,6 +68,12 @@ test("buildOutreachCampaignsUrl without selection has no ids", () => {
   assert.equal(url, "/outreach-campaigns");
 });
 
+test("buildOutreachCampaignsUrl tags selected recipients with product id", () => {
+  const url = buildOutreachCampaignsUrl({ ids: [11, 9, 3], productId: 2 });
+  assert.match(url, /product_id=2/);
+  assert.match(url, /ids=11%2C9%2C3/);
+});
+
 test("buildOutreachCampaignResultUrl preserves checked recipients after one-click send", () => {
   const url = buildOutreachCampaignResultUrl({
     campaignId: 500,
@@ -108,6 +115,14 @@ test("resolveBulkOutreachSelection keeps partial page selection scoped to checke
   assert.equal(selection.count, 1);
   assert.equal(selection.selectAll, false);
   assert.deepEqual(selection.ids, [1]);
+});
+
+test("resolveCurrentPageSelectedIds drops stale selections from previous pages", () => {
+  assert.deepEqual(resolveCurrentPageSelectedIds([20, 21, 22, 101, 102, 103], [101, 102, 103, 104]), [
+    101,
+    102,
+    103,
+  ]);
 });
 
 test("resolveBulkOutreachSelection sends full filtered result only after select-all", () => {

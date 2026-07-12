@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { ChevronDown, Loader2, List, Mail, Pencil, Play, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { ChevronDown, Loader2, List, Mail, Pause, Pencil, Play, Plus, RefreshCw, Trash2, X } from "lucide-react";
 
 import { AdminShell } from "@/components/layout/admin-shell";
 import { useActiveProductId } from "@/components/providers/product-provider";
@@ -40,10 +40,13 @@ import {
   fetchPlatformCapabilities,
   getCollectionTaskRunningElapsedMs,
   isCollectionTaskActive,
+  isCollectionTaskPaused,
   isCollectionTaskQueued,
   isCollectionTaskRunning,
   isCollectionTaskRunningStale,
   isCollectionTaskSettled,
+  pauseCollectionTask,
+  resumeCollectionTask,
   runCollectionTask,
   runCollectionTaskBatch,
   runLinkImportBatch,
@@ -674,6 +677,64 @@ export function CollectionTasksPanel() {
     }
   }
 
+  async function handlePause(task: CollectionTask) {
+    setActionTaskId(task.id);
+    setMessage(null);
+    setError(null);
+    try {
+      const paused = await pauseCollectionTask(task.id);
+      setTasks((prev) => prev.map((t) => (t.id === task.id ? { ...t, ...paused } : t)));
+      setCandidatesTask((prev) => (prev?.id === task.id ? { ...prev, ...paused } : prev));
+      setMessage("任务已暂停，已采集的数据和进度已保留。");
+      showToast({ tone: "info", message: "任务已暂停，点击继续可从上次进度恢复。" });
+      await loadTasks({ silent: true });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : "暂停采集失败";
+      showToast({ tone: "error", message: errMsg });
+      setError(errMsg);
+      await loadTasks({ silent: true });
+    } finally {
+      setActionTaskId(null);
+    }
+  }
+
+  async function handleResume(task: CollectionTask) {
+    setActionTaskId(task.id);
+    setMessage(null);
+    setError(null);
+    try {
+      const kickoff = await resumeCollectionTask(task.id);
+      const runningSummary = kickoff.status_summary ?? "任务已继续，将从上次保存进度恢复采集。";
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === task.id
+            ? {
+                ...t,
+                status: kickoff.status,
+                status_summary: runningSummary,
+                error_message: kickoff.error_message ?? null,
+              }
+            : t,
+        ),
+      );
+      setCandidatesTask((prev) =>
+        prev?.id === task.id
+          ? { ...prev, status: kickoff.status, status_summary: runningSummary }
+          : prev,
+      );
+      setMessage(runningSummary);
+      showToast({ tone: kickoff.status === "queued" ? "warning" : "info", message: runningSummary });
+      await loadTasks({ silent: true });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : "继续采集失败";
+      showToast({ tone: "error", message: errMsg });
+      setError(errMsg);
+      await loadTasks({ silent: true });
+    } finally {
+      setActionTaskId(null);
+    }
+  }
+
   async function handleRunBatch(task: CollectionTask, failedOnly = false) {
     setActionTaskId(task.id);
     setMessage(null);
@@ -754,7 +815,17 @@ export function CollectionTasksPanel() {
     [tasks],
   );
 
-  const selectableTaskIds = ineffectiveTaskIds;
+  const selectableTaskIds = useMemo(
+    () =>
+      tasks
+        .filter(
+          (task) =>
+            !task.parent_task_id &&
+            !["high_value", "effective"].includes(taskEffectivenessCategory(task)),
+        )
+        .map((task) => task.id),
+    [tasks],
+  );
 
   function changeTaskView(value: TaskEffectivenessFilter) {
     setEffectivenessFilter(value);
@@ -868,6 +939,14 @@ export function CollectionTasksPanel() {
     });
   }
 
+  function getTaskSelectionBlockedReason(task: CollectionTask) {
+    if (task.parent_task_id) return "子轮次会随父任务一起清理";
+    if (["high_value", "effective"].includes(taskEffectivenessCategory(task))) {
+      return "该任务已有有效结果，不能批量删除";
+    }
+    return "";
+  }
+
   function toggleTaskSelection(taskId: number) {
     if (!selectableTaskIds.includes(taskId)) return;
     setSelectedTaskIds((prev) =>
@@ -878,7 +957,7 @@ export function CollectionTasksPanel() {
   function handleBulkDeleteSelected() {
     const deletableIds = selectedTaskIds.filter((id) => selectableTaskIds.includes(id));
     if (deletableIds.length === 0) {
-      setError("只能删除无效果任务");
+      setError("请选择可删除任务");
       return;
     }
     const selectedTasks = tasks.filter((task) => deletableIds.includes(task.id));
@@ -1128,25 +1207,35 @@ export function CollectionTasksPanel() {
           </CardDescription>
         </CardHeader>
         <CardContent className="flex min-h-0 flex-1 flex-col p-0">
-          {(effectivenessFilter === "low_value_result" ||
-            effectivenessFilter === "no_result") &&
-          selectedTaskIds.length > 0 ? (
-            <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
-              <span className="font-medium">已选择 {selectedTaskIds.length} 个任务</span>
-              <Button
-                variant="destructive"
-                size="sm"
-                disabled={deleteSubmitting}
-                onClick={handleBulkDeleteSelected}
-              >
-                {deleteSubmitting ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
-                批量删除
-              </Button>
+          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+            <span className="font-medium">
+              {selectedTaskIds.length > 0
+                ? `已选择 ${selectedTaskIds.length} 个任务`
+                : `当前页可删除 ${selectableTaskIds.length} 个任务`}
+            </span>
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={deleteSubmitting || selectedTaskIds.length === 0}
+              onClick={handleBulkDeleteSelected}
+              title={selectedTaskIds.length === 0 ? "请先勾选可删除任务" : "删除已选任务"}
+            >
+              {deleteSubmitting ? (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="mr-1 h-4 w-4" />
+              )}
+              删除已选
+            </Button>
+            {selectedTaskIds.length > 0 ? (
               <Button variant="outline" size="sm" disabled={deleteSubmitting} onClick={clearTaskSelection}>
                 取消选择
               </Button>
-            </div>
-          ) : null}
+            ) : null}
+            {selectableTaskIds.length === 0 ? (
+              <span className="text-xs text-muted-foreground">只有无有效结果的父任务可批量删除</span>
+            ) : null}
+          </div>
           {loading ? (
             <LoadingState label="加载任务列表..." />
           ) : listRows.length === 0 ? (
@@ -1172,12 +1261,17 @@ export function CollectionTasksPanel() {
                     <th className="w-10">
                       <input
                         type="checkbox"
-                        aria-label="全选当前页无效果任务"
+                        aria-label="全选当前页可删除任务"
                         checked={
                           selectableTaskIds.length > 0 &&
                           selectableTaskIds.every((id) => selectedTaskIds.includes(id))
                         }
                         disabled={selectableTaskIds.length === 0}
+                        title={
+                          selectableTaskIds.length === 0
+                            ? "当前页没有可批量删除的任务"
+                            : "全选当前页可删除任务"
+                        }
                         onChange={(event) => {
                           setSelectedTaskIds(event.target.checked ? selectableTaskIds : []);
                         }}
@@ -1277,6 +1371,7 @@ export function CollectionTasksPanel() {
                     const status = statusMeta(task.status);
                     const isBusy = actionTaskId === task.id;
                     const isRunning = isCollectionTaskRunning(task);
+                    const isPaused = isCollectionTaskPaused(task);
                     const isStaleRunning = isRunning && isCollectionTaskRunningStale(task);
                     const runningElapsedMs = isRunning ? getCollectionTaskRunningElapsedMs(task, nowMs) : 0;
                     const runBlocked = isRunning && !isStaleRunning;
@@ -1302,6 +1397,7 @@ export function CollectionTasksPanel() {
                     const failedBatchChildren = batchChildren.filter((child) =>
                       child.status === "failed" || child.status === "partial_failed"
                     );
+                    const selectionBlockedReason = getTaskSelectionBlockedReason(task);
 
                     return (
                       <Fragment key={task.id}>
@@ -1311,7 +1407,8 @@ export function CollectionTasksPanel() {
                             type="checkbox"
                             aria-label={`选择任务 ${task.name}`}
                             checked={selectedTaskIds.includes(task.id)}
-                            disabled={!isTaskRowIneffective(task)}
+                            disabled={!selectableTaskIds.includes(task.id)}
+                            title={selectionBlockedReason || "选择该任务用于批量删除"}
                             onChange={() => toggleTaskSelection(task.id)}
                           />
                         </td>
@@ -1475,11 +1572,34 @@ export function CollectionTasksPanel() {
                                 </Button>
                               </>
                             ) : null}
+                            {isRunning && !isStaleRunning && !isBatchParent ? (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className={COLLECTION_TASK_TABLE_LAYOUT.actionButton}
+                                disabled={isBusy}
+                                onClick={() => void handlePause(task)}
+                                title="暂停采集，保留已采集数据和进度"
+                              >
+                                {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Pause className="h-4 w-4" />}
+                              </Button>
+                            ) : isPaused && !isBatchParent ? (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className={COLLECTION_TASK_TABLE_LAYOUT.actionButton}
+                                disabled={isBusy}
+                                onClick={() => void handleResume(task)}
+                                title="继续采集，从上次进度恢复"
+                              >
+                                {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                              </Button>
+                            ) : null}
                             <Button
                               size="sm"
                               variant="ghost"
                               className={COLLECTION_TASK_TABLE_LAYOUT.actionButton}
-                              disabled={isBusy || runBlocked || isBatchParent}
+                              disabled={isBusy || runBlocked || isPaused || isBatchParent}
                               onClick={() => handleRun(task)}
                               title={
                                 isStaleRunning
@@ -1535,6 +1655,7 @@ export function CollectionTasksPanel() {
                       {isBatchParent && batchExpanded
                         ? batchChildren.map((child) => {
                             const childStatus = statusMeta(child.status);
+                            const childPaused = child.status === "paused";
                             return (
                               <tr key={`child-${child.id}`} className="border-b bg-muted/10 text-sm">
                                 <td className="px-2 py-2" />
@@ -1573,7 +1694,7 @@ export function CollectionTasksPanel() {
                                       disabled={actionTaskId === child.id || child.status === "running"}
                                       onClick={() => {
                                         const childTask = { ...task, ...child, parent_task_id: task.id } as CollectionTask;
-                                        void handleRun(childTask);
+                                        void (childPaused ? handleResume(childTask) : handleRun(childTask));
                                       }}
                                       title="运行本轮"
                                     >

@@ -1110,6 +1110,49 @@ class CollectionRunnerService:
                 logger.exception("Failed to persist AI job failure for task %s", task_id)
 
     @staticmethod
+    def _paused_result(task: CollectionTask) -> dict[str, int | str | None]:
+        return {
+            "new_count": 0,
+            "updated_count": 0,
+            "skipped_count": task.skipped_count or 0,
+            "filtered_count": task.filtered_out_count or task.failed_count or 0,
+            "total_count": task.result_count or 0,
+            "discovered_count": task.discovered_count or 0,
+            "deduped_count": task.deduped_count or 0,
+            "profile_fetched_count": task.profile_fetched_count or 0,
+            "profile_failed_count": task.profile_failed_count or 0,
+            "filtered_out_count": task.filtered_out_count or 0,
+            "inserted_count": task.inserted_count or 0,
+            "hashtag_count": task.hashtag_count or 0,
+            "post_count": task.post_count or 0,
+            "comment_author_count": task.comment_author_count or 0,
+            "email_count": task.email_count or 0,
+            "missing_contact_count": task.missing_contact_count or 0,
+            "status_summary": task.status_summary,
+        }
+
+    @staticmethod
+    async def _pause_if_requested(
+        db: AsyncSession,
+        task: CollectionTask,
+        *,
+        checkpoint: RunCheckpoint | None = None,
+    ) -> bool:
+        await db.refresh(task)
+        if task.status != CollectionTaskStatus.PAUSED.value:
+            return False
+        data = dict(task.run_checkpoint or {})
+        if checkpoint is not None:
+            data.update(checkpoint.to_dict())
+        now = datetime.now(UTC).isoformat()
+        data["paused"] = True
+        data["paused_at"] = data.get("paused_at") or now
+        task.run_checkpoint = data
+        task.status_summary = "Task paused. Continue later to resume from the saved progress."
+        await db.commit()
+        return True
+
+    @staticmethod
     async def run_task(
         db: AsyncSession,
         task: CollectionTask,
@@ -1122,11 +1165,12 @@ class CollectionRunnerService:
 
         await CollectionRunnerService._claim_collection_run(task.id)
 
-        task.status = CollectionTaskStatus.RUNNING.value
-        clear_task_error_fields(task)
-        if not resume:
-            task.status_summary = None
-            reset_run_progress(task)
+        if task.status != CollectionTaskStatus.PAUSED.value:
+            task.status = CollectionTaskStatus.RUNNING.value
+            clear_task_error_fields(task)
+            if not resume:
+                task.status_summary = None
+                reset_run_progress(task)
         checkpoint = RunCheckpoint.from_task(task)
         await db.commit()
         await db.refresh(task)
@@ -1145,6 +1189,9 @@ class CollectionRunnerService:
         filtered_excluded = 0
 
         try:
+            if task.status == CollectionTaskStatus.PAUSED.value:
+                return CollectionRunnerService._paused_result(task)
+
             if task.collection_mode == CollectionMode.LINK_IMPORT.value:
                 return await LinkImportService.run_collection_task(db, task)
 
@@ -1349,6 +1396,9 @@ class CollectionRunnerService:
                     ),
                 )
 
+            if await CollectionRunnerService._pause_if_requested(db, task, checkpoint=checkpoint):
+                return CollectionRunnerService._paused_result(task)
+
             if non_instagram and qualified_target > 0:
                 seen_profile_keys = {collected_identity_key(item) for item in collected}
                 if not collected:
@@ -1398,6 +1448,8 @@ class CollectionRunnerService:
                             rate_limited=overfetch_stop_reason == RATE_LIMIT_STOP_REASON,
                             rate_limit_note=RATE_LIMIT_STOP_REASON if overfetch_stop_reason == RATE_LIMIT_STOP_REASON else None,
                         )
+                    if await CollectionRunnerService._pause_if_requested(db, task, checkpoint=checkpoint):
+                        return CollectionRunnerService._paused_result(task)
                     if overfetch_stop_reason == RATE_LIMIT_STOP_REASON:
                         break
                 total_count = len(collected)
@@ -1426,6 +1478,8 @@ class CollectionRunnerService:
                 checkpoint=checkpoint,
                 commit=True,
             )
+            if await CollectionRunnerService._pause_if_requested(db, task, checkpoint=checkpoint):
+                return CollectionRunnerService._paused_result(task)
 
             product_id = task.product_id or 1
             global_map = await InfluencerPersistenceService.find_global_profiles_batch(db, collected)
@@ -1734,6 +1788,8 @@ class CollectionRunnerService:
                         task.profile_fetched_count = funnel.profile_fetched_count
                         task.profile_failed_count = funnel.profile_failed_count
                         task.filtered_out_count = funnel.filtered_out_count
+                        if await CollectionRunnerService._pause_if_requested(db, task, checkpoint=checkpoint):
+                            return CollectionRunnerService._paused_result(task)
 
             candidate_rows = CollectionRunnerService._build_candidate_rows(
                 task,

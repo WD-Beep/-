@@ -91,6 +91,8 @@ async def test_bulk_delete_api_archives_retained_and_deletes_clean():
     clean_id: int
     archived_id: int
     skipped_id: int
+    running_clean_id: int
+    running_with_result_id: int
 
     async with async_session_factory() as db:
         clean = _task(name="clean-bulk")
@@ -100,11 +102,24 @@ async def test_bulk_delete_api_archives_retained_and_deletes_clean():
             inserted_count=2,
             status=CollectionTaskStatus.COMPLETED_WITH_RESULTS.value,
         )
-        db.add_all([clean, archived, skipped])
+        running_clean = _task(
+            name="running-clean-bulk",
+            status=CollectionTaskStatus.RUNNING.value,
+        )
+        running_with_result = _task(
+            name="running-with-result-bulk",
+            status=CollectionTaskStatus.RUNNING.value,
+            inserted_count=1,
+            result_count=1,
+            discovered_count=1,
+        )
+        db.add_all([clean, archived, skipped, running_clean, running_with_result])
         await db.flush()
         clean_id = clean.id
         archived_id = archived.id
         skipped_id = skipped.id
+        running_clean_id = running_clean.id
+        running_with_result_id = running_with_result.id
         db.add(
             CollectionTaskCandidate(
                 task_id=skipped.id,
@@ -146,16 +161,18 @@ async def test_bulk_delete_api_archives_retained_and_deletes_clean():
             response = await client.post(
                 "/api/collection-tasks/bulk-delete",
                 headers=headers,
-                json={"task_ids": [clean_id, archived_id, skipped_id]},
+                json={"task_ids": [clean_id, archived_id, skipped_id, running_clean_id, running_with_result_id]},
             )
             assert response.status_code == 200, response.text
             payload = response.json()
             assert clean_id in payload["deleted_ids"]
+            assert running_clean_id in payload["deleted_ids"]
             assert archived_id in payload["archived_ids"]
             assert skipped_id in payload["skipped_ids"]
-            assert payload["deleted_count"] == 1
+            assert running_with_result_id in payload["skipped_ids"]
+            assert payload["deleted_count"] == 2
             assert payload["archived_count"] == 1
-            assert payload["skipped_count"] == 1
+            assert payload["skipped_count"] == 2
 
             candidate_resp = await client.get(
                 f"/api/collection-tasks/{archived_id}/candidates",
@@ -166,7 +183,7 @@ async def test_bulk_delete_api_archives_retained_and_deletes_clean():
             assert candidate_resp.json()["items"][0]["source_input_url"] == "https://www.amazon.com/dp/B0CPF3W9B2"
     finally:
         async with async_session_factory() as db:
-            for task_id in (archived_id, skipped_id):
+            for task_id in (archived_id, skipped_id, running_with_result_id):
                 row = await db.get(CollectionTask, task_id)
                 if row:
                     await db.delete(row)

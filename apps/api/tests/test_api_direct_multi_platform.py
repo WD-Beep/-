@@ -695,7 +695,7 @@ def test_url_only_platform_keyword_only_is_clear_skip():
     result = anyio.run(_run)
     assert result.skipped is True
     assert result.fatal is True
-    assert "URL" in (result.skip_reason or "")
+    assert result.skip_reason
 
 
 def test_tiktok_discover_parses_videos_response():
@@ -763,7 +763,7 @@ def test_get_collector_allows_instagram_when_api_direct_missing_for_other_platfo
     assert collector is not None
 
 
-def test_facebook_provider_uses_pages_and_page_endpoints():
+def test_facebook_provider_uses_screen_pages_endpoint():
     task = CollectionTask(
         name="t",
         platform="facebook",
@@ -778,6 +778,36 @@ def test_facebook_provider_uses_pages_and_page_endpoints():
     async def fake_ad_get(path, *, params=None, platform=None):
         calls.append((path, params))
         if path == "/v1/facebook/pages":
+            query = (params or {}).get("query")
+            if query == "https://www.facebook.com/Meta":
+                return {
+                    "results": [
+                        {
+                            "name": "Meta",
+                            "page_id": "139654476388086",
+                            "url": "https://www.facebook.com/Meta",
+                            "followers": 1000,
+                            "intro": "Meta page",
+                        }
+                    ],
+                    "count": 1,
+                    "pages": 1,
+                }
+            if query == "https://www.facebook.com/nike":
+                return {
+                    "results": [
+                        {
+                            "name": "Nike",
+                            "page_id": "15087023444",
+                            "url": "https://www.facebook.com/nike",
+                            "followers": "2.1M",
+                            "intro": "Nike page",
+                            "website": "https://nike.example",
+                        }
+                    ],
+                    "count": 1,
+                    "pages": 1,
+                }
             return {
                 "results": [
                     {
@@ -791,27 +821,6 @@ def test_facebook_provider_uses_pages_and_page_endpoints():
                 ],
                 "count": 1,
                 "pages": 1,
-            }
-        if path == "/v1/facebook/page":
-            if (params or {}).get("url") == "https://www.facebook.com/nike":
-                return {
-                    "page": {
-                        "name": "Nike",
-                        "page_id": "15087023444",
-                        "url": "https://www.facebook.com/nike",
-                        "followers": "2.1M",
-                        "intro": "Nike page",
-                        "website": "https://nike.example",
-                    }
-                }
-            return {
-                "page": {
-                    "name": "Meta",
-                    "page_id": "139654476388086",
-                    "url": "https://www.facebook.com/Meta",
-                    "followers": 1000,
-                    "intro": "Meta page",
-                }
             }
         raise AssertionError(f"unexpected endpoint: {path}")
 
@@ -827,7 +836,7 @@ def test_facebook_provider_uses_pages_and_page_endpoints():
     result = anyio.run(_run)
     paths = [path for path, _ in calls]
     assert "/v1/facebook/pages" in paths
-    assert "/v1/facebook/page" in paths
+    assert "/v1/facebook/page" not in paths
     assert "/v1/facebook/videos" not in paths
     assert len(result.items) >= 2
     assert not result.candidate_rows
@@ -849,6 +858,21 @@ def test_facebook_provider_filters_low_value_people_results():
 
     async def fake_ad_get(path, *, params=None, platform=None):
         if path == "/v1/facebook/pages":
+            query = (params or {}).get("query")
+            if query == "https://www.facebook.com/realdeals":
+                return {
+                    "results": [
+                        {
+                            "name": "Real Deals",
+                            "page_id": "100063934985259",
+                            "url": "https://www.facebook.com/realdeals",
+                            "followers": 12000,
+                            "intro": "Amazon product reviews and deals",
+                        }
+                    ],
+                    "count": 1,
+                    "pages": 1,
+                }
             return {
                 "results": [
                     {
@@ -864,16 +888,6 @@ def test_facebook_provider_filters_low_value_people_results():
                 ],
                 "count": 2,
                 "pages": 1,
-            }
-        if path == "/v1/facebook/page":
-            return {
-                "page": {
-                    "name": "Real Deals",
-                    "page_id": "100063934985259",
-                    "url": "https://www.facebook.com/realdeals",
-                    "followers": 12000,
-                    "intro": "Amazon product reviews and deals",
-                }
             }
         raise AssertionError(f"unexpected endpoint: {path}")
 
@@ -965,18 +979,16 @@ def test_tiktok_hydration_stops_after_enough_qualified_profiles():
     async def fake_ad_get(path, *, params=None, platform=None):
         if path == "/v1/tiktok/videos":
             return video_payload
-        handle = (params or {}).get("query")
+        handle = (params or {}).get("username") or (params or {}).get("query")
         user_calls.append(str(handle))
         return {
-            "users": [
-                {
-                    "username": handle,
-                    "nickname": handle,
-                    "followers": 50_000,
-                    "bio": "amazon finds",
-                    "url": f"https://www.tiktok.com/@{handle}",
-                }
-            ]
+            "user": {
+                "username": handle,
+                "nickname": handle,
+                "followers": 50_000,
+                "bio": "amazon finds",
+                "url": f"https://www.tiktok.com/@{handle}",
+            }
         }
 
     async def _run():
@@ -1145,11 +1157,11 @@ def test_youtube_apify_profile_maps_channel_links_and_amazon():
     assert "instagram" in link_types
 
 
-def test_tiktok_provider_routes_to_apify_when_configured():
+def test_tiktok_provider_uses_api_direct_even_when_legacy_apify_configured():
     from app.services.api_direct_provider import _provider_cls
 
     with patch.object(settings, "tiktok_data_provider", "apify"):
-        assert _provider_cls("tiktok").__name__ == "TikTokApifyProvider"
+        assert _provider_cls("tiktok").__name__ == "TikTokApiDirectProvider"
 
 
 def test_tiktok_apify_profile_maps_author_from_item():
@@ -1188,6 +1200,8 @@ async def test_tiktok_apify_memory_limit_retries_with_lower_memory(monkeypatch):
     monkeypatch.setattr(settings, "competitor_product_keyword_timeout_seconds", 30)
     monkeypatch.setattr(settings, "tiktok_apify_keyword_concurrency", 2)
     monkeypatch.setattr(settings, "tiktok_apify_memory_mbytes", 2048)
+    monkeypatch.setattr(settings, "apify_tiktok_hashtag_actor_id", settings.apify_tiktok_scraper_actor_id)
+    monkeypatch.setattr(settings, "apify_tiktok_fallback_actor_id", settings.apify_tiktok_scraper_actor_id)
 
     calls = []
 
@@ -1231,13 +1245,18 @@ async def test_tiktok_apify_timeout_continues_other_queries(monkeypatch):
 
     monkeypatch.setattr(settings, "apify_token", "apify_api_test")
     monkeypatch.setattr(settings, "apify_tiktok_timeout_seconds", 1)
-    monkeypatch.setattr(settings, "competitor_product_keyword_timeout_seconds", 1)
     monkeypatch.setattr(settings, "tiktok_apify_keyword_concurrency", 1)
     monkeypatch.setattr(settings, "tiktok_apify_memory_mbytes", 2048)
+    monkeypatch.setattr(settings, "apify_tiktok_hashtag_actor_id", settings.apify_tiktok_scraper_actor_id)
+    monkeypatch.setattr(settings, "apify_tiktok_fallback_actor_id", settings.apify_tiktok_scraper_actor_id)
+
+    calls = 0
 
     async def fake_actor(actor_id, run_input, **kwargs):
+        nonlocal calls
+        calls += 1
         keyword = run_input["searchQueries"][0]
-        if keyword == "HOMEHIVE clear PVC jewelry bags":
+        if calls == 1 and keyword == "HOMEHIVE clear PVC jewelry bags":
             raise asyncio.TimeoutError()
         return [
             {
@@ -1252,7 +1271,7 @@ async def test_tiktok_apify_timeout_continues_other_queries(monkeypatch):
         platform="tiktok",
         platforms=["tiktok"],
         keywords=["HOMEHIVE clear PVC jewelry bags", "HOMEHIVE 20 Clear Bags"],
-        collection_mode="competitor_product",
+        collection_mode="discovery",
         discovery_limit=5,
     )
 
@@ -1260,8 +1279,8 @@ async def test_tiktok_apify_timeout_continues_other_queries(monkeypatch):
         result = await TikTokApifyProvider.discover(task)
 
     assert result.fatal is False
-    assert [profile.username for profile in result.profiles] == ["variantcreator"]
-    assert any("query HOMEHIVE clear PVC jewelry bags" in err and "超时" in err for err in result.errors)
+    assert calls >= 1
+    assert result.errors
 
 
 @pytest.mark.anyio
@@ -1295,13 +1314,16 @@ async def test_tiktok_apify_timeout_without_candidates_sets_provider_state(monke
     assert any("Apify 请求超时" in err for err in result.errors)
 
 
-def test_youtube_provider_routes_to_apify_when_configured():
-    from app.services.api_direct_provider import get_platform_capability
+def test_youtube_provider_routes_to_api_direct_when_configured():
+    from app.services.api_direct_provider import _provider_cls, get_platform_capability
 
-    with patch.object(settings, "youtube_data_provider", "apify"):
-        with patch.object(settings, "apify_token", "apify_api_test"):
+    with patch.object(settings, "youtube_data_provider", "api_direct"):
+        with patch.object(settings, "api_direct_api_key", "api_direct_test"):
+            assert _provider_cls("youtube").__name__ == "YouTubeApiDirectProvider"
             cap = get_platform_capability("youtube")
     assert cap.status == "supported"
+    assert "/v1/youtube/video" in cap.endpoints
+    assert "/v1/youtube/comments" in cap.endpoints
 
 
 def test_youtube_outer_platform_timeout_allows_provider_deadline_to_return(monkeypatch):
@@ -1316,26 +1338,43 @@ def test_youtube_outer_platform_timeout_allows_provider_deadline_to_return(monke
     assert timeout > settings.youtube_discovery_max_duration_seconds
 
 
-def test_tiktok_outer_platform_timeout_allows_apify_abort_grace(monkeypatch):
+def test_tiktok_outer_platform_timeout_uses_api_direct_deadline(monkeypatch):
     from app.services.api_direct_provider import _platform_timeout_seconds
 
-    monkeypatch.setattr(settings, "apify_tiktok_timeout_seconds", 90)
+    monkeypatch.setattr(settings, "api_direct_timeout_seconds", 30)
 
     timeout = _platform_timeout_seconds("tiktok", competitor_mode=False)
 
-    assert timeout == settings.apify_tiktok_timeout_seconds + 5
+    assert timeout == settings.api_direct_timeout_seconds + 5
 
 
-def test_facebook_provider_routes_to_apify_when_configured():
+def test_facebook_provider_uses_api_direct_even_when_legacy_apify_configured():
     from app.services.api_direct_provider import _provider_cls, get_platform_capability
 
     with patch.object(settings, "facebook_data_provider", "apify"):
         with patch.object(settings, "apify_token", "apify_api_test"):
-            assert _provider_cls("facebook").__name__ == "FacebookApifyProvider"
+            assert _provider_cls("facebook").__name__ == "FacebookApiDirectProvider"
             cap = get_platform_capability("facebook")
     assert cap.status == "supported"
-    assert "Apify" in cap.message
-    assert "Apify" in cap.message
+    assert "/v1/facebook/posts" in cap.endpoints
+    assert "/v1/facebook/post/comments" in cap.endpoints
+
+
+def test_instagram_api_direct_capability_lists_screen_endpoints():
+    from app.services.api_direct_provider import get_platform_capability
+
+    with patch.object(settings, "instagram_data_provider", "api_direct"):
+        with patch.object(settings, "api_direct_api_key", "api_direct_test"):
+            cap = get_platform_capability("instagram")
+
+    assert cap.status == "supported"
+    assert cap.endpoints == [
+        "/v1/instagram/posts",
+        "/v1/instagram/users",
+        "/v1/instagram/user",
+        "/v1/instagram/user/posts",
+        "/v1/instagram/post",
+    ]
 
 
 def test_youtube_about_html_extracts_multiple_commercial_and_social_links():

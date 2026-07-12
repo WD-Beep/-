@@ -20,6 +20,7 @@ from app.services.platform_providers.url_only import (
     PinterestUrlOnlyProvider,
     ShopMyUrlOnlyProvider,
 )
+from app.services.platform_providers.youtube_api_direct import YouTubeApiDirectProvider
 from app.services.platform_providers.youtube_apify import YouTubeApifyProvider
 from app.services.platform_providers.youtube_official import YouTubeAutoProvider, YouTubeOfficialProvider
 from app.services.collection_sources import enrich_platform_capability
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 _PROVIDER_REGISTRY = {
     "instagram": InstagramApiDirectProvider,
+    "youtube": YouTubeApiDirectProvider,
     "tiktok": TikTokApiDirectProvider,
     "facebook": FacebookApiDirectProvider,
     "pinterest": PinterestUrlOnlyProvider,
@@ -72,13 +74,7 @@ def _provider_cls(platform: str):
         provider = settings.active_youtube_provider
         if provider == "official":
             return YouTubeOfficialProvider
-        if provider == "apify":
-            return YouTubeApifyProvider
-        return YouTubeAutoProvider
-    if platform == "tiktok" and settings.active_tiktok_provider == "apify":
-        return TikTokApifyProvider
-    if platform == "facebook" and settings.active_facebook_provider == "apify":
-        return FacebookApifyProvider
+        return YouTubeApiDirectProvider
     return _PROVIDER_REGISTRY.get(platform)
 
 
@@ -169,7 +165,7 @@ def _platform_timeout_seconds(platform: str, *, competitor_mode: bool) -> int | 
     if platform == "facebook":
         return max(30, settings.facebook_discovery_max_duration_seconds)
     if platform == "tiktok":
-        return max(30, settings.apify_tiktok_timeout_seconds) + 5
+        return max(30, settings.api_direct_timeout_seconds) + 5
     return None
 
 

@@ -64,16 +64,38 @@ async def _start_next_batch_child(
     parent: CollectionTask,
     background_tasks: BackgroundTasks | None,
     db: AsyncSession,
+    *,
+    resume_paused: bool = False,
 ) -> CollectionTaskStatus | None:
-    child = await CollectionTaskService.next_batch_child_to_run(db, parent.id)
+    child = (
+        await CollectionTaskService.paused_batch_child_to_resume(db, parent.id)
+        if resume_paused
+        else None
+    )
+    if child is None:
+        child = await CollectionTaskService.next_batch_child_to_run(db, parent.id)
     if child is None:
         await CollectionTaskService.refresh_batch_parent_state(db, parent)
         return None
     stale_running = CollectionTaskService.is_running_stale(child)
-    resume = child.status == CollectionTaskStatus.RUNNING.value and stale_running
-    result_status = await CollectionQueueService.queue_or_start(db, child, resume=resume)
+    resume = child.status == CollectionTaskStatus.PAUSED.value or (
+        child.status == CollectionTaskStatus.RUNNING.value and stale_running
+    )
+    active_resume = (
+        child.status == CollectionTaskStatus.PAUSED.value
+        and CollectionRunnerService.is_task_active_in_process(child.id)
+    )
+    if child.status == CollectionTaskStatus.PAUSED.value:
+        CollectionTaskService.prepare_paused_task_for_resume(child)
+    if active_resume:
+        child.status = CollectionTaskStatus.RUNNING.value
+        await db.commit()
+        await db.refresh(child)
+        result_status = CollectionTaskStatus.RUNNING
+    else:
+        result_status = await CollectionQueueService.queue_or_start(db, child, resume=resume)
     await CollectionTaskService.refresh_batch_parent_state(db, parent)
-    if result_status == CollectionTaskStatus.RUNNING:
+    if result_status == CollectionTaskStatus.RUNNING and not active_resume:
         if background_tasks is not None:
             background_tasks.add_task(_run_collection_task_in_background, child.id, resume=resume)
         else:
@@ -235,6 +257,8 @@ async def bulk_delete_collection_tasks(
         ensure_task_access(task, ctx)
         if task.product_id != product_id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权删除该任务")
+        if task.parent_task_id is not None:
+            continue
         tasks.append(task)
     result = await CollectionTaskService.delete_tasks_bulk(
         db, tasks, require_ineffective=True
@@ -735,6 +759,61 @@ async def run_collection_task(
     result_status = await CollectionQueueService.queue_or_start(db, task, resume=resume)
     if result_status == CollectionTaskStatus.RUNNING:
         background_tasks.add_task(_run_collection_task_in_background, task.id, resume=resume)
+    return _run_result_snapshot(task, message=task.status_summary)
+
+
+@router.post("/{task_id}/pause", response_model=CollectionTaskRead)
+async def pause_collection_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> CollectionTaskRead:
+    task = ensure_task_access(await CollectionTaskService.get_task(db, task_id), ctx)
+    try:
+        paused = await CollectionTaskService.pause_task(db, task)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    parent_task_id = getattr(paused, "parent_task_id", None)
+    if parent_task_id:
+        parent = await CollectionTaskService.get_task(db, parent_task_id)
+        if parent:
+            await CollectionTaskService.refresh_batch_parent_state(db, parent)
+    return CollectionTaskService.task_read(paused)
+
+
+@router.post("/{task_id}/resume", response_model=CollectionRunResult)
+async def resume_collection_task(
+    task_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> CollectionRunResult:
+    task = ensure_task_access(await CollectionTaskService.get_task(db, task_id), ctx)
+    if CollectionTaskService._is_batch_parent(task):
+        result_status = await _start_next_batch_child(
+            task,
+            background_tasks,
+            db,
+            resume_paused=True,
+        )
+        await db.refresh(task)
+        message = task.status_summary or "Batch collection resumed from the paused round."
+        if result_status is None:
+            message = task.status_summary or "No paused batch round to resume."
+        return _run_result_snapshot(task, message=message)
+
+    try:
+        CollectionTaskService.prepare_paused_task_for_resume(task)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if CollectionRunnerService.is_task_active_in_process(task.id):
+        task.status = CollectionTaskStatus.RUNNING.value
+        await db.commit()
+        await db.refresh(task)
+        return _run_result_snapshot(task, message=task.status_summary)
+    result_status = await CollectionQueueService.queue_or_start(db, task, resume=True)
+    if result_status == CollectionTaskStatus.RUNNING:
+        background_tasks.add_task(_run_collection_task_in_background, task.id, resume=True)
     return _run_result_snapshot(task, message=task.status_summary)
 
 

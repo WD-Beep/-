@@ -45,7 +45,12 @@ from app.services.task_run_progress import STAGE_DISCOVERY, STAGE_HYDRATION
 
 logger = logging.getLogger(__name__)
 
-ENDPOINTS = ["/v1/youtube/posts", "/v1/youtube/channels"]
+ENDPOINTS = [
+    "/v1/youtube/posts",
+    "/v1/youtube/channels",
+    "/v1/youtube/video",
+    "/v1/youtube/comments",
+]
 MAX_ABOUT_HYDRATIONS = 30
 YOUTUBE_ABOUT_HYDRATION_CONCURRENCY = 2
 _ABOUT_FETCH_TIMEOUT_SECONDS = 10

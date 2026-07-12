@@ -263,6 +263,8 @@ class CollectionTaskService:
         }
         if any(status == CollectionTaskStatus.RUNNING.value for status in status_values):
             status_value = CollectionTaskStatus.RUNNING.value
+        elif any(status == CollectionTaskStatus.PAUSED.value for status in status_values):
+            status_value = CollectionTaskStatus.PAUSED.value
         elif any(status == CollectionTaskStatus.QUEUED.value for status in status_values):
             status_value = CollectionTaskStatus.QUEUED.value
         elif all(status in terminal_statuses for status in status_values) and any(
@@ -286,7 +288,7 @@ class CollectionTaskService:
             (
                 child
                 for child in children
-                if child.status == CollectionTaskStatus.RUNNING.value
+                if child.status in {CollectionTaskStatus.RUNNING.value, CollectionTaskStatus.PAUSED.value}
             ),
             None,
         )
@@ -299,6 +301,7 @@ class CollectionTaskService:
         clear_error = status_value in {
             CollectionTaskStatus.RUNNING.value,
             CollectionTaskStatus.QUEUED.value,
+            CollectionTaskStatus.PAUSED.value,
         }
         return {
             "status": status_value,
@@ -344,7 +347,11 @@ class CollectionTaskService:
             (
                 child
                 for child in children
-                if child.status in {CollectionTaskStatus.RUNNING.value, CollectionTaskStatus.QUEUED.value}
+                if child.status in {
+                    CollectionTaskStatus.RUNNING.value,
+                    CollectionTaskStatus.QUEUED.value,
+                    CollectionTaskStatus.PAUSED.value,
+                }
             ),
             None,
         )
@@ -358,6 +365,40 @@ class CollectionTaskService:
             f"多轮采集：第 {current_round}/{parent.batch_round_count or len(children)} 轮，"
             f"已入库 {inserted}/{total}，成功 {completed} 轮，失败 {failed} 轮，跳过 {skipped}"
         )
+
+    @staticmethod
+    async def pause_task(db: AsyncSession, task: CollectionTask) -> CollectionTask:
+        if task.status not in {
+            CollectionTaskStatus.RUNNING.value,
+            CollectionTaskStatus.QUEUED.value,
+        }:
+            raise ValueError("Only running or queued collection tasks can be paused.")
+        checkpoint = dict(task.run_checkpoint or {})
+        now = datetime.now(UTC).isoformat()
+        checkpoint["paused"] = True
+        checkpoint["pause_requested_at"] = checkpoint.get("pause_requested_at") or now
+        checkpoint["paused_at"] = now
+        task.run_checkpoint = checkpoint
+        task.status = CollectionTaskStatus.PAUSED.value
+        task.status_summary = "Task paused. Existing candidates, counters, and inserted influencers are preserved."
+        task.error_message = None
+        task.last_error = None
+        await db.commit()
+        await db.refresh(task)
+        return task
+
+    @staticmethod
+    def prepare_paused_task_for_resume(task: CollectionTask) -> None:
+        if task.status != CollectionTaskStatus.PAUSED.value:
+            raise ValueError("Only paused collection tasks can be resumed.")
+        checkpoint = dict(task.run_checkpoint or {})
+        checkpoint.pop("paused", None)
+        checkpoint.pop("paused_at", None)
+        checkpoint.pop("pause_requested_at", None)
+        task.run_checkpoint = checkpoint
+        task.status_summary = "Resuming collection from the saved progress. Existing data is preserved."
+        task.error_message = None
+        task.last_error = None
 
     @staticmethod
     def _serialize_task_data(data: dict) -> dict:
@@ -563,6 +604,7 @@ class CollectionTaskService:
         page: int,
         page_size: int,
     ) -> PaginatedResponse[CollectionTaskRead]:
+        await CollectionTaskService.reconcile_stale_running_tasks(db)
         base_query = select(CollectionTask)
         base_query = CollectionTaskService._apply_filters(base_query, filters)
 
@@ -583,6 +625,30 @@ class CollectionTaskService:
             for child in child_result.scalars().all():
                 if child.parent_task_id is not None:
                     child_rows_by_parent.setdefault(child.parent_task_id, []).append(child)
+            repaired = False
+            for parent in rows:
+                if not CollectionTaskService._is_batch_parent(parent):
+                    continue
+                children = child_rows_by_parent.get(parent.id, [])
+                expected = int(parent.batch_round_count or 0)
+                existing_rounds = {
+                    int(child.batch_round_index)
+                    for child in children
+                    if child.batch_round_index is not None
+                }
+                if expected > len(existing_rounds):
+                    await CollectionTaskService._ensure_batch_children_present(db, parent, children)
+                    repaired = True
+            if repaired:
+                child_rows_by_parent = {}
+                child_result = await db.execute(
+                    select(CollectionTask)
+                    .where(CollectionTask.parent_task_id.in_(parent_ids))
+                    .order_by(CollectionTask.batch_round_index.asc(), CollectionTask.id.asc())
+                )
+                for child in child_result.scalars().all():
+                    if child.parent_task_id is not None:
+                        child_rows_by_parent.setdefault(child.parent_task_id, []).append(child)
         duplicate_ids = await CollectionTaskService._duplicate_ids_for_rows(
             db,
             rows,
@@ -675,8 +741,18 @@ class CollectionTaskService:
                 child.status_summary = reason
                 child.current_stage = STAGE_FAILED
         await db.commit()
+        if any(child.status == CollectionTaskStatus.PAUSED.value for child in children):
+            return None
         for child in children:
             if child.status not in terminal and child.status != CollectionTaskStatus.RUNNING.value:
+                return child
+        return None
+
+    @staticmethod
+    async def paused_batch_child_to_resume(db: AsyncSession, parent_task_id: int) -> CollectionTask | None:
+        children = await CollectionTaskService.get_batch_children(db, parent_task_id)
+        for child in children:
+            if child.status == CollectionTaskStatus.PAUSED.value:
                 return child
         return None
 
@@ -978,6 +1054,115 @@ class CollectionTaskService:
         for child in children:
             await db.delete(child)
         await db.flush()
+
+    @staticmethod
+    async def _ensure_batch_children_present(
+        db: AsyncSession,
+        parent: CollectionTask,
+        children: list[CollectionTask],
+    ) -> None:
+        round_count = int(parent.batch_round_count or 0)
+        if round_count <= 1:
+            return
+        checkpoint = dict(parent.run_checkpoint or {})
+        round_size = int(
+            checkpoint.get("batch_round_size")
+            or parent.discovery_limit
+            or 50
+        )
+        total_limit = int(
+            checkpoint.get("batch_total_limit")
+            or parent.discovery_limit
+            or round_size * round_count
+        )
+        existing_rounds = {
+            int(child.batch_round_index)
+            for child in children
+            if child.batch_round_index is not None
+        }
+        if len(existing_rounds) >= round_count:
+            return
+
+        current_round = checkpoint.get("batch_current_round")
+        try:
+            current_round_index = int(current_round)
+        except (TypeError, ValueError):
+            current_round_index = min(round_count, len(existing_rounds) + 1)
+        failed_remaining = max(0, int(checkpoint.get("batch_failed_rounds") or 0))
+        completed_remaining = max(0, int(checkpoint.get("batch_completed_rounds") or 0))
+        base_payload = {
+            "user_id": parent.user_id,
+            "workspace_id": parent.workspace_id,
+            "product_id": parent.product_id,
+            "collection_mode": parent.collection_mode,
+            "platform": parent.platform,
+            "platforms": list(parent.platforms or []),
+            "keywords": list(parent.keywords or []),
+            "input_urls": list(parent.input_urls or []),
+            "country": parent.country,
+            "category": parent.category,
+            "min_engagement_rate": parent.min_engagement_rate,
+            "min_followers_count": parent.min_followers_count,
+            "max_followers_count": parent.max_followers_count,
+            "filter_include_keywords": list(parent.filter_include_keywords or []),
+            "filter_exclude_keywords": list(parent.filter_exclude_keywords or []),
+            "require_email": parent.require_email,
+            "require_contact": parent.require_contact,
+            "strict_quality_filter": parent.strict_quality_filter,
+            "insert_qualified_only": parent.insert_qualified_only,
+            "export_qualified_only": parent.export_qualified_only,
+            "comment_discovery_enabled": parent.comment_discovery_enabled,
+            "schedule_enabled": parent.schedule_enabled,
+            "schedule_cron": parent.schedule_cron,
+            "email_enabled": parent.email_enabled,
+            "email_recipients": list(parent.email_recipients or []),
+            "outreach_enabled": parent.outreach_enabled,
+            "outreach_provider": parent.outreach_provider,
+            "outreach_dry_run": parent.outreach_dry_run,
+            "outreach_templates": dict(parent.outreach_templates or {}),
+        }
+        for index in range(1, round_count + 1):
+            if index in existing_rounds:
+                continue
+            remaining = max(total_limit - ((index - 1) * round_size), 0)
+            current_round_limit = min(round_size, remaining) if remaining else round_size
+            if index < current_round_index and failed_remaining > 0:
+                status = CollectionTaskStatus.FAILED.value
+                failed_remaining -= 1
+                status_summary = "子轮次曾被清理，已按父任务进度恢复为失败轮次。"
+            elif index < current_round_index and completed_remaining > 0:
+                status = CollectionTaskStatus.COMPLETED_NO_RESULTS.value
+                completed_remaining -= 1
+                status_summary = "子轮次曾被清理，已按父任务进度恢复。"
+            elif index == current_round_index and parent.status in {
+                CollectionTaskStatus.RUNNING.value,
+                CollectionTaskStatus.QUEUED.value,
+            }:
+                status = parent.status
+                status_summary = "子轮次曾被清理，已按父任务当前轮次恢复。"
+            else:
+                status = CollectionTaskStatus.DRAFT.value
+                status_summary = None
+            child_checkpoint = dict(parent.run_checkpoint or {})
+            child_checkpoint["batch_group_id"] = parent.batch_group_id
+            child_checkpoint["batch_round_index"] = index
+            child_checkpoint["batch_round_count"] = round_count
+            child_checkpoint["batch_parent_task_id"] = parent.id
+            db.add(
+                CollectionTask(
+                    **base_payload,
+                    name=f"{parent.name} - 第{index}轮",
+                    discovery_limit=current_round_limit,
+                    parent_task_id=parent.id,
+                    batch_group_id=parent.batch_group_id,
+                    batch_round_index=index,
+                    batch_round_count=round_count,
+                    status=status,
+                    status_summary=status_summary,
+                    run_checkpoint=child_checkpoint,
+                )
+            )
+        await db.commit()
 
     @staticmethod
     async def _rebuild_batch_children(
