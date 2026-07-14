@@ -9,8 +9,7 @@ import { Label } from "@/components/ui/label";
 import {
   ADMIN_AUTH_PASSWORD,
   getStoredAuthSession,
-  loadBackendAuthSession,
-  resolveAdminAuthAccount,
+  loginWithCredentials,
   setAuthSession,
 } from "@/lib/auth";
 import { cn } from "@/lib/utils";
@@ -48,19 +47,9 @@ export function AdminLoginForm() {
     if (submitting) return;
 
     setError(null);
-    const account = resolveAdminAuthAccount(username, password);
-    if (!account) {
-      setError(
-        username.trim().toLowerCase().startsWith("sales")
-          ? adminRequiredMessage
-          : "管理员账号或密码不正确，请检查后重试。",
-      );
-      return;
-    }
-
     setSubmitting(true);
     try {
-      const session = await loadBackendAuthSession(account);
+      const session = await loginWithCredentials(username, password);
       if (!session.isAdmin) {
         setError(adminRequiredMessage);
         setSubmitting(false);
@@ -76,7 +65,7 @@ export function AdminLoginForm() {
   }
 
   return (
-    <div className="flex h-dvh min-w-[1180px] items-center justify-center overflow-hidden bg-[#EEF3F8] px-8 text-[#1F2937]">
+    <div className="flex min-h-dvh items-center justify-center overflow-x-hidden bg-[#EEF3F8] px-4 py-6 text-[#1F2937] sm:px-8">
       <div
         aria-hidden
         className="pointer-events-none absolute inset-0"
@@ -84,8 +73,8 @@ export function AdminLoginForm() {
           background: "linear-gradient(135deg, #F8FAFD 0%, #EDF3F9 46%, #E7EEF7 100%)",
         }}
       />
-      <main className="relative grid w-full max-w-[980px] grid-cols-[1fr_420px] overflow-hidden rounded-lg border border-[#DCE4EE] bg-[#FBFCFE] shadow-[0_24px_80px_rgba(26,42,58,0.12)]">
-        <section className="flex flex-col justify-between bg-[#102033] p-10 text-[#E6EDF5]">
+      <main className="relative grid w-full max-w-[980px] overflow-hidden rounded-lg border border-[#DCE4EE] bg-[#FBFCFE] shadow-[0_24px_80px_rgba(26,42,58,0.12)] md:grid-cols-[1fr_420px]">
+        <section className="hidden flex-col justify-between bg-[#102033] p-10 text-[#E6EDF5] md:flex">
           <div>
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-md bg-[#2563EB]">
@@ -110,7 +99,7 @@ export function AdminLoginForm() {
           </div>
         </section>
 
-        <section className="p-8">
+        <section className="p-6 sm:p-8">
           <div className="mb-7">
             <p className="text-xs font-semibold tracking-[0.14em] text-[#4F6B8A]">ADMIN</p>
             <h2 className="mt-2 text-2xl font-semibold text-[#102033]">账号登录</h2>

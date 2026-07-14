@@ -349,9 +349,11 @@ export function OutreachCampaignsPanel() {
 
   useEffect(() => {
     if (!selectionMatchesCurrentProduct && sourceMode === "selected") {
-      setSourceMode("filters");
-      clearPreview();
-      setMessage("已切换到当前品牌的可发送邮箱；上一个品牌选中的红人不会用于本次发送。");
+      queueMicrotask(() => {
+        setSourceMode("filters");
+        clearPreview();
+        setMessage("已切换到当前品牌的可发送邮箱；上一个品牌选中的红人不会用于本次发送。");
+      });
     }
   }, [selectionMatchesCurrentProduct, sourceMode]);
 

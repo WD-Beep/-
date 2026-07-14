@@ -18,6 +18,7 @@ class CollectionTask(Base):
     batch_group_id: Mapped[str | None] = mapped_column(String(64), index=True)
     batch_round_index: Mapped[int | None] = mapped_column(Integer)
     batch_round_count: Mapped[int | None] = mapped_column(Integer)
+    max_runtime_minutes: Mapped[int | None] = mapped_column(Integer, default=60)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
     workspace_id: Mapped[int | None] = mapped_column(ForeignKey("workspaces.id", ondelete="SET NULL"), index=True)
     product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id", ondelete="SET NULL"), index=True)

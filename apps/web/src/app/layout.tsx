@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 
+import { BusinessRouteShell } from "@/components/layout/business-route-shell";
 import { AppProviders } from "@/components/providers/app-providers";
 import "./globals.css";
 
@@ -27,7 +28,9 @@ export default function RootLayout({
   return (
     <html lang="zh-CN" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
       <body className="min-h-full">
-        <AppProviders>{children}</AppProviders>
+        <AppProviders>
+          <BusinessRouteShell>{children}</BusinessRouteShell>
+        </AppProviders>
       </body>
     </html>
   );

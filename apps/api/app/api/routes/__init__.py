@@ -1,9 +1,10 @@
 from fastapi import APIRouter
 
-from . import admin, ai, collection_tasks, dashboard, email, email_inbound, email_logs, influencers, knowledge, link_import, link_knowledge_bases, manual_outreach_email, message_templates, outreach_campaigns, outreach_records, outreach_send_queue, settings, tenant
+from . import admin, ai, auth, collection_tasks, dashboard, email, email_inbound, email_logs, influencers, knowledge, link_import, link_knowledge_bases, manual_outreach_email, message_templates, outreach_campaigns, outreach_records, outreach_send_queue, settings, tenant
 
 api_router = APIRouter(prefix="/api")
 
+api_router.include_router(auth.router)
 api_router.include_router(admin.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(influencers.router)

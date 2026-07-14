@@ -13,7 +13,9 @@ type GuardState = "checking" | "allowed" | "blocked";
 
 export function AdminRouteGuard({ children }: AdminRouteGuardProps) {
   const router = useRouter();
-  const [state, setState] = useState<GuardState>("checking");
+  const [state, setState] = useState<GuardState>(() =>
+    getStoredAuthSession()?.isAdmin ? "allowed" : "checking",
+  );
 
   useEffect(() => {
     let cancelled = false;

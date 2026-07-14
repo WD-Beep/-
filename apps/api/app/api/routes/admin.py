@@ -4,7 +4,9 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import Select, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
@@ -14,15 +16,43 @@ from app.models.email_log import EmailLog
 from app.models.email_reply import EmailReply
 from app.models.global_influencer_profile import GlobalInfluencerProfile
 from app.models.product_influencer import ProductInfluencer
-from app.models.tenant import Product, ProductMember, User
+from app.models.tenant import Product, ProductMember, User, WorkspaceMember
 from app.scheduler import refresh_scheduler
 from app.schemas.collection_task import CollectionTaskBulkDelete, CollectionTaskBulkDeleteResult
 from app.services.collection_task import CollectionTaskService
+from app.services.auth_service import hash_password
+from app.services.tenant_service import TenantService
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 SUCCESS_TASK_STATUSES = {"completed", "completed_with_results", "completed_no_results"}
 FAILED_TASK_STATUSES = {"failed", "partial_failed"}
+
+
+class AdminUserCreate(BaseModel):
+    username: str = Field(min_length=2, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(min_length=1, max_length=200)
+    display_name: str | None = Field(default=None, max_length=255)
+    email: EmailStr | None = None
+    role: str = Field(default="sales", pattern=r"^(admin|sales)$")
+    is_active: bool = True
+    product_ids: list[int] = Field(default_factory=list)
+
+
+class AdminUserUpdate(BaseModel):
+    username: str | None = Field(default=None, min_length=2, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    display_name: str | None = Field(default=None, max_length=255)
+    email: EmailStr | None = None
+    role: str | None = Field(default=None, pattern=r"^(admin|sales)$")
+    is_active: bool | None = None
+
+
+class AdminPasswordReset(BaseModel):
+    password: str = Field(min_length=1, max_length=200)
+
+
+class AdminProductAssignments(BaseModel):
+    product_ids: list[int] = Field(default_factory=list)
 
 
 async def require_admin(ctx: UserContext = Depends(get_user_context)) -> UserContext:
@@ -59,6 +89,29 @@ async def _product_ids_for_user(db: AsyncSession, user_id: int) -> list[int]:
         select(ProductMember.product_id).where(ProductMember.user_id == user_id)
     )
     return [int(row[0]) for row in rows]
+
+
+async def _replace_product_assignments(db: AsyncSession, user: User, product_ids: list[int]) -> None:
+    unique_ids = list(dict.fromkeys(product_ids))
+    if unique_ids:
+        valid_ids = set(
+            (await db.execute(select(Product.id).where(Product.id.in_(unique_ids)))).scalars().all()
+        )
+        missing = [product_id for product_id in unique_ids if product_id not in valid_ids]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"品牌不存在：{', '.join(map(str, missing))}")
+    existing = {
+        membership.product_id: membership
+        for membership in (
+            await db.execute(select(ProductMember).where(ProductMember.user_id == user.id))
+        ).scalars().all()
+    }
+    for product_id, membership in existing.items():
+        if product_id not in unique_ids:
+            await db.delete(membership)
+    for product_id in unique_ids:
+        if product_id not in existing:
+            db.add(ProductMember(user_id=user.id, product_id=product_id, role="owner"))
 
 
 async def _product_members(db: AsyncSession, product_id: int) -> list[dict[str, Any]]:
@@ -377,6 +430,151 @@ async def list_admin_users(
     return [await _user_summary(db, user) for user in users]
 
 
+@router.post("/users", status_code=status.HTTP_201_CREATED)
+async def create_admin_user(
+    data: AdminUserCreate,
+    ctx: UserContext = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    username = data.username.strip()
+    user = User(
+        username=username,
+        display_name=data.display_name.strip() if data.display_name else None,
+        email=str(data.email) if data.email else None,
+        is_admin=data.role == "admin",
+        is_active=data.is_active,
+        password_hash=hash_password(data.password),
+    )
+    db.add(user)
+    try:
+        await db.flush()
+        admin_workspace_id = await db.scalar(
+            select(WorkspaceMember.workspace_id).where(WorkspaceMember.user_id == ctx.user_id).limit(1)
+        )
+        workspace_id = admin_workspace_id or await db.scalar(select(Product.workspace_id).limit(1)) or 1
+        db.add(WorkspaceMember(workspace_id=workspace_id, user_id=user.id, role="admin" if user.is_admin else "member"))
+        await _replace_product_assignments(db, user, data.product_ids if not user.is_admin else [])
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="用户名已存在") from exc
+    await db.refresh(user)
+    return await _user_summary(db, user)
+
+
+@router.patch("/users/{user_id}")
+async def update_admin_user(
+    user_id: int,
+    data: AdminUserUpdate,
+    ctx: UserContext = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.id == ctx.user_id and data.is_active is False:
+        raise HTTPException(status_code=409, detail="不能禁用当前登录的管理员账号")
+    if user.id == ctx.user_id and data.role == "sales":
+        raise HTTPException(status_code=409, detail="不能移除当前登录账号的管理员权限")
+    if data.username is not None:
+        next_username = data.username.strip()
+        if next_username != user.username:
+            if user.id == ctx.user_id:
+                raise HTTPException(status_code=409, detail="不能修改当前登录账号的用户名")
+            user.username = next_username
+    if data.display_name is not None:
+        user.display_name = data.display_name.strip() or None
+    if data.email is not None:
+        user.email = str(data.email) or None
+    if data.role is not None:
+        user.is_admin = data.role == "admin"
+    if data.is_active is not None:
+        user.is_active = data.is_active
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="用户名已存在") from exc
+    await db.refresh(user)
+    return await _user_summary(db, user)
+
+
+@router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_admin_user(
+    user_id: int,
+    ctx: UserContext = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.id == ctx.user_id:
+        raise HTTPException(status_code=409, detail="不能删除当前登录的管理员账号")
+
+    product_ids = await _product_ids_for_user(db, user.id)
+    collection_task_count = await _count(
+        db, select(func.count(CollectionTask.id)).where(CollectionTask.user_id == user.id)
+    )
+    email_count = await _count(db, select(func.count(EmailLog.id)).where(EmailLog.user_id == user.id))
+    reply_count = await _count(db, select(func.count(EmailReply.id)).where(EmailReply.user_id == user.id))
+    influencer_count = 0
+    if product_ids:
+        influencer_count = await _count(
+            db,
+            select(func.count(ProductInfluencer.id)).where(ProductInfluencer.product_id.in_(product_ids)),
+        )
+
+    if product_ids or collection_task_count or influencer_count or email_count or reply_count:
+        raise HTTPException(
+            status_code=409,
+            detail="该业务员仍有关联数据，请先转移品牌和任务，或选择停用账号。",
+        )
+
+    memberships = (
+        await db.execute(select(ProductMember).where(ProductMember.user_id == user.id))
+    ).scalars().all()
+    for membership in memberships:
+        await db.delete(membership)
+
+    workspace_memberships = (
+        await db.execute(select(WorkspaceMember).where(WorkspaceMember.user_id == user.id))
+    ).scalars().all()
+    for membership in workspace_memberships:
+        await db.delete(membership)
+
+    await db.delete(user)
+    await db.commit()
+
+
+@router.post("/users/{user_id}/reset-password", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_admin_user_password(
+    user_id: int,
+    data: AdminPasswordReset,
+    _ctx: UserContext = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.password_hash = hash_password(data.password)
+    await db.commit()
+
+
+@router.put("/users/{user_id}/products")
+async def set_admin_user_products(
+    user_id: int,
+    data: AdminProductAssignments,
+    _ctx: UserContext = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    await _replace_product_assignments(db, user, data.product_ids)
+    await db.commit()
+    return await _user_summary(db, user)
+
+
 @router.get("/users/{user_id}")
 async def get_admin_user(
     user_id: int,
@@ -512,6 +710,20 @@ async def get_admin_product(
     detail["emails"] = await _emails_for_product(db, product_id)
     detail["replies"] = await _replies_for_product(db, product_id)
     return detail
+
+
+@router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_admin_product(
+    product_id: int,
+    ctx: UserContext = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    await TenantService.delete_product(
+        db,
+        user_id=ctx.user_id,
+        is_admin=True,
+        product_id=product_id,
+    )
 
 
 @router.get("/collection-tasks")

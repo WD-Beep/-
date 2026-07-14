@@ -32,6 +32,8 @@ class ProductUpdate(BaseModel):
     brand: str | None = Field(default=None, max_length=255)
     description: str | None = None
     is_default: bool | None = None
+    is_hidden: bool | None = None
+    is_archived: bool | None = None
 
 
 class UserRead(ORMModel, TimestampMixin):

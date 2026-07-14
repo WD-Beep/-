@@ -1,0 +1,1294 @@
+"use client";
+
+import { useMemo, useState, type FormEvent } from "react";
+import { Eye, EyeOff, Loader2, Search, Upload } from "lucide-react";
+
+import {
+  AdminConfirmDialog,
+  AdminDrawer,
+  AdminFilterField,
+  AdminInput,
+  AdminSelect,
+} from "@/components/admin/admin-ui";
+import { UNASSIGNED_SALESPERSON_KEY } from "@/components/admin/admin-ui-helpers";
+import { Button } from "@/components/ui/button";
+import {
+  createAdminUser,
+  createTenantProduct,
+  deleteAdminUser,
+  deleteTenantProduct,
+  deleteAdminProduct,
+  resetAdminUserPassword,
+  setAdminUserProducts,
+  updateAdminUser,
+  updateTenantProduct,
+  type AdminProduct,
+  type AdminUser,
+} from "@/lib/api";
+import { slugifyProductName } from "@/lib/product-slug";
+import { cn } from "@/lib/utils";
+
+const AVATAR_CACHE_KEY = "admin-progress-avatars-v1";
+
+type AvatarCache = {
+  users: Record<string, string>;
+  products: Record<string, string>;
+};
+
+function readAvatarCache(): AvatarCache {
+  if (typeof window === "undefined") return { users: {}, products: {} };
+  try {
+    const raw = window.localStorage.getItem(AVATAR_CACHE_KEY);
+    if (!raw) return { users: {}, products: {} };
+    const parsed = JSON.parse(raw) as Partial<AvatarCache>;
+    return { users: parsed.users ?? {}, products: parsed.products ?? {} };
+  } catch {
+    return { users: {}, products: {} };
+  }
+}
+
+function writeAvatarCache(cache: AvatarCache) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(AVATAR_CACHE_KEY, JSON.stringify(cache));
+}
+
+export function useAdminAvatarCache() {
+  const [cache, setCache] = useState<AvatarCache>(() => readAvatarCache());
+
+  function setUserAvatar(userId: number, url: string | null) {
+    setCache((current) => {
+      const next = {
+        users: { ...current.users },
+        products: { ...current.products },
+      };
+      const key = String(userId);
+      if (url) next.users[key] = url;
+      else delete next.users[key];
+      writeAvatarCache(next);
+      return next;
+    });
+  }
+
+  function setProductLogo(productId: number, url: string | null) {
+    setCache((current) => {
+      const next = {
+        users: { ...current.users },
+        products: { ...current.products },
+      };
+      const key = String(productId);
+      if (url) next.products[key] = url;
+      else delete next.products[key];
+      writeAvatarCache(next);
+      return next;
+    });
+  }
+
+  return {
+    getUserAvatar: (userId: number | null | undefined) => (userId ? cache.users[String(userId)] : undefined),
+    getProductLogo: (productId: number | null | undefined) => (productId ? cache.products[String(productId)] : undefined),
+    setUserAvatar,
+    setProductLogo,
+  };
+}
+
+const fieldClass =
+  "h-10 w-full rounded-md border border-[#D8E2EE] bg-white px-3 text-sm text-[#102033] outline-none focus:border-[#2563EB] focus:ring-2 focus:ring-[#DBEAFE]";
+
+function ImageUploadField({
+  label,
+  hint,
+  previewUrl,
+  onChange,
+}: {
+  label: string;
+  hint?: string;
+  previewUrl: string | null;
+  onChange: (url: string | null) => void;
+}) {
+  return (
+    <label className="grid gap-2 text-sm font-medium text-[#344054]">
+      {label}
+      <div className="flex items-center gap-3">
+        {previewUrl ? (
+          <img src={previewUrl} alt="" className="h-14 w-14 rounded-full border border-[#D8E2EE] object-cover" />
+        ) : (
+          <span className="inline-flex h-14 w-14 items-center justify-center rounded-full border border-dashed border-[#D8E2EE] bg-[#FAFBFC] text-[#98A2B3]">
+            <Upload className="h-4 w-4" />
+          </span>
+        )}
+        <div className="flex flex-wrap gap-2">
+          <label className="inline-flex cursor-pointer items-center rounded-md border border-[#D8E2EE] bg-white px-3 py-1.5 text-xs font-medium text-[#344054] hover:bg-[#F8FAFD]">
+            上传图片
+            <input
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (!file) return;
+                onChange(URL.createObjectURL(file));
+              }}
+            />
+          </label>
+          {previewUrl ? (
+            <button type="button" className="text-xs text-[#667085] hover:text-[#B42318]" onClick={() => onChange(null)}>
+              移除
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {hint ? <span className="text-xs font-normal text-[#667085]">{hint}</span> : null}
+    </label>
+  );
+}
+
+export function hasBrandBusinessData(brand: AdminProduct): boolean {
+  return (
+    brand.collection_task_count > 0 ||
+    brand.influencer_count > 0 ||
+    brand.email_count > 0 ||
+    brand.reply_count > 0
+  );
+}
+
+export function buildBrandDeleteDescription(brand: AdminProduct): string {
+  if (!hasBrandBusinessData(brand)) {
+    return "删除后不可恢复，请确认该品牌不再需要。";
+  }
+  const parts: string[] = [];
+  if (brand.collection_task_count > 0) parts.push(`${brand.collection_task_count} 个任务`);
+  if (brand.influencer_count > 0) parts.push(`${brand.influencer_count} 个红人`);
+  if (brand.email_count > 0) parts.push(`${brand.email_count} 封邮件`);
+  if (brand.reply_count > 0) parts.push(`${brand.reply_count} 条回复`);
+  return `该品牌已有业务数据（${parts.join("、")}），删除后将一并清除且不可恢复。请确认是否继续删除？`;
+}
+
+export function hasSalespersonRelatedData(row: {
+  brandCount: number;
+  taskCount: number;
+  influencerCount: number;
+  emailCount: number;
+  replyCount: number;
+}): boolean {
+  return (
+    row.brandCount > 0 ||
+    row.taskCount > 0 ||
+    row.influencerCount > 0 ||
+    row.emailCount > 0 ||
+    row.replyCount > 0
+  );
+}
+
+export function hasSalespersonUserRelatedData(user: AdminUser): boolean {
+  return (
+    (user.bound_products?.length ?? 0) > 0 ||
+    user.product_count > 0 ||
+    user.collection_task_count > 0 ||
+    user.influencer_count > 0 ||
+    user.email_count > 0 ||
+    user.reply_count > 0
+  );
+}
+
+export function salespersonHasRelatedData(user: AdminUser, row: Parameters<typeof hasSalespersonRelatedData>[0]): boolean {
+  return hasSalespersonRelatedData(row) || hasSalespersonUserRelatedData(user);
+}
+
+export async function disableBrand(brandId: number) {
+  await updateTenantProduct(brandId, { is_hidden: true });
+}
+
+export async function enableBrand(brandId: number) {
+  await updateTenantProduct(brandId, { is_hidden: false, is_archived: false });
+}
+
+export async function reassignBrandOwner({
+  brandId,
+  newOwnerUserId,
+  users,
+}: {
+  brandId: number;
+  newOwnerUserId: number | null;
+  users: AdminUser[];
+}) {
+  for (const user of users.filter((item) => item.role === "sales")) {
+    const currentIds = (user.bound_products ?? []).map((product) => product.id);
+    const hasBrand = currentIds.includes(brandId);
+    const shouldOwn = newOwnerUserId !== null && user.id === newOwnerUserId;
+    if (shouldOwn && !hasBrand) {
+      await setAdminUserProducts(user.id, [...currentIds, brandId]);
+    } else if (!shouldOwn && hasBrand) {
+      await setAdminUserProducts(
+        user.id,
+        currentIds.filter((id) => id !== brandId),
+      );
+    }
+  }
+}
+
+export async function transferBrandsBetweenUsers({
+  fromUserId,
+  toUserId,
+  users,
+}: {
+  fromUserId: number;
+  toUserId: number;
+  users: AdminUser[];
+}) {
+  const fromUser = users.find((user) => user.id === fromUserId);
+  const toUser = users.find((user) => user.id === toUserId);
+  if (!fromUser || !toUser) return;
+  const merged = new Set<number>([
+    ...(toUser.bound_products ?? []).map((product) => product.id),
+    ...(fromUser.bound_products ?? []).map((product) => product.id),
+  ]);
+  await setAdminUserProducts(toUserId, Array.from(merged));
+  await setAdminUserProducts(fromUserId, []);
+}
+
+type SalespersonDrawerProps = {
+  open: boolean;
+  mode: "create" | "edit";
+  user: AdminUser | null;
+  products: AdminProduct[];
+  avatarUrl: string | null;
+  onAvatarChange: (url: string | null) => void;
+  onClose: () => void;
+  onSaved: () => void;
+};
+
+export function SalespersonFormDrawer(props: SalespersonDrawerProps) {
+  const { open, mode, user } = props;
+  if (!open) return null;
+  return <SalespersonFormDrawerContent key={`${mode}-${user?.id ?? "new"}`} {...props} />;
+}
+
+function SalespersonFormDrawerContent({
+  open,
+  mode,
+  user,
+  products,
+  avatarUrl,
+  onAvatarChange,
+  onClose,
+  onSaved,
+}: SalespersonDrawerProps) {
+  const [username, setUsername] = useState(user?.username ?? "");
+  const [displayName, setDisplayName] = useState(user?.display_name ?? "");
+  const [email, setEmail] = useState(user?.email ?? "");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [isActive, setIsActive] = useState(user?.is_active ?? true);
+  const [productIds, setProductIds] = useState<number[]>((user?.bound_products ?? []).map((product) => product.id));
+  const [brandSearch, setBrandSearch] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [revokeConfirmOpen, setRevokeConfirmOpen] = useState(false);
+  const [pendingRevokeNames, setPendingRevokeNames] = useState<string[]>([]);
+  const [pendingSave, setPendingSave] = useState<(() => Promise<void>) | null>(null);
+
+  const initialProductIds = useMemo(
+    () => (user?.bound_products ?? []).map((product) => product.id),
+    [user],
+  );
+
+  const filteredProducts = useMemo(() => {
+    const query = brandSearch.trim().toLowerCase();
+    if (!query) return products;
+    return products.filter(
+      (product) =>
+        product.name.toLowerCase().includes(query) ||
+        product.slug.toLowerCase().includes(query) ||
+        String(product.id).includes(query),
+    );
+  }, [brandSearch, products]);
+
+  async function performSave() {
+    setSubmitting(true);
+    setError(null);
+    const contact = email.trim();
+    const emailPayload = contact.includes("@") ? contact : null;
+    try {
+      if (mode === "create") {
+        await createAdminUser({
+          username: username.trim(),
+          password,
+          display_name: displayName.trim() || null,
+          email: emailPayload,
+          role: "sales",
+          is_active: isActive,
+          product_ids: productIds,
+        });
+      } else if (user) {
+        await updateAdminUser(user.id, {
+          username: username.trim(),
+          display_name: displayName.trim() || null,
+          email: emailPayload,
+          is_active: isActive,
+        });
+        if (password.trim()) {
+          await resetAdminUserPassword(user.id, password.trim());
+        }
+        await setAdminUserProducts(user.id, productIds);
+      }
+      onSaved();
+      onClose();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "保存业务员失败。";
+      if (/exist|duplicate|已存在|重复/i.test(message)) {
+        setError("用户名已存在，请更换登录账号。");
+      } else {
+        setError(message);
+      }
+    } finally {
+      setSubmitting(false);
+      setRevokeConfirmOpen(false);
+      setPendingSave(null);
+    }
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setError(null);
+    if (mode === "create") {
+      if (!username.trim()) {
+        setError("请填写登录账号。");
+        return;
+      }
+      if (!password.trim()) {
+        setError("请填写初始密码。");
+        return;
+      }
+    } else if (!username.trim()) {
+      setError("请填写登录账号。");
+      return;
+    }
+
+    if (mode === "edit" && user) {
+      const removedIds = initialProductIds.filter((id) => !productIds.includes(id));
+      const riskyRemoved = products.filter(
+        (product) =>
+          removedIds.includes(product.id) &&
+          (product.collection_task_count > 0 ||
+            product.influencer_count > 0 ||
+            product.email_count > 0 ||
+            product.reply_count > 0),
+      );
+      if (riskyRemoved.length > 0) {
+        setPendingRevokeNames(riskyRemoved.map((product) => product.name));
+        setPendingSave(() => performSave);
+        setRevokeConfirmOpen(true);
+        return;
+      }
+    }
+
+    await performSave();
+  }
+
+  const visibleSelectedCount = filteredProducts.filter((product) => productIds.includes(product.id)).length;
+
+  return (
+    <>
+      <AdminDrawer
+        open={open}
+        title={mode === "create" ? "新增业务员" : "编辑业务员"}
+        description={
+          mode === "create"
+            ? "设置业务员基本信息、头像预览和负责品牌范围。"
+            : "修改业务员信息、重置密码，并调整负责品牌权限。"
+        }
+        onClose={onClose}
+      >
+        <form onSubmit={submit} className="space-y-5">
+          {error ? <div className="rounded-md border border-[#FECDCA] bg-[#FEF3F2] px-4 py-3 text-sm text-[#B42318]">{error}</div> : null}
+          <ImageUploadField
+            label="业务员头像"
+            hint="头像仅本地预览，上传接口待后端接入（avatarUrl）。"
+            previewUrl={avatarUrl}
+            onChange={onAvatarChange}
+          />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
+              登录账号 *
+              <input
+                className={fieldClass}
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="例如 sales11"
+              />
+            </label>
+            <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
+              {mode === "create" ? "初始密码 *" : "重置密码"}
+              <span className="relative">
+                <input
+                  className={cn(fieldClass, "pr-10")}
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder={mode === "create" ? "管理员手动设置密码" : "留空则不修改密码"}
+                />
+                <button
+                  type="button"
+                  className="absolute inset-y-0 right-0 flex items-center px-3 text-[#667085]"
+                  onClick={() => setShowPassword((current) => !current)}
+                  aria-label={showPassword ? "隐藏密码" : "显示密码"}
+                >
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </span>
+            </label>
+            <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
+              业务员姓名
+              <input className={fieldClass} value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="后台展示名称" />
+            </label>
+            <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
+              邮箱 / 手机
+              <input className={fieldClass} value={email ?? ""} onChange={(e) => setEmail(e.target.value)} placeholder="可选" />
+            </label>
+            <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
+              状态
+              <select className={fieldClass} value={isActive ? "active" : "disabled"} onChange={(e) => setIsActive(e.target.value === "active")}>
+                <option value="active">启用</option>
+                <option value="disabled">停用</option>
+              </select>
+            </label>
+          </div>
+          <section className="rounded-lg border border-[#DDE6F0] bg-[#F8FAFD] p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-[#102033]">负责品牌</h3>
+                <p className="mt-1 text-xs text-[#667085]">勾选后该业务员可在工作台查看和处理这些品牌。</p>
+              </div>
+              {products.length ? (
+                <button
+                  type="button"
+                  className="text-xs font-semibold text-[#2563EB]"
+                  onClick={() => {
+                    const visibleIds = filteredProducts.map((product) => product.id);
+                    const allVisibleSelected = visibleIds.every((id) => productIds.includes(id));
+                    setProductIds((current) =>
+                      allVisibleSelected
+                        ? current.filter((id) => !visibleIds.includes(id))
+                        : Array.from(new Set([...current, ...visibleIds])),
+                    );
+                  }}
+                >
+                  {filteredProducts.length > 0 && visibleSelectedCount === filteredProducts.length ? "取消全选" : "全选"}
+                </button>
+              ) : null}
+            </div>
+            {products.length ? (
+              <>
+                <div className="relative mt-3">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#98A2B3]" />
+                  <input
+                    className={cn(fieldClass, "pl-9")}
+                    value={brandSearch}
+                    onChange={(e) => setBrandSearch(e.target.value)}
+                    placeholder="搜索品牌名称 / slug / ID"
+                  />
+                </div>
+                <div className="mt-3 grid max-h-52 gap-2 overflow-auto sm:grid-cols-2">
+                  {filteredProducts.map((product) => (
+                    <label key={product.id} className="flex cursor-pointer items-center gap-2 rounded-md border border-[#DDE6F0] bg-white px-3 py-2 text-sm text-[#344054]">
+                      <input
+                        type="checkbox"
+                        checked={productIds.includes(product.id)}
+                        onChange={() =>
+                          setProductIds((current) =>
+                            current.includes(product.id) ? current.filter((id) => id !== product.id) : [...current, product.id],
+                          )
+                        }
+                        className="h-4 w-4 accent-[#2563EB]"
+                      />
+                      <span className="min-w-0 flex-1 truncate">{product.name}</span>
+                      <span className="shrink-0 font-mono text-[10px] text-[#98A2B3]">#{product.id}</span>
+                    </label>
+                  ))}
+                  {!filteredProducts.length ? <p className="col-span-full text-sm text-[#667085]">没有匹配的品牌。</p> : null}
+                </div>
+              </>
+            ) : (
+              <p className="mt-3 text-sm text-[#667085]">暂无可分配品牌，创建账号后可再到品牌进度页分配。</p>
+            )}
+          </section>
+          <div className="flex justify-end gap-2 border-t border-[#E5ECF4] pt-4">
+            <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>
+              取消
+            </Button>
+            <Button type="submit" disabled={submitting} className="bg-[#2563EB] text-white hover:bg-[#1D4ED8]">
+              {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {mode === "create" ? "创建业务员" : "保存修改"}
+            </Button>
+          </div>
+        </form>
+      </AdminDrawer>
+
+      <AdminConfirmDialog
+        open={revokeConfirmOpen}
+        title="确认取消品牌权限？"
+        description={`以下品牌已有任务或跟进数据：${pendingRevokeNames.join("、")}。取消权限后该业务员将无法继续处理这些品牌，是否确认？`}
+        confirmLabel="确认取消并保存"
+        danger
+        loading={submitting}
+        onCancel={() => {
+          setRevokeConfirmOpen(false);
+          setPendingSave(null);
+        }}
+        onConfirm={() => {
+          void pendingSave?.();
+        }}
+      />
+    </>
+  );
+}
+
+type BrandDrawerProps = {
+  open: boolean;
+  brand: AdminProduct | null;
+  users: AdminUser[];
+  logoUrl: string | null;
+  onLogoChange: (url: string | null) => void;
+  onClose: () => void;
+  onSaved: () => void;
+};
+
+export function BrandFormDrawer(props: BrandDrawerProps) {
+  const { open, brand } = props;
+  if (!open || !brand) return null;
+  return <BrandFormDrawerContent key={brand.id} {...props} brand={brand} />;
+}
+
+function BrandFormDrawerContent({
+  open,
+  brand,
+  users,
+  logoUrl,
+  onLogoChange,
+  onClose,
+  onSaved,
+}: BrandDrawerProps & { brand: AdminProduct }) {
+  const [name, setName] = useState(brand.name);
+  const [slug, setSlug] = useState(brand.slug);
+  const [slugTouched, setSlugTouched] = useState(false);
+  const [description, setDescription] = useState(brand.description ?? "");
+  const [ownerUserId, setOwnerUserId] = useState<string>(() => {
+    const owner = brand.members.find((member) => member.role === "owner") ?? brand.members[0];
+    return owner ? String(owner.user_id) : "";
+  });
+  const [brandStatus, setBrandStatus] = useState<"active" | "hidden">(
+    brand.status === "hidden" || brand.status === "archived" ? "hidden" : "active",
+  );
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const salesUsers = useMemo(() => users.filter((user) => user.role === "sales"), [users]);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setError(null);
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      setError("请填写品牌名称。");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await updateTenantProduct(brand!.id, {
+        name: trimmedName,
+        slug: (slug.trim() || slugifyProductName(trimmedName)).slice(0, 100),
+        description: description.trim() || null,
+        is_hidden: brandStatus === "hidden",
+      });
+      const nextOwnerId = ownerUserId ? Number(ownerUserId) : null;
+      await reassignBrandOwner({ brandId: brand!.id, newOwnerUserId: nextOwnerId, users });
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存品牌失败。");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <AdminDrawer
+      open={open}
+      title={`编辑品牌 · ${brand.name}`}
+      description="修改品牌名称、slug、负责人、状态和备注。"
+      onClose={onClose}
+    >
+      <form onSubmit={submit} className="space-y-5">
+        {error ? <div className="rounded-md border border-[#FECDCA] bg-[#FEF3F2] px-4 py-3 text-sm text-[#B42318]">{error}</div> : null}
+        <ImageUploadField
+          label="品牌 Logo"
+          hint="Logo 仅本地预览，上传接口待后端接入（logoUrl）。"
+          previewUrl={logoUrl}
+          onChange={onLogoChange}
+        />
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
+            品牌名称 *
+            <input
+              className={fieldClass}
+              value={name}
+              onChange={(e) => {
+                const nextName = e.target.value;
+                setName(nextName);
+                if (!slugTouched) setSlug(slugifyProductName(nextName));
+              }}
+            />
+          </label>
+          <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
+            slug
+            <input
+              className={fieldClass}
+              value={slug}
+              onChange={(e) => {
+                setSlug(e.target.value);
+                setSlugTouched(true);
+              }}
+            />
+          </label>
+          <label className="grid gap-1.5 text-sm font-medium text-[#344054] sm:col-span-2">
+            所属业务员 / 负责人
+            <select className={fieldClass} value={ownerUserId} onChange={(e) => setOwnerUserId(e.target.value)}>
+              <option value="">未分配</option>
+              {salesUsers.map((user) => (
+                <option key={user.id} value={user.id}>
+                  {user.display_name?.trim() || user.username} (#{user.id})
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
+            品牌状态
+            <select className={fieldClass} value={brandStatus} onChange={(e) => setBrandStatus(e.target.value as "active" | "hidden")}>
+              <option value="active">启用</option>
+              <option value="hidden">停用</option>
+            </select>
+          </label>
+          <label className="grid gap-1.5 text-sm font-medium text-[#344054] sm:col-span-2">
+            备注
+            <textarea
+              className={cn(fieldClass, "min-h-[80px] py-2")}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </label>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-[#E5ECF4] pt-4">
+          <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>
+            取消
+          </Button>
+          <Button type="submit" disabled={submitting} className="bg-[#2563EB] text-white hover:bg-[#1D4ED8]">
+            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            保存品牌
+          </Button>
+        </div>
+      </form>
+    </AdminDrawer>
+  );
+}
+
+type AssignDrawerProps = {
+  open: boolean;
+  rowKey: string | null;
+  rowName: string;
+  user: AdminUser | null;
+  products: AdminProduct[];
+  onClose: () => void;
+  onSaved: () => void;
+};
+
+export function AssignBrandsDrawer(props: AssignDrawerProps) {
+  const { open, user, rowKey } = props;
+  if (!open || !user || rowKey === UNASSIGNED_SALESPERSON_KEY) return null;
+  return <AssignBrandsDrawerContent key={`${user.id}-${rowKey}`} {...props} user={user} />;
+}
+
+function AssignBrandsDrawerContent({
+  open,
+  rowKey,
+  rowName,
+  user,
+  products,
+  onClose,
+  onSaved,
+}: AssignDrawerProps & { user: AdminUser }) {
+  const [selectedIds, setSelectedIds] = useState<number[]>((user.bound_products ?? []).map((product) => product.id));
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    try {
+      await setAdminUserProducts(user!.id, selectedIds);
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "分配品牌失败。");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <AdminDrawer open={open} title={`分配品牌 · ${rowName}`} description="调整该业务员负责的品牌范围。" onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
+        {error ? <div className="rounded-md border border-[#FECDCA] bg-[#FEF3F2] px-4 py-3 text-sm text-[#B42318]">{error}</div> : null}
+        <div className="grid max-h-[420px] gap-2 overflow-auto">
+          {products.map((product) => (
+            <label key={product.id} className="flex cursor-pointer items-center gap-2 rounded-md border border-[#DDE6F0] bg-[#FAFBFC] px-3 py-2 text-sm">
+              <input
+                type="checkbox"
+                checked={selectedIds.includes(product.id)}
+                onChange={() =>
+                  setSelectedIds((current) =>
+                    current.includes(product.id) ? current.filter((id) => id !== product.id) : [...current, product.id],
+                  )
+                }
+                className="h-4 w-4 accent-[#2563EB]"
+              />
+              <span className="min-w-0 flex-1 truncate font-medium text-[#344054]">{product.name}</span>
+              <span className="shrink-0 font-mono text-[11px] text-[#98A2B3]">#{product.id}</span>
+            </label>
+          ))}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-[#E5ECF4] pt-4">
+          <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>
+            取消
+          </Button>
+          <Button type="submit" disabled={submitting} className="bg-[#2563EB] text-white hover:bg-[#1D4ED8]">
+            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            保存分配
+          </Button>
+        </div>
+      </form>
+    </AdminDrawer>
+  );
+}
+
+type ReassignDrawerProps = {
+  open: boolean;
+  brand: AdminProduct | null;
+  users: AdminUser[];
+  onClose: () => void;
+  onSaved: () => void;
+};
+
+export function ReassignOwnerDrawer(props: ReassignDrawerProps) {
+  const { open, brand } = props;
+  if (!open || !brand) return null;
+  return <ReassignOwnerDrawerContent key={brand.id} {...props} brand={brand} />;
+}
+
+function ReassignOwnerDrawerContent({
+  open,
+  brand,
+  users,
+  onClose,
+  onSaved,
+}: ReassignDrawerProps & { brand: AdminProduct }) {
+  const [ownerUserId, setOwnerUserId] = useState(() => {
+    const owner = brand.members.find((member) => member.role === "owner") ?? brand.members[0];
+    return owner ? String(owner.user_id) : "";
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const salesUsers = useMemo(() => users.filter((user) => user.role === "sales"), [users]);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    try {
+      await reassignBrandOwner({
+        brandId: brand!.id,
+        newOwnerUserId: ownerUserId ? Number(ownerUserId) : null,
+        users,
+      });
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "更换负责人失败。");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <AdminDrawer open={open} title={`更换负责人 · ${brand.name}`} description="将品牌分配给指定业务员，或设为未分配。" onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
+        {error ? <div className="rounded-md border border-[#FECDCA] bg-[#FEF3F2] px-4 py-3 text-sm text-[#B42318]">{error}</div> : null}
+        <AdminFilterField label="负责人">
+          <AdminSelect value={ownerUserId} onChange={(event) => setOwnerUserId(event.target.value)}>
+            <option value="">未分配</option>
+            {salesUsers.map((user) => (
+              <option key={user.id} value={user.id}>
+                {user.display_name?.trim() || user.username} · {user.username}
+              </option>
+            ))}
+          </AdminSelect>
+        </AdminFilterField>
+        <div className="flex justify-end gap-2 border-t border-[#E5ECF4] pt-4">
+          <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>
+            取消
+          </Button>
+          <Button type="submit" disabled={submitting} className="bg-[#2563EB] text-white hover:bg-[#1D4ED8]">
+            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            确认更换
+          </Button>
+        </div>
+      </form>
+    </AdminDrawer>
+  );
+}
+
+type TransferDrawerProps = {
+  open: boolean;
+  user: AdminUser | null;
+  users: AdminUser[];
+  onClose: () => void;
+  onTransferred: () => void;
+};
+
+export function TransferBrandsDrawer({ open, user, users, onClose, onTransferred }: TransferDrawerProps) {
+  const [targetUserId, setTargetUserId] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const options = users.filter((item) => item.role === "sales" && item.id !== user?.id);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!user || !targetUserId) {
+      setError("请选择接收业务员。");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await transferBrandsBetweenUsers({ fromUserId: user.id, toUserId: Number(targetUserId), users });
+      onTransferred();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "转移品牌失败。");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (!open || !user) return null;
+
+  return (
+    <AdminDrawer open={open} title={`转移品牌 · ${user.username}`} description="将该业务员负责的品牌转移给其他人后再停用或删除。" onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
+        {error ? <div className="rounded-md border border-[#FECDCA] bg-[#FEF3F2] px-4 py-3 text-sm text-[#B42318]">{error}</div> : null}
+        <p className="text-sm text-[#667085]">
+          当前负责 {user.bound_products?.length ?? user.product_count} 个品牌，请选择接收业务员。
+        </p>
+        {options.length === 0 ? (
+          <div className="rounded-md border border-[#FEDF89] bg-[#FFFAEB] px-3 py-2 text-sm text-[#B54708]">
+            暂无其他业务员可接收。请先创建业务员账号，再转移品牌后删除。
+          </div>
+        ) : null}
+        <AdminFilterField label="接收业务员">
+          <AdminSelect value={targetUserId} onChange={(event) => setTargetUserId(event.target.value)} disabled={options.length === 0}>
+            <option value="">请选择</option>
+            {options.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.display_name?.trim() || item.username}
+              </option>
+            ))}
+          </AdminSelect>
+        </AdminFilterField>
+        <div className="flex justify-end gap-2 border-t border-[#E5ECF4] pt-4">
+          <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>
+            取消
+          </Button>
+          <Button type="submit" disabled={submitting} className="bg-[#2563EB] text-white hover:bg-[#1D4ED8]">
+            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            确认转移
+          </Button>
+        </div>
+      </form>
+    </AdminDrawer>
+  );
+}
+
+export function AdminDeleteConfirmDialog({
+  open,
+  title,
+  description,
+  loading,
+  confirmDisabled,
+  confirmLabel = "确认删除",
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  loading?: boolean;
+  confirmDisabled?: boolean;
+  confirmLabel?: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <AdminConfirmDialog
+      open={open}
+      title={title}
+      description={description}
+      confirmLabel={confirmLabel}
+      danger
+      loading={loading}
+      confirmDisabled={confirmDisabled}
+      onConfirm={onConfirm}
+      onCancel={onCancel}
+    />
+  );
+}
+
+export function SalespersonDeleteDialog({
+  open,
+  userName,
+  hasRelatedData,
+  relatedBrandNames = [],
+  error,
+  loading,
+  onCancel,
+  onDisable,
+  onTransfer,
+  onDelete,
+}: {
+  open: boolean;
+  userName: string;
+  hasRelatedData: boolean;
+  relatedBrandNames?: string[];
+  error?: string | null;
+  loading?: boolean;
+  onCancel: () => void;
+  onDisable: () => void;
+  onTransfer: () => void;
+  onDelete: () => void;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-[#102033]/50 p-4 backdrop-blur-[1px]">
+      <div className="w-full max-w-md rounded-xl border border-[#D8E2EE] bg-white p-5 shadow-[0_24px_64px_rgba(16,32,51,0.18)]">
+        <h3 className="text-base font-semibold text-[#102033]">删除业务员 · {userName}</h3>
+        {hasRelatedData ? (
+          <p className="mt-2 text-sm leading-6 text-[#667085]">
+            该业务员仍有关联数据，请先转移品牌/任务，或选择停用账号。当前不允许直接硬删除。
+            {relatedBrandNames.length > 0 ? (
+              <span className="mt-2 block text-[#B42318]">
+                关联品牌：{relatedBrandNames.join("、")}
+              </span>
+            ) : null}
+          </p>
+        ) : (
+          <p className="mt-2 text-sm leading-6 text-[#667085]">确认删除该业务员账号？删除后不可恢复，也可改为停用账号。</p>
+        )}
+        {error ? (
+          <div className="mt-3 rounded-md border border-[#FECDCA] bg-[#FEF3F2] px-3 py-2 text-sm text-[#B42318]">
+            {error}
+          </div>
+        ) : null}
+        <div className="mt-5 flex flex-col gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            disabled={loading}
+            onClick={onDisable}
+            className="justify-start"
+          >
+            停用业务员
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={loading}
+            onClick={onTransfer}
+            className="justify-start"
+          >
+            转移名下品牌给其他业务员
+          </Button>
+          <Button
+            type="button"
+            disabled={loading || hasRelatedData}
+            onClick={onDelete}
+            className="justify-start bg-[#B42318] text-white hover:bg-[#912018] disabled:opacity-50"
+          >
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            {hasRelatedData ? "确认无关联数据后删除（当前不可用）" : "确认删除"}
+          </Button>
+          <Button type="button" variant="ghost" disabled={loading} onClick={onCancel}>
+            取消
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export async function disableSalesperson(userId: number) {
+  await updateAdminUser(userId, { is_active: false });
+}
+
+export async function deleteSalespersonSafely(userId: number) {
+  await deleteAdminUser(userId);
+}
+
+export async function deleteBrandSafely(brand: AdminProduct) {
+  await deleteAdminProduct(brand.id);
+}
+
+type WorkbenchBrandDrawerProps = {
+  open: boolean;
+  mode: "create" | "edit";
+  brand: AdminProduct | null;
+  users: AdminUser[];
+  defaultOwnerUserId?: number | null;
+  onClose: () => void;
+  onSaved: () => void;
+};
+
+export function WorkbenchBrandDrawer(props: WorkbenchBrandDrawerProps) {
+  const { open, mode, brand, defaultOwnerUserId } = props;
+  if (!open) return null;
+  const formKey = mode === "edit" && brand ? `edit-${brand.id}` : `create-${defaultOwnerUserId ?? "new"}`;
+  return <WorkbenchBrandDrawerContent key={formKey} {...props} />;
+}
+
+function WorkbenchBrandDrawerContent({
+  open,
+  mode,
+  brand,
+  users,
+  defaultOwnerUserId,
+  onClose,
+  onSaved,
+}: WorkbenchBrandDrawerProps) {
+  const [name, setName] = useState(mode === "edit" && brand ? brand.name : "");
+  const [slug, setSlug] = useState(mode === "edit" && brand ? brand.slug : "");
+  const [slugTouched, setSlugTouched] = useState(false);
+  const [platform, setPlatform] = useState("");
+  const [description, setDescription] = useState(mode === "edit" && brand ? (brand.description ?? "") : "");
+  const [ownerUserId, setOwnerUserId] = useState(() => {
+    if (mode === "edit" && brand) {
+      const owner = brand.members.find((member) => member.role === "owner") ?? brand.members[0];
+      return owner ? String(owner.user_id) : "";
+    }
+    return defaultOwnerUserId ? String(defaultOwnerUserId) : "";
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const salesUsers = useMemo(() => users.filter((user) => user.role === "sales"), [users]);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      setError("请填写品牌名称。");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const noteParts = [platform ? `所属平台: ${platform}` : null, description.trim()].filter(Boolean);
+      const payloadDescription = noteParts.join("\n") || null;
+      const nextSlug = (slug.trim() || slugifyProductName(trimmedName)).slice(0, 100);
+
+      if (mode === "create") {
+        const created = await createTenantProduct({
+          name: trimmedName,
+          slug: nextSlug,
+          description: payloadDescription,
+        });
+        if (ownerUserId) {
+          const owner = users.find((user) => user.id === Number(ownerUserId));
+          const currentIds = (owner?.bound_products ?? []).map((product) => product.id);
+          await setAdminUserProducts(Number(ownerUserId), [...currentIds, created.id]);
+        }
+      } else if (brand) {
+        await updateTenantProduct(brand.id, {
+          name: trimmedName,
+          slug: nextSlug,
+          description: payloadDescription,
+        });
+        await reassignBrandOwner({
+          brandId: brand.id,
+          newOwnerUserId: ownerUserId ? Number(ownerUserId) : null,
+          users,
+        });
+      }
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存品牌失败。");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <AdminDrawer
+      open={open}
+      title={mode === "create" ? "新增品牌" : `编辑品牌 · ${brand?.name ?? ""}`}
+      description="设置品牌基础信息、负责人和平台备注。"
+      onClose={onClose}
+    >
+      <form onSubmit={submit} className="space-y-4">
+        {error ? <div className="rounded-md border border-[#FECDCA] bg-[#FEF3F2] px-4 py-3 text-sm text-[#B42318]">{error}</div> : null}
+        <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
+          品牌名称 *
+          <AdminInput
+            value={name}
+            onChange={(event) => {
+              const nextName = event.target.value;
+              setName(nextName);
+              if (!slugTouched) setSlug(slugifyProductName(nextName));
+            }}
+          />
+        </label>
+        <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
+          slug
+          <AdminInput
+            value={slug}
+            onChange={(event) => {
+              setSlug(event.target.value);
+              setSlugTouched(true);
+            }}
+          />
+        </label>
+        <AdminFilterField label="所属平台">
+          <AdminSelect value={platform} onChange={(event) => setPlatform(event.target.value)}>
+            <option value="">请选择</option>
+            <option value="instagram">Instagram</option>
+            <option value="youtube">YouTube</option>
+            <option value="tiktok">TikTok</option>
+            <option value="facebook">Facebook</option>
+            <option value="amazon">Amazon</option>
+          </AdminSelect>
+        </AdminFilterField>
+        <AdminFilterField label="负责人 / 业务员">
+          <AdminSelect value={ownerUserId} onChange={(event) => setOwnerUserId(event.target.value)}>
+            <option value="">未分配</option>
+            {salesUsers.map((user) => (
+              <option key={user.id} value={user.id}>
+                {user.display_name?.trim() || user.username} / {user.username}
+              </option>
+            ))}
+          </AdminSelect>
+        </AdminFilterField>
+        <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
+          备注
+          <textarea
+            className={cn(fieldClass, "min-h-[80px] py-2")}
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+          />
+        </label>
+        <div className="flex justify-end gap-2 border-t border-[#E5ECF4] pt-4">
+          <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>
+            取消
+          </Button>
+          <Button type="submit" disabled={submitting} className="bg-[#2563EB] text-white hover:bg-[#1D4ED8]">
+            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            {mode === "create" ? "创建品牌" : "保存品牌"}
+          </Button>
+        </div>
+      </form>
+    </AdminDrawer>
+  );
+}
+
+type WorkbenchSalespersonDrawerProps = {
+  open: boolean;
+  user: AdminUser | null;
+  onClose: () => void;
+  onSaved: () => void;
+};
+
+export function WorkbenchSalespersonDrawer(props: WorkbenchSalespersonDrawerProps) {
+  const { open, user } = props;
+  if (!open || !user) return null;
+  return <WorkbenchSalespersonDrawerContent key={user.id} {...props} user={user} />;
+}
+
+function WorkbenchSalespersonDrawerContent({
+  open,
+  user,
+  onClose,
+  onSaved,
+}: WorkbenchSalespersonDrawerProps & { user: AdminUser }) {
+  const [displayName, setDisplayName] = useState(user.display_name ?? "");
+  const [email, setEmail] = useState(user.email ?? "");
+  const [isActive, setIsActive] = useState(user.is_active);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    try {
+      await updateAdminUser(user!.id, {
+        display_name: displayName.trim() || null,
+        email: email.trim() || null,
+        is_active: isActive,
+      });
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存业务员失败。");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <AdminDrawer
+      open={open}
+      title={`编辑业务员 · ${user.username}`}
+      description="修改显示名称、邮箱和账号状态。登录账号创建后不可修改。"
+      onClose={onClose}
+    >
+      <form onSubmit={submit} className="space-y-4">
+        {error ? <div className="rounded-md border border-[#FECDCA] bg-[#FEF3F2] px-4 py-3 text-sm text-[#B42318]">{error}</div> : null}
+        <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
+          登录账号
+          <AdminInput value={user.username} disabled />
+        </label>
+        <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
+          业务员姓名 / 昵称
+          <AdminInput value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="例如 张三" />
+        </label>
+        <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
+          邮箱
+          <AdminInput type="email" value={email ?? ""} onChange={(event) => setEmail(event.target.value)} />
+        </label>
+        <AdminFilterField label="状态">
+          <AdminSelect value={isActive ? "active" : "disabled"} onChange={(event) => setIsActive(event.target.value === "active")}>
+            <option value="active">启用</option>
+            <option value="disabled">停用</option>
+          </AdminSelect>
+        </AdminFilterField>
+        <div className="flex justify-end gap-2 border-t border-[#E5ECF4] pt-4">
+          <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>
+            取消
+          </Button>
+          <Button type="submit" disabled={submitting} className="bg-[#2563EB] text-white hover:bg-[#1D4ED8]">
+            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            保存
+          </Button>
+        </div>
+      </form>
+    </AdminDrawer>
+  );
+}

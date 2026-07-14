@@ -429,6 +429,18 @@ test("new keyword task defaults to disabled batch rounds with suggested round va
   assert.equal(form.batch_total_limit, "");
   assert.equal(form.batch_round_size, "50");
   assert.equal(form.batch_round_count, "3");
+  assert.equal(form.max_runtime_minutes, "60");
+});
+
+test("collection task submits and validates the configured runtime limit", () => {
+  const form = keywordForm({
+    name: "bounded collection",
+    keywordsText: "makeup bag",
+    max_runtime_minutes: "45",
+  });
+  assert.equal(validateForm(form, noopCaps), null);
+  assert.equal(formValuesToPayload(form, noopCaps).max_runtime_minutes, 45);
+  assert.match(validateForm({ ...form, max_runtime_minutes: "2" }, noopCaps) ?? "", /5-1440/);
 });
 
 test("batch round collection submits batch payload fields", () => {

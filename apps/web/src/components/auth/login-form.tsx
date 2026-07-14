@@ -9,10 +9,8 @@ import { LoginBrandPanel } from "@/components/auth/login-brand-panel";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-  AUTH_PASSWORD,
   defaultPathForSession,
-  loadBackendAuthSession,
-  resolveAuthAccount,
+  loginWithCredentials,
   setAuthSession,
 } from "@/lib/auth";
 import { cn } from "@/lib/utils";
@@ -23,35 +21,17 @@ const inputClass = cn(
   "focus-visible:border-[#245E4F] focus-visible:ring-2 focus-visible:ring-[#245E4F]/14",
 );
 
-const LAST_LOGIN_USERNAME_STORAGE_KEY = "influencer_intel_last_login_username";
-
-function readLastLoginUsername(): string {
-  if (typeof window === "undefined") return "";
-  return window.localStorage.getItem(LAST_LOGIN_USERNAME_STORAGE_KEY)?.trim() ?? "";
-}
-
-function writeLastLoginUsername(username: string): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(LAST_LOGIN_USERNAME_STORAGE_KEY, username);
-}
-
 export function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const redirectTo = searchParams.get("from") || "/";
 
-  const [username, setUsername] = useState(readLastLoginUsername);
-  const [password, setPassword] = useState(AUTH_PASSWORD);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-
-  function fillLastUsername() {
-    setUsername(readLastLoginUsername());
-    setPassword(AUTH_PASSWORD);
-    setError(null);
-  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -72,16 +52,8 @@ export function LoginForm() {
     setSubmitting(true);
     await new Promise((resolve) => setTimeout(resolve, 280));
 
-    const account = resolveAuthAccount(trimmedUsername, password);
-    if (!account) {
-      setError("用户名或密码不正确，请检查后重试");
-      setSubmitting(false);
-      return;
-    }
-
     try {
-      const session = await loadBackendAuthSession(account);
-      writeLastLoginUsername(trimmedUsername);
+      const session = await loginWithCredentials(trimmedUsername, password);
       setAuthSession(session);
       const target = redirectTo.startsWith("/") && redirectTo !== "/" ? redirectTo : defaultPathForSession(session);
       router.replace(target);
@@ -236,23 +208,6 @@ export function LoginForm() {
                 )}
               </button>
             </form>
-
-            <div className="mt-5 flex items-center justify-between gap-3 rounded-lg border border-[#d8dfd1] bg-[#f2f5ee] px-4 py-3">
-              <div>
-                <p className="text-sm font-medium text-slate-700">业务员访问凭证</p>
-                <p className="mt-0.5 text-sm text-slate-500">
-                  用户名由业务员自行填写；退出后会保留上次登录账号
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={fillLastUsername}
-                disabled={submitting}
-                className="shrink-0 rounded-lg border border-[#cfd8c8] bg-[#fbfcf8] px-3.5 py-1.5 text-xs font-medium text-slate-700 hover:border-[#aebda5] hover:bg-white disabled:opacity-50"
-              >
-                填入上次账号
-              </button>
-            </div>
 
             <p className="mt-6 text-center text-[11px] text-slate-500">
               红人数据工作台 · 内部系统 v0.1.0

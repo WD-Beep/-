@@ -201,8 +201,10 @@ class CollectionQueueService:
             task = await CollectionTaskService.get_task(db, task_id)
             if not task:
                 return
+            if (task.run_checkpoint or {}).get("stopped"):
+                return
             try:
-                await CollectionRunnerService.run_task(db, task, allow_running=True, resume=resume)
+                await CollectionRunnerService.run_task_with_timeout(db, task, allow_running=True, resume=resume)
             except CollectionRunCapacityError as exc:
                 logger.warning("Queued collection task %s returned to queue: %s", task_id, exc)
                 await CollectionQueueService.restore_task_to_queue(

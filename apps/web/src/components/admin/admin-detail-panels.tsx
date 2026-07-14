@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Database,
@@ -29,6 +29,17 @@ import {
   AdminStatusBadge,
   AdminTable,
 } from "@/components/admin/admin-ui";
+import { AdminFeedbackBanner } from "@/components/admin/admin-crud";
+import {
+  applyInfluencerQuickAction,
+  deleteInfluencerSafely,
+  EmailEditDrawer,
+  InfluencerDeleteConfirmDialog,
+  InfluencerEditDrawer,
+  ReplyHandleDrawer,
+} from "@/components/admin/admin-entity-management";
+import { SalespersonFormDrawer, useAdminAvatarCache } from "@/components/admin/admin-products-management";
+import { AdminFollowUpWorkbench, AdminSalesReminderBanner } from "@/components/admin/admin-follow-up-workbench";
 import { ProductCreateDialog } from "@/components/layout/product-create-dialog";
 import {
   filterAdminRows,
@@ -45,6 +56,7 @@ import {
   getReplyProcessingStatusMeta,
   getReplyStateLabel,
   getRoleLabel,
+  getAdminWorkStatusMeta,
   type AdminTone,
 } from "@/components/admin/admin-ui-helpers";
 import {
@@ -64,12 +76,15 @@ import {
   fetchAdminProducts,
   fetchAdminReplies,
   fetchAdminUser,
+  fetchAdminUsers,
   fetchAdminUserCollectionTasks,
   fetchAdminUserEmails,
   fetchAdminUserInfluencers,
   fetchAdminUserProducts,
   fetchAdminUserReplies,
+  updateEmailReply,
 } from "@/lib/api";
+import { resolveAdminWorkStatus, upsertAdminWorkQueueEntry } from "@/lib/admin-work-queue";
 
 function SectionWithTable({
   title,
@@ -226,7 +241,19 @@ function TasksTable({
   );
 }
 
-function InfluencersTable({ items }: { items: AdminInfluencer[] }) {
+function InfluencersTable({
+  items,
+  detailHref = (id: number) => `/admin/influencers/${id}`,
+  onEdit,
+  onDelete,
+  onQuickAction,
+}: {
+  items: AdminInfluencer[];
+  detailHref?: (id: number) => string;
+  onEdit?: (item: AdminInfluencer) => void;
+  onDelete?: (item: AdminInfluencer) => void;
+  onQuickAction?: (action: string, item: AdminInfluencer) => void;
+}) {
   return (
     <AdminTable
       minWidth={1180}
@@ -243,13 +270,16 @@ function InfluencersTable({ items }: { items: AdminInfluencer[] }) {
         formatAdminDate(item.created_at),
         <AdminCompactActions
           key="actions"
-          primaryHref={`/influencers/${item.id}`}
+          primaryHref={detailHref(item.id)}
           primaryLabel="详情"
+          secondaryLabel="编辑"
+          secondaryOnClick={onEdit ? () => onEdit(item) : undefined}
           items={[
-            { label: "发送邮件", disabled: true },
-            { label: "标记无效", disabled: true, danger: true },
-            { label: "加入黑名单", disabled: true, danger: true },
-            { label: "导出", disabled: true },
+            { label: "删除", danger: true, onClick: onDelete ? () => onDelete(item) : undefined, disabled: !onDelete },
+            { label: "标记已联系", onClick: onQuickAction ? () => onQuickAction("mark_contacted", item) : undefined, disabled: !onQuickAction },
+            { label: "标记已回复", onClick: onQuickAction ? () => onQuickAction("mark_replied", item) : undefined, disabled: !onQuickAction },
+            { label: "标记无效邮箱", danger: true, onClick: onQuickAction ? () => onQuickAction("mark_invalid", item) : undefined, disabled: !onQuickAction },
+            { label: "加入待跟进", onClick: onQuickAction ? () => onQuickAction("add_follow_up", item) : undefined, disabled: !onQuickAction },
           ]}
         />,
       ])}
@@ -258,29 +288,50 @@ function InfluencersTable({ items }: { items: AdminInfluencer[] }) {
   );
 }
 
-function EmailsTable({ items }: { items: AdminEmail[] }) {
+function EmailsTable({
+  items,
+  onRemind,
+  onMarkHandled,
+  onEdit,
+}: {
+  items: AdminEmail[];
+  onRemind?: (item: AdminEmail) => void;
+  onMarkHandled?: (item: AdminEmail) => void;
+  onEdit?: (item: AdminEmail) => void;
+}) {
   return (
     <AdminTable
-      minWidth={1180}
-      columns={["邮件主题", "品牌", "业务员", "收件人", "发送状态", "是否回复", "跟进状态", "发送时间", "最近回复时间", "操作"]}
+      minWidth={980}
+      columns={["邮件主题", "品牌", "业务员", "收件人", "发送状态", "回复", "发送时间", "操作"]}
       rows={items.map((item) => [
-        <span key="subject" className="block max-w-[260px] truncate font-medium text-[#102033]">{item.subject || "暂无主题"}</span>,
+        <span key="subject" className="block max-w-[200px] truncate font-medium text-[#102033]" title={item.subject || "暂无主题"}>
+          {item.subject || "暂无主题"}
+        </span>,
         item.product_name ?? "暂无",
         item.username ?? "暂无",
-        (item.recipients ?? []).join("、") || item.influencer_username || "暂无",
+        <span
+          key="to"
+          className="block max-w-[160px] truncate"
+          title={(item.recipients ?? []).join("、") || item.influencer_username || "暂无"}
+        >
+          {(item.recipients ?? []).join("、") || item.influencer_username || "暂无"}
+        </span>,
         <AdminStatusBadge key="status" meta={getEmailStatusMeta(item.status)} />,
         <AdminStatusBadge key="reply" meta={getReplyStateLabel(item.has_replied)} />,
-        <AdminStatusBadge key="follow" meta={item.has_replied ? getEmailStatusMeta("pending") : getEmailStatusMeta(item.status)} />,
         formatAdminDate(item.sent_at),
-        formatAdminDate(item.replied_at),
         <AdminCompactActions
           key="actions"
-          primaryLabel="邮件"
+          primaryLabel="编辑"
+          primaryOnClick={onEdit ? () => onEdit(item) : undefined}
+          secondaryLabel="提醒"
+          secondaryOnClick={onRemind ? () => onRemind(item) : undefined}
           items={[
-            { label: "查看红人", href: item.product_influencer_id ? `/influencers/${item.product_influencer_id}` : undefined, disabled: !item.product_influencer_id },
-            { label: "分配跟进人", disabled: true },
-            { label: "标记已处理", disabled: true },
-            { label: "再次发送", disabled: true },
+            {
+              label: "查看红人",
+              href: item.product_influencer_id ? `/admin/influencers/${item.product_influencer_id}` : undefined,
+              disabled: !item.product_influencer_id,
+            },
+            { label: "标记已处理", onClick: onMarkHandled ? () => onMarkHandled(item) : undefined, disabled: !onMarkHandled },
           ]}
         />,
       ])}
@@ -289,28 +340,54 @@ function EmailsTable({ items }: { items: AdminEmail[] }) {
   );
 }
 
-function RepliesTable({ items }: { items: AdminReply[] }) {
+function RepliesTable({
+  items,
+  onEdit,
+  onRemind,
+  onMarkHandled,
+}: {
+  items: AdminReply[];
+  onEdit?: (item: AdminReply) => void;
+  onRemind?: (item: AdminReply) => void;
+  onMarkHandled?: (item: AdminReply) => void;
+}) {
   return (
     <AdminTable
       minWidth={980}
       columns={["邮件主题", "品牌", "业务员", "发件人", "处理状态", "意向状态", "收到时间", "处理时间", "操作"]}
-      rows={items.map((item) => [
+      rows={items.map((item) => {
+        const workStatus = resolveAdminWorkStatus("reply", item.id, item.processing_status);
+        return [
         <span key="subject" className="block max-w-[260px] truncate font-medium text-[#102033]">{item.subject || "暂无主题"}</span>,
         item.product_name ?? "暂无",
         item.username ?? "暂无",
         item.from_address ?? "暂无",
-        <AdminStatusBadge key="processing" meta={getReplyProcessingStatusMeta(item.processing_status)} />,
+        <span key="processing" className="inline-flex flex-wrap gap-1">
+          <AdminStatusBadge meta={getReplyProcessingStatusMeta(item.processing_status)} />
+          {workStatus !== "pending" && workStatus !== "handled" ? (
+            <AdminStatusBadge meta={getAdminWorkStatusMeta(workStatus)} />
+          ) : null}
+        </span>,
         <AdminStatusBadge key="intent" meta={getReplyIntentStatusMeta(item.intent_status)} />,
         formatAdminDate(item.received_at),
         formatAdminDate(item.handled_at),
         <AdminCompactActions
           key="actions"
-          primaryLabel="邮件"
+          primaryLabel="编辑"
+          primaryOnClick={onEdit ? () => onEdit(item) : undefined}
+          secondaryLabel="提醒"
+          secondaryOnClick={onRemind ? () => onRemind(item) : undefined}
           items={[
-            { label: "标记已处理", disabled: true },
+            { label: "标记已处理", onClick: onMarkHandled ? () => onMarkHandled(item) : undefined, disabled: !onMarkHandled },
+            {
+              label: "查看红人",
+              href: item.product_influencer_id ? `/admin/influencers/${item.product_influencer_id}` : undefined,
+              disabled: !item.product_influencer_id,
+            },
           ]}
         />,
-      ])}
+      ];
+      })}
       emptyMessage="暂无回复记录。"
     />
   );
@@ -438,37 +515,46 @@ export function AdminUserDetailPanel({ userId }: { userId: number }) {
     emails: AdminEmail[];
     replies: AdminReply[];
   } | null>(null);
+  const [allProducts, setAllProducts] = useState<AdminProduct[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [draftAvatarUrl, setDraftAvatarUrl] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const avatarCache = useAdminAvatarCache();
 
-  useEffect(() => {
-    let active = true;
-    Promise.all([
+  const reloadDetail = useCallback(async () => {
+    const [user, products, tasks, influencers, emails, replies, catalog] = await Promise.all([
       fetchAdminUser(userId),
       fetchAdminUserProducts(userId),
       fetchAdminUserCollectionTasks(userId),
       fetchAdminUserInfluencers(userId),
       fetchAdminUserEmails(userId),
       fetchAdminUserReplies(userId),
-    ])
-      .then(([user, products, tasks, influencers, emails, replies]) => {
-        if (active) {
-          setData({
-            user,
-            products: products ?? [],
-            tasks: tasks ?? [],
-            influencers: influencers ?? [],
-            emails: emails ?? [],
-            replies: replies ?? [],
-          });
-        }
-      })
-      .catch((err) => {
+      fetchAdminProducts(),
+    ]);
+    setData({
+      user,
+      products: products ?? [],
+      tasks: tasks ?? [],
+      influencers: influencers ?? [],
+      emails: emails ?? [],
+      replies: replies ?? [],
+    });
+    setAllProducts(catalog);
+  }, [userId]);
+
+  useEffect(() => {
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      void reloadDetail().catch((err) => {
         if (active) setError(err instanceof Error ? err.message : "业务员详情加载失败。");
       });
+    });
     return () => {
       active = false;
     };
-  }, [userId]);
+  }, [reloadDetail]);
 
   if (error) return <AdminState type="error" message={error} />;
   if (!data) return <AdminState type="loading" message="正在加载业务员详情..." />;
@@ -488,13 +574,30 @@ export function AdminUserDetailPanel({ userId }: { userId: number }) {
   ];
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       <AdminPageHeader
         label="业务员作业明细"
-        title={`${user.username}（#${user.id}）`}
+        title={`${user.display_name?.trim() || user.username}（#${user.id}）`}
         description="查看这个业务员具体采集了哪些品牌的数据，以及每个品牌的任务、红人、邮件、回复和异常进度。"
-        actions={<AdminActionButton href="/admin/sales-workbench">返回业务员作业</AdminActionButton>}
+        actions={
+          <>
+            <AdminActionButton
+              onClick={() => {
+                setDraftAvatarUrl(avatarCache.getUserAvatar(user.id) ?? null);
+                setEditOpen(true);
+              }}
+            >
+              编辑
+            </AdminActionButton>
+            <AdminActionButton href="/admin/products">返回品牌进度</AdminActionButton>
+            <AdminActionButton href="/admin/sales-workbench">返回业务员作业</AdminActionButton>
+          </>
+        }
+        backFallback="/admin/products"
       />
+      {successMessage ? (
+        <div className="rounded-md border border-[#BAE6D1] bg-[#ECFDF3] px-4 py-3 text-sm text-[#047857]">{successMessage}</div>
+      ) : null}
       <AdminKpiGrid>
         <AdminKpiCard label="角色" value={getRoleLabel(user.role)} helper={user.is_active ? "账号启用" : "账号禁用"} icon={ShieldCheck} tone={user.is_active ? "success" : "muted"} />
         <AdminKpiCard label="负责品牌数" value={user.product_count ?? 0} helper="绑定品牌" icon={Database} tone="info" />
@@ -512,6 +615,23 @@ export function AdminUserDetailPanel({ userId }: { userId: number }) {
         {activeTab === "replies" ? <RepliesTable items={replies} /> : null}
         {activeTab === "exceptions" ? <ExceptionsTable tasks={tasks} emails={emails} replies={replies} /> : null}
       </AdminSection>
+
+      <SalespersonFormDrawer
+        open={editOpen}
+        mode="edit"
+        user={user}
+        products={allProducts}
+        avatarUrl={draftAvatarUrl}
+        onAvatarChange={(url) => {
+          setDraftAvatarUrl(url);
+          if (url) avatarCache.setUserAvatar(user.id, url);
+        }}
+        onClose={() => setEditOpen(false)}
+        onSaved={async () => {
+          setSuccessMessage("业务员已更新。");
+          await reloadDetail();
+        }}
+      />
     </div>
   );
 }
@@ -584,12 +704,13 @@ export function AdminProductDetailPanel({ productId }: { productId: number }) {
   }
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       <AdminPageHeader
         label="品牌详情"
         title={`${product.name}（#${product.id}）`}
         description="展示品牌下的任务、红人、邮件和回复链路，便于判断品牌当前处在哪个运营阶段。"
         actions={<AdminActionButton href="/admin/products">返回品牌列表</AdminActionButton>}
+        backFallback="/admin/products"
       />
       <AdminKpiGrid>
         <AdminKpiCard label="状态" value={getProductStatusMeta(product.status).label} helper={product.slug ?? "暂无"} icon={ShoppingBag} tone={getProductStatusMeta(product.status).tone} />
@@ -632,10 +753,28 @@ export function AdminCollectionTasksPanel() {
   const [filters, setFilters] = useState({ search: "", owner: "", brand: "", status: "", platform: "", startDate: "", endDate: "" });
 
   useEffect(() => {
-    fetchAdminCollectionTasks()
-      .then(setItems)
-      .catch((err) => setError(err instanceof Error ? err.message : "采集任务加载失败。"))
-      .finally(() => setLoading(false));
+    let active = true;
+    const controller = new AbortController();
+    queueMicrotask(() => {
+      if (!active) return;
+      fetchAdminCollectionTasks({ signal: controller.signal })
+        .then((data) => {
+          if (!active || controller.signal.aborted) return;
+          setItems(data);
+        })
+        .catch((err) => {
+          if (!active || controller.signal.aborted) return;
+          if (err instanceof DOMException && err.name === "AbortError") return;
+          setError(err instanceof Error ? err.message : "采集任务加载失败。");
+        })
+        .finally(() => {
+          if (active && !controller.signal.aborted) setLoading(false);
+        });
+    });
+    return () => {
+      active = false;
+      controller.abort();
+    };
   }, []);
 
   const filteredRows = useMemo(
@@ -718,11 +857,12 @@ export function AdminCollectionTasksPanel() {
   }
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       <AdminPageHeader
         label="采集任务"
         title="任务监控中心"
         description="按状态、平台、品牌和业务员归纳任务进度，管理员可以快速定位异常和清理无用任务。"
+        backFallback="/admin/dashboard"
         actions={
           <AdminActionButton onClick={() => void handleCleanupCurrentRows()} disabled={bulkDeleting || cleanupCandidates.length === 0}>
             <RefreshCw className="h-3.5 w-3.5" />
@@ -764,20 +904,43 @@ export function AdminCollectionTasksPanel() {
 export function AdminInfluencersPanel() {
   const [items, setItems] = useState<AdminInfluencer[]>([]);
   const [products, setProducts] = useState<AdminProduct[]>([]);
+  const [users, setUsers] = useState<AdminUser[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [productCreateOpen, setProductCreateOpen] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [deletingItem, setDeletingItem] = useState<AdminInfluencer | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
   const [filters, setFilters] = useState({ search: "", owner: "", brand: "", platform: "", minFollowers: "", maxFollowers: "", hasEmail: "", contacted: "", replied: "" });
 
-  useEffect(() => {
-    Promise.all([fetchAdminInfluencers(), fetchAdminProducts()])
-      .then(([influencerRows, productRows]) => {
-        setItems(influencerRows);
-        setProducts(productRows);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : "红人数据加载失败。"))
-      .finally(() => setLoading(false));
+  const reload = useCallback(async () => {
+    const [influencerRows, productRows, userRows] = await Promise.all([
+      fetchAdminInfluencers(),
+      fetchAdminProducts(),
+      fetchAdminUsers(),
+    ]);
+    setItems(influencerRows);
+    setProducts(productRows);
+    setUsers(userRows);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      void reload()
+        .catch((err) => {
+          if (active) setError(err instanceof Error ? err.message : "红人数据加载失败。");
+        })
+        .finally(() => {
+          if (active) setLoading(false);
+        });
+    });
+    return () => {
+      active = false;
+    };
+  }, [reload]);
 
   const brandOptions = useMemo(() => {
     const names = new Set<string>();
@@ -843,8 +1006,15 @@ export function AdminInfluencersPanel() {
   }, [items, filters]);
 
   return (
-    <div className="space-y-5">
-      <AdminPageHeader label="红人数据" title="红人资料库" description="按平台、品牌、邮箱质量、联系状态和回复状态筛选红人，支持外联和数据质量处理。" actions={<AdminActionButton><Download className="h-3.5 w-3.5" />导出</AdminActionButton>} />
+    <div className="space-y-3">
+      <AdminPageHeader
+        label="红人数据"
+        title="红人资料库"
+        description="按平台、品牌、邮箱质量、联系状态和回复状态筛选红人，支持编辑、删除和状态处理。"
+        backFallback="/admin/dashboard"
+      />
+      <AdminFeedbackBanner message={successMessage} />
+      <AdminFeedbackBanner message={error} tone="error" />
       <AdminKpiGrid>
         <AdminKpiCard label="红人总数" value={items.length} helper="资料库记录" icon={Database} tone="info" />
         <AdminKpiCard label="有邮箱" value={items.filter((item) => Boolean(item.email)).length} helper="可外联" icon={Mail} tone="success" />
@@ -881,9 +1051,62 @@ export function AdminInfluencersPanel() {
         <AdminFilterField label="是否已联系"><AdminSelect value={filters.contacted} onChange={(event) => setFilters((prev) => ({ ...prev, contacted: event.target.value }))}><option value="">全部</option><option value="yes">已联系</option><option value="no">未联系</option></AdminSelect></AdminFilterField>
         <AdminFilterField label="是否已回复"><AdminSelect value={filters.replied} onChange={(event) => setFilters((prev) => ({ ...prev, replied: event.target.value }))}><option value="">全部</option><option value="yes">已回复</option><option value="no">未回复</option></AdminSelect></AdminFilterField>
       </AdminFilterBar>
-      <AdminSection title="红人列表" description="邮箱和联系状态以管理员可处理的中文标签展示。">
-        {loading ? <AdminState type="loading" message="正在加载红人数据..." /> : error ? <AdminState type="error" message={error} /> : <InfluencersTable items={rows} />}
+      <AdminSection title="红人列表" description="支持详情、编辑、删除，以及标记联系/回复/无效邮箱等快捷操作。">
+        {loading ? (
+          <AdminState type="loading" message="正在加载红人数据..." />
+        ) : (
+          <InfluencersTable
+            items={rows}
+            onEdit={(item) => setEditingId(item.id)}
+            onDelete={(item) => setDeletingItem(item)}
+            onQuickAction={async (action, item) => {
+              try {
+                await applyInfluencerQuickAction(item.id, action);
+                await reload();
+                setSuccessMessage("红人状态已更新。");
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "操作失败。");
+              }
+            }}
+          />
+        )}
       </AdminSection>
+      <InfluencerEditDrawer
+        open={editingId != null}
+        influencerId={editingId}
+        products={products}
+        users={users}
+        onClose={() => setEditingId(null)}
+        onSaved={async () => {
+          await reload();
+          setSuccessMessage("红人资料已保存。");
+        }}
+      />
+      <InfluencerDeleteConfirmDialog
+        open={Boolean(deletingItem)}
+        influencer={deletingItem}
+        loading={deleteLoading}
+        onCancel={() => setDeletingItem(null)}
+        onConfirm={async () => {
+          if (!deletingItem) return;
+          setDeleteLoading(true);
+          try {
+            const result = await deleteInfluencerSafely(deletingItem);
+            if (result.mode === "archived") {
+              await reload();
+              setSuccessMessage("红人已归档（存在业务数据，未物理删除）。");
+            } else {
+              setItems((prev) => prev.filter((row) => row.id !== deletingItem.id));
+              setSuccessMessage("红人已删除。");
+            }
+            setDeletingItem(null);
+          } catch (err) {
+            setError(err instanceof Error ? err.message : "删除红人失败。");
+          } finally {
+            setDeleteLoading(false);
+          }
+        }}
+      />
       <ProductCreateDialog
         open={productCreateOpen}
         onClose={() => setProductCreateOpen(false)}
@@ -896,19 +1119,69 @@ export function AdminInfluencersPanel() {
 export function AdminEmailsPanel() {
   const [emails, setEmails] = useState<AdminEmail[]>([]);
   const [replies, setReplies] = useState<AdminReply[]>([]);
+  const [users, setUsers] = useState<AdminUser[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [editReply, setEditReply] = useState<AdminReply | null>(null);
+  const [editEmail, setEditEmail] = useState<AdminEmail | null>(null);
   const [filters, setFilters] = useState({ search: "", owner: "", brand: "", status: "" });
 
-  useEffect(() => {
-    Promise.all([fetchAdminEmails(), fetchAdminReplies()])
-      .then(([emailRows, replyRows]) => {
-        setEmails(emailRows);
-        setReplies(replyRows);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : "邮件与回复加载失败。"))
-      .finally(() => setLoading(false));
+  const reload = useCallback(async () => {
+    const [emailRows, replyRows, userRows] = await Promise.all([
+      fetchAdminEmails(),
+      fetchAdminReplies(),
+      fetchAdminUsers(),
+    ]);
+    setEmails(emailRows);
+    setReplies(replyRows);
+    setUsers(userRows);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      void reload()
+        .catch((err) => {
+          if (active) setError(err instanceof Error ? err.message : "邮件与回复加载失败。");
+        })
+        .finally(() => {
+          if (active) setLoading(false);
+        });
+    });
+    return () => {
+      active = false;
+    };
+  }, [reload]);
+
+  async function remindEmail(item: AdminEmail) {
+    upsertAdminWorkQueueEntry({ type: "email", id: item.id, assigneeUserId: item.user_id, status: "reminded" });
+    setSuccessMessage("已提醒业务员跟进该邮件。");
+    await reload();
+  }
+
+  async function markEmailHandled(item: AdminEmail) {
+    upsertAdminWorkQueueEntry({ type: "email", id: item.id, status: "handled" });
+    setSuccessMessage("邮件已标记为已处理。");
+    await reload();
+  }
+
+  async function remindReply(item: AdminReply) {
+    upsertAdminWorkQueueEntry({ type: "reply", id: item.id, assigneeUserId: item.user_id, status: "reminded" });
+    await updateEmailReply(item.id, {
+      manual_note: `[管理员提醒跟进] ${new Date().toLocaleString("zh-CN")}`,
+    });
+    setSuccessMessage("已提醒业务员处理该回复。");
+    await reload();
+  }
+
+  async function markReplyHandled(item: AdminReply) {
+    await updateEmailReply(item.id, { processing_status: "processed" });
+    upsertAdminWorkQueueEntry({ type: "reply", id: item.id, status: "handled" });
+    setSuccessMessage("回复已标记为已处理。");
+    await reload();
+  }
 
   const filteredEmails = useMemo(
     () =>
@@ -929,28 +1202,83 @@ export function AdminEmailsPanel() {
   );
 
   return (
-    <div className="space-y-5">
-      <AdminPageHeader label="邮件回复" title="邮件跟进工作台" description="集中查看发送状态、回复状态和待跟进邮件，帮助管理员分配跟进人并完成处理闭环。" actions={<AdminActionButton>批量标记已处理</AdminActionButton>} />
+    <div className="space-y-3">
+      <AdminPageHeader
+        label="邮件回复"
+        title="待跟进中心"
+        description="统一管理邮件待跟进与回复待处理，支持提醒、编辑和状态流转。"
+        backFallback="/admin/dashboard"
+      />
+      <AdminFeedbackBanner message={successMessage} />
+      <AdminFeedbackBanner message={error} tone="error" />
+      <AdminSalesReminderBanner users={users} />
       <AdminKpiGrid>
         <AdminKpiCard label="邮件总数" value={emails.length} helper="外联记录" icon={Mail} tone="info" />
         <AdminKpiCard label="发送失败" value={emails.filter((item) => getEmailStatusMeta(item.status).tone === "danger").length} helper="需要重发" icon={AlertTriangle} tone="danger" />
         <AdminKpiCard label="已回复" value={emails.filter((item) => item.has_replied).length} helper="需要跟进" icon={Send} tone="success" />
         <AdminKpiCard label="待处理回复" value={replies.filter((item) => item.processing_status !== "handled" && item.processing_status !== "processed").length} helper="回复中心" icon={ShieldCheck} tone="warning" />
       </AdminKpiGrid>
-      <AdminFilterBar>
-        <AdminFilterField label="搜索邮件" className="min-w-[240px] flex-1"><AdminInput value={filters.search} placeholder="主题、收件人或品牌" onChange={(event) => setFilters((prev) => ({ ...prev, search: event.target.value }))} /></AdminFilterField>
-        <AdminFilterField label="业务员"><AdminInput value={filters.owner} placeholder="业务员" onChange={(event) => setFilters((prev) => ({ ...prev, owner: event.target.value }))} /></AdminFilterField>
-        <AdminFilterField label="品牌"><AdminInput value={filters.brand} placeholder="品牌" onChange={(event) => setFilters((prev) => ({ ...prev, brand: event.target.value }))} /></AdminFilterField>
-        <AdminFilterField label="状态"><AdminSelect value={filters.status} onChange={(event) => setFilters((prev) => ({ ...prev, status: event.target.value }))}><option value="">全部状态</option><option value="sent">已发送</option><option value="failed">发送失败</option><option value="replied">已回复</option><option value="pending">待跟进</option><option value="handled">已处理</option><option value="no_action">无需处理</option></AdminSelect></AdminFilterField>
-      </AdminFilterBar>
       {loading ? (
         <AdminState type="loading" message="正在加载邮件与回复..." />
       ) : error ? (
         <AdminState type="error" message={error} />
       ) : (
         <>
-          <AdminSection title="邮件记录" description="发送状态、回复状态和跟进状态统一中文展示。"><EmailsTable items={filteredEmails} /></AdminSection>
-          <AdminSection title="回复记录" description="用于快速处理新回复和待跟进客户。"><RepliesTable items={replies} /></AdminSection>
+          <AdminFollowUpWorkbench emails={emails} replies={replies} users={users} onReload={reload} />
+          <AdminFilterBar>
+            <AdminFilterField label="搜索邮件" className="min-w-[200px] flex-1">
+              <AdminInput value={filters.search} placeholder="主题、收件人或品牌" onChange={(event) => setFilters((prev) => ({ ...prev, search: event.target.value }))} />
+            </AdminFilterField>
+            <AdminFilterField label="业务员">
+              <AdminInput value={filters.owner} placeholder="业务员" onChange={(event) => setFilters((prev) => ({ ...prev, owner: event.target.value }))} />
+            </AdminFilterField>
+            <AdminFilterField label="品牌">
+              <AdminInput value={filters.brand} placeholder="品牌" onChange={(event) => setFilters((prev) => ({ ...prev, brand: event.target.value }))} />
+            </AdminFilterField>
+            <AdminFilterField label="状态">
+              <AdminSelect value={filters.status} onChange={(event) => setFilters((prev) => ({ ...prev, status: event.target.value }))}>
+                <option value="">全部状态</option>
+                <option value="sent">已发送</option>
+                <option value="failed">发送失败</option>
+                <option value="replied">已回复</option>
+                <option value="pending">待跟进</option>
+              </AdminSelect>
+            </AdminFilterField>
+          </AdminFilterBar>
+          <AdminSection title="全部邮件记录" description="完整外联发送记录，可编辑跟进状态。">
+            <EmailsTable
+              items={filteredEmails}
+              onEdit={setEditEmail}
+              onRemind={(item) => void remindEmail(item)}
+              onMarkHandled={(item) => void markEmailHandled(item)}
+            />
+          </AdminSection>
+          <AdminSection title="全部回复记录" description="完整回复列表，可编辑处理与意向状态。">
+            <RepliesTable
+              items={replies}
+              onEdit={setEditReply}
+              onRemind={(item) => void remindReply(item)}
+              onMarkHandled={(item) => void markReplyHandled(item)}
+            />
+          </AdminSection>
+          <ReplyHandleDrawer
+            open={Boolean(editReply)}
+            reply={editReply}
+            onClose={() => setEditReply(null)}
+            onSaved={async () => {
+              setSuccessMessage("回复处理状态已更新。");
+              await reload();
+            }}
+          />
+          <EmailEditDrawer
+            open={Boolean(editEmail)}
+            email={editEmail}
+            onClose={() => setEditEmail(null)}
+            onSaved={async () => {
+              setSuccessMessage("邮件跟进状态已更新。");
+              await reload();
+            }}
+          />
         </>
       )}
     </div>
@@ -967,8 +1295,8 @@ export function AdminSettingsPanel() {
   ];
 
   return (
-    <div className="space-y-5">
-      <AdminPageHeader label="系统信息" title="后台模块与系统状态" description="查看管理员后台基础状态，并沉淀后续可扩展的运营管理模块。" />
+    <div className="space-y-3">
+      <AdminPageHeader label="系统信息" title="后台模块与系统状态" description="查看管理员后台基础状态，并沉淀后续可扩展的运营管理模块。" backFallback="/admin/dashboard" />
       <AdminKpiGrid>
         <AdminKpiCard label="管理员模块" value="已启用" helper="仅管理员可访问" icon={ShieldCheck} tone="success" />
         <AdminKpiCard label="数据来源" value="现有真实表" helper="无新增接口依赖" icon={Database} tone="info" />

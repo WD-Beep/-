@@ -271,6 +271,7 @@ class CollectionTaskBase(BaseModel):
     batch_group_id: str | None = None
     batch_round_index: int | None = Field(default=None, ge=1)
     batch_round_count: int | None = Field(default=None, ge=1)
+    max_runtime_minutes: int | None = Field(default=60, ge=5, le=1440)
     user_id: int | None = None
     workspace_id: int | None = None
     product_id: int | None = None
@@ -355,6 +356,7 @@ class CollectionTaskCreate(BaseModel):
     batch_total_limit: int | None = Field(default=None, ge=1, le=100000)
     batch_round_size: int | None = Field(default=None, ge=1, le=500)
     batch_round_count: int | None = Field(default=None, ge=1, le=1000)
+    max_runtime_minutes: int | None = Field(default=60, ge=5, le=1440)
     name: str = Field(..., max_length=255)
     collection_mode: CollectionMode = CollectionMode.KEYWORD
     platform: str = Field(default="instagram", max_length=50)
@@ -544,6 +546,7 @@ class CollectionTaskUpdate(BaseModel):
     batch_total_limit: int | None = Field(default=None, ge=1, le=100000)
     batch_round_size: int | None = Field(default=None, ge=1, le=500)
     batch_round_count: int | None = Field(default=None, ge=1, le=1000)
+    max_runtime_minutes: int | None = Field(default=None, ge=5, le=1440)
     name: str | None = Field(default=None, max_length=255)
     collection_mode: CollectionMode | None = None
     platform: str | None = Field(default=None, max_length=50)

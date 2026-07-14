@@ -61,7 +61,8 @@ test("admin sales workbench has a dedicated route and strengthened detail view",
   assert.match(panel, /业务员作业看板/);
   assert.match(panel, /今日有动作业务员/);
   assert.match(panel, /外联不足/);
-  assert.match(panel, /查看作业明细/);
+  assert.match(panel, /编辑业务员/);
+  assert.match(panel, /新增品牌/);
   assert.match(panel, /AdminCompactActions/);
   assert.match(detail, /负责品牌进度/);
   assert.match(detail, /采集任务/);
@@ -92,8 +93,22 @@ test("admin dashboard and lists expose required real-data fields", () => {
   }
 
   for (const field of ["members", "owner_names", "collection_task_count", "influencer_count", "email_count", "reply_count"]) {
-    assert.match(products, new RegExp(field));
+    assert.match(api, new RegExp(field));
   }
+
+  const helpers = source("../src/components/admin/admin-ui-helpers.ts");
+  assert.match(helpers, /buildSalespersonBrandProgressView/);
+  assert.match(helpers, /getAdminWorkStatusMeta/);
+
+  assert.match(products, /业务员品牌进度/);
+  assert.match(products, /buildSalespersonBrandProgressView/);
+  assert.match(products, /AdminDrawer/);
+  assert.match(products, /未分配/);
+  assert.match(products, /collection_task_count/);
+  assert.match(products, /AdminSalespersonLabel/);
+  assert.match(products, /AdminBrandLabel/);
+  assert.match(products, /新增业务员/);
+  assert.match(products, /admin-products-management/);
 });
 
 test("browser long-running API calls use the public proxy by default", () => {
@@ -128,13 +143,50 @@ test("admin influencers page exposes product selector and creation entry", () =>
   assert.match(detailPanels, /setProductCreateOpen\(true\)/);
   assert.match(detailPanels, /value=\{filters\.brand\}/);
   assert.match(detailPanels, /brandOptions\.map/);
+  assert.match(detailPanels, /待跟进中心/);
+  assert.match(detailPanels, /EmailEditDrawer/);
+  assert.match(detailPanels, /AdminFollowUpWorkbench/);
+  assert.match(detailPanels, /InfluencerEditDrawer/);
+  assert.match(detailPanels, /admin-work-queue/);
+  assert.match(detailPanels, /backFallback/);
+});
+
+test("admin shared crud shell exposes back navigation and work queue", () => {
+  const crud = source("../src/components/admin/admin-crud.tsx");
+  const ui = source("../src/components/admin/admin-ui.tsx");
+  const workQueue = source("../src/lib/admin-work-queue.ts");
+  const followUp = source("../src/components/admin/admin-follow-up-workbench.tsx");
+  const influencerDetailPage = source("../src/app/admin/influencers/[id]/page.tsx");
+
+  assert.match(crud, /AdminBackButton/);
+  assert.match(crud, /router\.back/);
+  assert.match(ui, /createPortal/);
+  assert.match(ui, /AdminBackButton/);
+  assert.match(ui, /backFallback = "\/admin\/dashboard"/);
+  assert.match(workQueue, /reminded/);
+  assert.match(workQueue, /remindCount/);
+  assert.match(followUp, /全部待跟进/);
+  assert.match(followUp, /邮件待跟进/);
+  assert.match(followUp, /回复待处理/);
+  assert.match(influencerDetailPage, /AdminInfluencerDetailPanel/);
 });
 
 test("admin route guard clears non-admin sessions before showing admin pages", () => {
   const guard = source("../src/components/admin/admin-route-guard.tsx");
 
   assert.match(guard, /getStoredAuthSession\(\)\?\.isAdmin/);
-  assert.match(guard, /useState<GuardState>\("checking"\)/);
+  assert.match(guard, /useState<GuardState>\(\(\) =>/);
+  assert.match(guard, /\? "allowed" : "checking"/);
   assert.match(guard, /clearAuthSession\(\)/);
   assert.match(guard, /\/admin\/login\?error=admin_required/);
+});
+
+test("sales sidebar reuses product options across route remounts", () => {
+  const sidebar = source("../src/components/layout/sidebar.tsx");
+
+  assert.match(sidebar, /PRODUCT_OPTIONS_MEMORY_CACHE_TTL_MS/);
+  assert.match(sidebar, /productOptionsInflight/);
+  assert.match(sidebar, /readFreshProductOptionsMemoryCache/);
+  assert.match(sidebar, /fetchTenantProductsShared/);
+  assert.match(sidebar, /setProductsLoading\(false\)/);
 });

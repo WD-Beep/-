@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime, timedelta
 
 from typing import Literal
 
@@ -77,6 +78,21 @@ async def _start_next_batch_child(
     if child is None:
         await CollectionTaskService.refresh_batch_parent_state(db, parent)
         return None
+    parent_checkpoint = dict(parent.run_checkpoint or {})
+    if parent_checkpoint.get("stopped") or parent_checkpoint.get("stop_requested"):
+        return None
+    deadline_text = parent_checkpoint.get("runtime_deadline_at")
+    if not deadline_text:
+        now = datetime.now(UTC)
+        deadline_text = (now + timedelta(minutes=int(parent.max_runtime_minutes or 60))).isoformat()
+        parent_checkpoint["runtime_started_at"] = now.isoformat()
+        parent_checkpoint["runtime_deadline_at"] = deadline_text
+        parent.run_checkpoint = parent_checkpoint
+    child_checkpoint = dict(child.run_checkpoint or {})
+    child_checkpoint["runtime_started_at"] = parent_checkpoint.get("runtime_started_at")
+    child_checkpoint["runtime_deadline_at"] = deadline_text
+    child.run_checkpoint = child_checkpoint
+    await db.commit()
     stale_running = CollectionTaskService.is_running_stale(child)
     resume = child.status == CollectionTaskStatus.PAUSED.value or (
         child.status == CollectionTaskStatus.RUNNING.value and stale_running
@@ -134,8 +150,10 @@ async def _run_collection_task_in_background(task_id: int, *, resume: bool = Fal
         task = await CollectionTaskService.get_task(bg_db, task_id)
         if not task:
             return
+        if (task.run_checkpoint or {}).get("stopped"):
+            return
         try:
-            await CollectionRunnerService.run_task(bg_db, task, allow_running=True, resume=resume)
+            await CollectionRunnerService.run_task_with_timeout(bg_db, task, allow_running=True, resume=resume)
         except CollectionRunCapacityError as exc:
             logger.warning("Background collection task %s returned to queue: %s", task_id, exc)
             await CollectionQueueService.restore_task_to_queue(
@@ -151,7 +169,9 @@ async def _run_collection_task_in_background(task_id: int, *, resume: bool = Fal
                 parent = await CollectionTaskService.get_task(bg_db, task.parent_task_id)
                 if parent:
                     try:
-                        await _start_next_batch_child(parent, None, bg_db)
+                        checkpoint = dict(parent.run_checkpoint or {})
+                        if not checkpoint.get("stopped") and not checkpoint.get("stop_requested"):
+                            await _start_next_batch_child(parent, None, bg_db)
                     except Exception as exc:
                         logger.exception("Failed to continue batch parent %s after child %s: %s", parent.id, task_id, exc)
             await CollectionQueueService.dispatch_queued_tasks()
@@ -779,6 +799,38 @@ async def pause_collection_task(
         if parent:
             await CollectionTaskService.refresh_batch_parent_state(db, parent)
     return CollectionTaskService.task_read(paused)
+
+
+@router.post("/{task_id}/stop", response_model=CollectionTaskRead)
+async def stop_collection_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> CollectionTaskRead:
+    task = ensure_task_access(await CollectionTaskService.get_task(db, task_id), ctx)
+    active_statuses = {
+        CollectionTaskStatus.RUNNING.value,
+        CollectionTaskStatus.QUEUED.value,
+        CollectionTaskStatus.PAUSED.value,
+    }
+    children = (
+        await CollectionTaskService.get_batch_children(db, task.id)
+        if CollectionTaskService._is_batch_parent(task)
+        else []
+    )
+    if task.status not in active_statuses and not any(child.status in active_statuses for child in children):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="任务当前不在采集中")
+    active_ids = await CollectionTaskService.request_stop(db, task)
+    for active_id in active_ids:
+        await CollectionRunnerService.cancel_active_task(active_id)
+    task = ensure_task_access(await CollectionTaskService.get_task(db, task_id), ctx)
+    stopped = await CollectionTaskService.stop_task_and_preserve(
+        db,
+        task,
+        reason="用户手动停止采集",
+    )
+    await CollectionQueueService.dispatch_queued_tasks()
+    return CollectionTaskService.task_read(stopped)
 
 
 @router.post("/{task_id}/resume", response_model=CollectionRunResult)

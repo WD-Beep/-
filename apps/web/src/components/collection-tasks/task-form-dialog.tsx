@@ -289,7 +289,7 @@ export function TaskFormDialog({
     () => validateForm(form, platformCapabilities),
     [form, platformCapabilities],
   );
-  const batchRoundCount = useMemo(() => calculateBatchRoundCount(form), [form.batch_total_limit, form.batch_round_size]);
+  const batchRoundCount = useMemo(() => calculateBatchRoundCount(form), [form]);
   const advancedSummary = useMemo(() => advancedFilterSummary(form), [form]);
   const linkImportHintGroups = useMemo(
     () => formatLinkImportPlatformHints(platformCapabilities),
@@ -698,16 +698,31 @@ export function TaskFormDialog({
 
               {!isLinkImport ? (
                 <div className="space-y-3">
-                <div className="space-y-2 sm:max-w-xs">
-                  <Label htmlFor="discovery_limit">采集数量上限</Label>
-                  <Input
-                    id="discovery_limit"
-                    type="number"
-                    min={1}
-                    max={10000}
-                    value={form.discovery_limit}
-                    onChange={(e) => setForm({ ...form, discovery_limit: e.target.value })}
-                  />
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="discovery_limit">采集数量上限</Label>
+                    <Input
+                      id="discovery_limit"
+                      type="number"
+                      min={1}
+                      max={10000}
+                      value={form.discovery_limit}
+                      onChange={(e) => setForm({ ...form, discovery_limit: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="max_runtime_minutes">最长运行时间（分钟）</Label>
+                    <Input
+                      id="max_runtime_minutes"
+                      type="number"
+                      min={5}
+                      max={1440}
+                      step={5}
+                      value={form.max_runtime_minutes}
+                      onChange={(e) => setForm({ ...form, max_runtime_minutes: e.target.value })}
+                    />
+                    <p className="text-xs text-muted-foreground">到时自动停止，保留并入库已经采集成功的数据。</p>
+                  </div>
                 </div>
                 {mode === "create" ? (
                   <div className="space-y-3 rounded-md border bg-muted/20 px-3 py-3">

@@ -21,12 +21,12 @@ import { useEffect, useState } from "react";
 
 import { cn } from "@/lib/utils";
 
-const navItems = [
+export const adminNavItems = [
   { href: "/admin/dashboard", label: "后台首页", description: "全局概览", icon: LayoutDashboard },
   { href: "/admin/monthly-report", label: "月度总结", description: "月报复盘", icon: CalendarDays },
   { href: "/admin/sales-workbench", label: "业务员作业", description: "作业追踪", icon: BriefcaseBusiness },
   { href: "/admin/users", label: "业务员管理", description: "账号与业绩", icon: Users },
-  { href: "/admin/products", label: "品牌管理", description: "运营进度", icon: ShoppingBag },
+  { href: "/admin/products", label: "品牌管理", description: "业务员进度", icon: ShoppingBag },
   { href: "/admin/collection-tasks", label: "采集任务", description: "任务监控", icon: BarChart3 },
   { href: "/admin/influencers", label: "红人数据", description: "资料库", icon: Database },
   { href: "/admin/emails", label: "邮件回复", description: "跟进工作台", icon: Inbox },
@@ -35,7 +35,7 @@ const navItems = [
 
 export function AdminSidebar() {
   const pathname = usePathname();
-  const [collapsed, setCollapsed] = useState(true);
+  const [collapsed, setCollapsed] = useState(false);
   const [hovered, setHovered] = useState(false);
   const isCompact = collapsed && !hovered;
 
@@ -76,7 +76,7 @@ export function AdminSidebar() {
         </div>
       </div>
       <nav className="flex-1 space-y-1 px-3 py-4">
-        {navItems.map((item) => {
+        {adminNavItems.map((item) => {
           const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
           const Icon = item.icon;
           return (
@@ -122,5 +122,18 @@ export function AdminSidebar() {
         </div>
       </div>
     </aside>
+  );
+}
+
+export function AdminMobileNav() {
+  const pathname = usePathname();
+  return (
+    <nav className="fixed inset-x-0 bottom-0 z-40 flex h-16 items-stretch overflow-x-auto border-t border-[#D8E2EE] bg-white/95 shadow-[0_-8px_24px_rgba(16,32,51,0.08)] backdrop-blur md:hidden">
+      {adminNavItems.map((item) => {
+        const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+        const Icon = item.icon;
+        return <Link key={item.href} href={item.href} className={cn("flex min-w-[76px] flex-1 flex-col items-center justify-center gap-1 px-2 text-[11px] font-medium", active ? "text-[#2563EB]" : "text-[#667085]")}><Icon className="h-4 w-4" /><span className="whitespace-nowrap">{item.label}</span></Link>;
+      })}
+    </nav>
   );
 }

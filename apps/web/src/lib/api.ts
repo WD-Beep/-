@@ -179,6 +179,17 @@ export type Influencer = {
 };
 
 export type InfluencerUpdatePayload = {
+  platform?: string | null;
+  username?: string | null;
+  display_name?: string | null;
+  profile_url?: string | null;
+  country?: string | null;
+  language?: string | null;
+  category?: string | null;
+  niche?: string | null;
+  followers_count?: number | null;
+  engagement_rate?: number | null;
+  email?: string | null;
   follow_status?: string | null;
   owner?: string | null;
   note?: string | null;
@@ -317,6 +328,7 @@ export type CollectionTask = {
   batch_group_id?: string | null;
   batch_round_index?: number | null;
   batch_round_count?: number | null;
+  max_runtime_minutes?: number | null;
   name: string;
   collection_mode: CollectionMode;
   platform: string;
@@ -407,6 +419,7 @@ export type CollectionTaskChild = {
 
 export type CollectionTaskPayload = {
   name: string;
+  max_runtime_minutes?: number | null;
   collection_mode: CollectionMode;
   platform: string;
   platforms: string[];
@@ -1053,14 +1066,29 @@ export function cleanBackendErrorMessage(message: string): string {
   if (cleaned.includes("链接导入至少需要一个链接")) {
     return "请先粘贴至少一个链接，或切回关键词发现模式。";
   }
-  return cleaned || message;
+  if (
+    /valid email|email address|@-sign/i.test(cleaned) ||
+    /邮箱.*(?:无效|格式|地址)/.test(cleaned)
+  ) {
+    return "邮箱格式不正确，请输入有效的邮箱地址。";
+  }
+  if (/Method Not Allowed/i.test(cleaned)) {
+    return "请求方法不被允许，请检查接口是否支持该操作。";
+  }
+  if (/[\u4e00-\u9fff]/.test(cleaned)) {
+    return cleaned;
+  }
+  return "请求失败，请稍后重试。";
 }
 
 async function parseError(response: Response): Promise<string> {
   try {
     const text = await response.text();
     if (!text.trim()) {
-      return `Request failed: ${response.status}`;
+      if (response.status === 405) {
+        return "请求方法不被允许，请检查接口是否支持该操作。";
+      }
+      return "请求失败，请稍后重试。";
     }
     try {
       const data = JSON.parse(text) as { detail?: string | Array<{ msg?: string; loc?: Array<string | number> }> };
@@ -1071,14 +1099,17 @@ async function parseError(response: Response): Promise<string> {
           .join("；");
       }
     } catch {
+      if (response.status === 405 || /Method Not Allowed/i.test(text)) {
+        return "请求方法不被允许，请检查接口是否支持该操作。";
+      }
       if (response.status >= 500 && /Internal Server Error/i.test(text)) {
         return "后端处理失败，请稍后重试，或查看后端日志里的具体接口错误。";
       }
-      return text;
+      return "请求失败，请稍后重试。";
     }
-    return `Request failed: ${response.status}`;
+    return "请求失败，请稍后重试。";
   } catch {
-    return `Request failed: ${response.status}`;
+    return "请求失败，请稍后重试。";
   }
 }
 
@@ -1393,11 +1424,14 @@ export async function fetchCollectionTasks(
     search?: string;
     status?: CollectionTaskStatus;
     platform?: string;
+    signal?: AbortSignal;
   },
 ): Promise<PaginatedResponse<CollectionTask>> {
-  const query = buildCollectionTasksQueryString(page, pageSize, options);
+  const { signal, ...queryOptions } = options ?? {};
+  const query = buildCollectionTasksQueryString(page, pageSize, queryOptions);
   const response = await apiFetch(`${API_URL}/api/collection-tasks?${query}`, {
     cache: "no-store",
+    signal,
   });
   if (!response.ok) {
     throw new Error(await parseError(response));
@@ -1504,6 +1538,16 @@ export async function runCollectionTask(id: number): Promise<CollectionRunResult
 
 export async function pauseCollectionTask(id: number): Promise<CollectionTask> {
   const response = await apiFetch(`${API_URL}/api/collection-tasks/${id}/pause`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function stopCollectionTask(id: number): Promise<CollectionTask> {
+  const response = await apiFetch(`${API_URL}/api/collection-tasks/${id}/stop`, {
     method: "POST",
   });
   if (!response.ok) {
@@ -2108,10 +2152,11 @@ export async function sendManualOutreachEmail(
 export async function fetchLinkImportBatches(
   page = 1,
   pageSize = 20,
+  options?: { signal?: AbortSignal },
 ): Promise<PaginatedResponse<LinkImportBatch>> {
   const response = await apiFetch(
     `${API_URL}/api/link-import/batches?page=${page}&page_size=${pageSize}`,
-    { cache: "no-store" },
+    { cache: "no-store", signal: options?.signal },
   );
   if (!response.ok) {
     throw new Error(await parseError(response));
@@ -2190,6 +2235,16 @@ export type TenantProductPayload = {
   is_default?: boolean;
 };
 
+export type TenantProductUpdatePayload = {
+  name?: string;
+  slug?: string;
+  brand?: string | null;
+  description?: string | null;
+  is_default?: boolean;
+  is_hidden?: boolean;
+  is_archived?: boolean;
+};
+
 export async function fetchTenantProducts(options?: {
   includeTest?: boolean;
 }): Promise<TenantProduct[]> {
@@ -2204,6 +2259,18 @@ export async function fetchTenantProducts(options?: {
 export async function createTenantProduct(payload: TenantProductPayload): Promise<TenantProduct> {
   const response = await apiFetch(`${API_URL}/api/tenant/products`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function updateTenantProduct(productId: number, payload: TenantProductUpdatePayload): Promise<TenantProduct> {
+  const response = await apiFetch(`${API_URL}/api/tenant/products/${productId}`, {
+    method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
@@ -2231,6 +2298,15 @@ export async function runCollectionTaskBatch(
 
 export async function deleteTenantProduct(productId: number): Promise<void> {
   const response = await apiFetch(`${API_URL}/api/tenant/products/${productId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+}
+
+export async function deleteAdminProduct(productId: number): Promise<void> {
+  const response = await apiFetch(`${API_URL}/api/admin/products/${productId}`, {
     method: "DELETE",
   });
   if (!response.ok) {
@@ -2293,6 +2369,24 @@ export type AdminUser = {
     emails: AdminEmail[];
     replies: AdminReply[];
   };
+};
+
+export type AdminUserCreatePayload = {
+  username: string;
+  password: string;
+  display_name?: string | null;
+  email?: string | null;
+  role: "admin" | "sales";
+  is_active: boolean;
+  product_ids: number[];
+};
+
+export type AdminUserUpdatePayload = {
+  username?: string;
+  display_name?: string | null;
+  email?: string | null;
+  role?: "admin" | "sales";
+  is_active?: boolean;
 };
 
 export type AdminProductMember = {
@@ -2409,6 +2503,54 @@ export async function fetchAdminUsers(): Promise<AdminUser[]> {
   return response.json();
 }
 
+export async function createAdminUser(payload: AdminUserCreatePayload): Promise<AdminUser> {
+  const response = await apiFetch(`${API_URL}/api/admin/users`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function updateAdminUser(userId: number, payload: AdminUserUpdatePayload): Promise<AdminUser> {
+  const response = await apiFetch(`${API_URL}/api/admin/users/${userId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function deleteAdminUser(userId: number): Promise<void> {
+  const response = await apiFetch(`${API_URL}/api/admin/users/${userId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+}
+
+export async function setAdminUserProducts(userId: number, productIds: number[]): Promise<AdminUser> {
+  const response = await apiFetch(`${API_URL}/api/admin/users/${userId}/products`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ product_ids: productIds }),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function resetAdminUserPassword(userId: number, password: string): Promise<void> {
+  const response = await apiFetch(`${API_URL}/api/admin/users/${userId}/reset-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+}
+
 export async function fetchAdminUser(userId: number): Promise<AdminUser> {
   const response = await apiFetch(`${API_URL}/api/admin/users/${userId}`, { cache: "no-store" });
   if (!response.ok) throw new Error(await parseError(response));
@@ -2487,8 +2629,13 @@ export async function bulkDeleteAdminCollectionTasks(taskIds: number[]): Promise
   };
 }
 
-export async function fetchAdminCollectionTasks(): Promise<AdminCollectionTask[]> {
-  const response = await apiFetch(`${API_URL}/api/admin/collection-tasks`, { cache: "no-store" });
+export async function fetchAdminCollectionTasks(options?: {
+  signal?: AbortSignal;
+}): Promise<AdminCollectionTask[]> {
+  const response = await apiFetch(`${API_URL}/api/admin/collection-tasks`, {
+    cache: "no-store",
+    signal: options?.signal,
+  });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }

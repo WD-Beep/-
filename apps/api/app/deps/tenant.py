@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.models.tenant import Product, ProductMember, User, WorkspaceMember
 from app.services.tenant_scope import ALL_PRODUCTS_ID
+from app.services.auth_service import read_access_token
 
 
 @dataclass(frozen=True)
@@ -78,7 +79,13 @@ def _resolve_authenticated_user_id(
     x_user_id: int | None,
     x_authenticated_user_id: int | None,
     x_auth_proxy_secret: str | None,
+    authorization: str | None,
 ) -> int:
+    if authorization and authorization.lower().startswith("bearer "):
+        token_user_id = read_access_token(authorization[7:].strip())
+        if token_user_id is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录状态已失效")
+        return token_user_id
     if _is_production_env():
         expected_secret = (os.getenv("AUTH_PROXY_SHARED_SECRET") or "").strip()
         if not expected_secret:
@@ -95,11 +102,13 @@ async def get_user_context(
     x_user_id: int | None = Header(default=None, alias="X-User-Id"),
     x_authenticated_user_id: int | None = Header(default=None, alias="X-Authenticated-User-Id"),
     x_auth_proxy_secret: str | None = Header(default=None, alias="X-Auth-Proxy-Secret"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> UserContext:
     user_id = _resolve_authenticated_user_id(
         x_user_id=x_user_id,
         x_authenticated_user_id=x_authenticated_user_id,
         x_auth_proxy_secret=x_auth_proxy_secret,
+        authorization=authorization,
     )
     user = await _load_user(db, user_id)
     return UserContext(user_id=user.id, is_admin=user.is_admin)
@@ -111,11 +120,13 @@ async def get_tenant_context(
     x_product_id: int | None = Header(default=None, alias="X-Product-Id"),
     x_authenticated_user_id: int | None = Header(default=None, alias="X-Authenticated-User-Id"),
     x_auth_proxy_secret: str | None = Header(default=None, alias="X-Auth-Proxy-Secret"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> TenantContext:
     user_id = _resolve_authenticated_user_id(
         x_user_id=x_user_id,
         x_authenticated_user_id=x_authenticated_user_id,
         x_auth_proxy_secret=x_auth_proxy_secret,
+        authorization=authorization,
     )
     product_id = _parse_required_header(x_product_id, "X-Product-Id")
     user = await _load_user(db, user_id)

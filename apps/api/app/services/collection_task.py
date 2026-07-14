@@ -37,7 +37,7 @@ from app.services.task_retention import (
     dispose_collection_task,
     task_has_obvious_retention,
 )
-from app.services.task_run_progress import STAGE_FAILED
+from app.services.task_run_progress import STAGE_COMPLETED, STAGE_FAILED
 from app.schemas.common import PaginatedResponse
 
 
@@ -380,10 +380,139 @@ class CollectionTaskService:
         checkpoint["paused_at"] = now
         task.run_checkpoint = checkpoint
         task.status = CollectionTaskStatus.PAUSED.value
-        task.status_summary = "Task paused. Existing candidates, counters, and inserted influencers are preserved."
+        task.status_summary = "任务已暂停，当前已采集的数据和进度已保留。"
         task.error_message = None
         task.last_error = None
         await db.commit()
+        await db.refresh(task)
+        return task
+
+    @staticmethod
+    async def auto_pause_task(
+        db: AsyncSession,
+        task: CollectionTask,
+        *,
+        reason: str,
+    ) -> CollectionTask:
+        if task.status not in {
+            CollectionTaskStatus.RUNNING.value,
+            CollectionTaskStatus.QUEUED.value,
+        }:
+            return task
+        checkpoint = dict(task.run_checkpoint or {})
+        now = datetime.now(UTC).isoformat()
+        checkpoint["paused"] = True
+        checkpoint["auto_paused"] = True
+        checkpoint["auto_pause_reason"] = reason
+        checkpoint["pause_requested_at"] = checkpoint.get("pause_requested_at") or now
+        checkpoint["paused_at"] = now
+        task.run_checkpoint = checkpoint
+        task.status = CollectionTaskStatus.PAUSED.value
+        task.status_summary = reason
+        task.error_message = None
+        task.last_error = None
+        await db.commit()
+        await db.refresh(task)
+        return task
+
+    @staticmethod
+    async def request_stop(db: AsyncSession, task: CollectionTask) -> list[int]:
+        """Persist the stop signal before cancelling in-process work."""
+        parent = task
+        if task.parent_task_id is not None:
+            parent = await db.get(CollectionTask, task.parent_task_id) or task
+        targets = (
+            await CollectionTaskService.get_batch_children(db, parent.id)
+            if CollectionTaskService._is_batch_parent(parent)
+            else [task]
+        )
+        now = datetime.now(UTC).isoformat()
+        checkpoint = dict(parent.run_checkpoint or {})
+        checkpoint["stop_requested"] = True
+        checkpoint["stop_requested_at"] = now
+        parent.run_checkpoint = checkpoint
+        active_ids: list[int] = []
+        for child in targets:
+            if child.status in {
+                CollectionTaskStatus.RUNNING.value,
+                CollectionTaskStatus.QUEUED.value,
+                CollectionTaskStatus.PAUSED.value,
+            }:
+                child_checkpoint = dict(child.run_checkpoint or {})
+                child_checkpoint["stop_requested"] = True
+                child_checkpoint["stop_requested_at"] = now
+                child.run_checkpoint = child_checkpoint
+                active_ids.append(child.id)
+        await db.commit()
+        return active_ids
+
+    @staticmethod
+    async def stop_task_and_preserve(
+        db: AsyncSession,
+        task: CollectionTask,
+        *,
+        reason: str,
+        timed_out: bool = False,
+    ) -> CollectionTask:
+        """Finish a task or an entire batch without deleting already persisted results."""
+        parent = task
+        if task.parent_task_id is not None:
+            parent = await db.get(CollectionTask, task.parent_task_id) or task
+        targets = (
+            await CollectionTaskService.get_batch_children(db, parent.id)
+            if CollectionTaskService._is_batch_parent(parent)
+            else [task]
+        )
+        now = datetime.now(UTC)
+        terminal = CollectionTaskService._batch_terminal_statuses()
+        for child in targets:
+            if child.status in terminal:
+                continue
+            has_results = (child.inserted_count or 0) > 0 or (child.result_count or 0) > 0
+            child.status = (
+                CollectionTaskStatus.COMPLETED_WITH_RESULTS.value
+                if has_results
+                else CollectionTaskStatus.COMPLETED_NO_RESULTS.value
+            )
+            child.current_stage = STAGE_COMPLETED
+            child.status_summary = (
+                f"{reason}；已保留并入库 {child.inserted_count or child.result_count or 0} 条数据"
+            )
+            child.error_message = None
+            child.last_error = None
+            child.last_run_at = child.last_run_at or now
+            checkpoint = dict(child.run_checkpoint or {})
+            checkpoint["stopped"] = True
+            checkpoint["stopped_at"] = now.isoformat()
+            checkpoint["stop_reason"] = "runtime_limit" if timed_out else "manual"
+            checkpoint.pop("stop_requested", None)
+            child.run_checkpoint = checkpoint
+        await db.commit()
+
+        if CollectionTaskService._is_batch_parent(parent):
+            await CollectionTaskService.refresh_batch_parent_state(db, parent)
+            await db.refresh(parent)
+            total_inserted = parent.inserted_count or parent.result_count or 0
+            parent.status = (
+                CollectionTaskStatus.COMPLETED_WITH_RESULTS.value
+                if total_inserted > 0
+                else CollectionTaskStatus.COMPLETED_NO_RESULTS.value
+            )
+            parent.current_stage = STAGE_COMPLETED
+            parent.status_summary = f"{reason}；全部后续轮次已停止，已保留并入库 {total_inserted} 条数据"
+            parent.error_message = None
+            parent.last_error = None
+            parent.last_run_at = parent.last_run_at or now
+            checkpoint = dict(parent.run_checkpoint or {})
+            checkpoint["stopped"] = True
+            checkpoint["stopped_at"] = now.isoformat()
+            checkpoint["stop_reason"] = "runtime_limit" if timed_out else "manual"
+            checkpoint.pop("stop_requested", None)
+            parent.run_checkpoint = checkpoint
+            await db.commit()
+            await db.refresh(parent)
+            return parent
+
         await db.refresh(task)
         return task
 
@@ -1029,6 +1158,27 @@ class CollectionTaskService:
             task.run_checkpoint = checkpoint
             await db.flush()
             await CollectionTaskService._rebuild_batch_children(db, task, round_size, total_limit, round_count)
+        if "max_runtime_minutes" in update_data:
+            active_statuses = {
+                CollectionTaskStatus.RUNNING.value,
+                CollectionTaskStatus.QUEUED.value,
+                CollectionTaskStatus.PAUSED.value,
+            }
+            children = (
+                await CollectionTaskService.get_batch_children(db, task.id)
+                if CollectionTaskService._is_batch_parent(task)
+                else []
+            )
+            for child in children:
+                child.max_runtime_minutes = task.max_runtime_minutes
+            if task.status in active_statuses or any(child.status in active_statuses for child in children):
+                now = datetime.now(UTC)
+                deadline = now + timedelta(minutes=int(task.max_runtime_minutes or 60))
+                for target in [task, *children]:
+                    checkpoint = dict(target.run_checkpoint or {})
+                    checkpoint["runtime_started_at"] = now.isoformat()
+                    checkpoint["runtime_deadline_at"] = deadline.isoformat()
+                    target.run_checkpoint = checkpoint
         await db.commit()
         await db.refresh(task)
         return task

@@ -104,7 +104,7 @@ export function AdminMonthlyReportPanel() {
   }
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       <AdminPageHeader
         label="月度总结"
         title="月度运营可视化"

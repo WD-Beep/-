@@ -1,4 +1,12 @@
+"use client";
+
 import type { TenantProduct } from "./api.ts";
+import {
+  ADMIN_AUTH_PASSWORD,
+  AUTH_COOKIE,
+  AUTH_PASSWORD,
+  AUTH_USERNAME,
+} from "./auth-constants.ts";
 import {
   clearStoredAuthSession,
   getStoredAuthSession,
@@ -7,10 +15,12 @@ import {
 } from "./auth-session.ts";
 import { clearStoredUserId, setStoredUserId } from "./product-context.ts";
 
-export const AUTH_COOKIE = "influencer_intel_auth";
-export const AUTH_USERNAME = "admin";
-export const AUTH_PASSWORD = "baibo";
-export const ADMIN_AUTH_PASSWORD = "admin";
+export {
+  ADMIN_AUTH_PASSWORD,
+  AUTH_COOKIE,
+  AUTH_PASSWORD,
+  AUTH_USERNAME,
+} from "./auth-constants.ts";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api-proxy";
 
 const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
@@ -111,6 +121,38 @@ export async function loadBackendAuthSession(account: AuthAccount): Promise<Auth
     (await productsResponse.json()) as TenantProduct[],
     token,
   );
+}
+
+export async function loginWithCredentials(username: string, password: string): Promise<AuthSession> {
+  const response = await fetch(`${API_URL}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: username.trim(), password }),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    let message = "用户名或密码不正确";
+    try {
+      const payload = (await response.json()) as { detail?: string };
+      if (payload.detail) message = payload.detail;
+    } catch {
+      // Keep the friendly fallback message.
+    }
+    throw new Error(message);
+  }
+  const payload = (await response.json()) as {
+    token: string;
+    user: TenantUserResponse;
+    products: TenantProduct[];
+  };
+  const account: AuthAccount = {
+    username: payload.user.username,
+    password: "",
+    userId: payload.user.id,
+    role: payload.user.is_admin ? "admin" : "sales",
+    label: payload.user.display_name ?? payload.user.username,
+  };
+  return buildAuthSession(account, payload.user, payload.products, payload.token);
 }
 
 export function setAuthSession(sessionOrUserId: AuthSession | number = 1): void {

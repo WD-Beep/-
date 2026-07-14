@@ -2,14 +2,25 @@ import re
 import uuid
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.collection_task import CollectionTask
 from app.models.collection_task_candidate import CollectionTaskCandidate
 from app.models.email_log import EmailLog
-from app.models.link_knowledge_base import LinkKnowledgeBase, LinkScriptJob
+from app.models.email_reply import EmailReply
+from app.models.influencer_followup import InfluencerFollowup
+from app.models.knowledge import KnowledgeBase, KnowledgeChunk, KnowledgeDocument
+from app.models.link_import_batch import LinkImportBatch
+from app.models.link_knowledge_base import LinkKnowledgeBase, LinkKnowledgeChunk, LinkScriptJob, LinkScriptResult
+from app.models.manual_outreach_email import ManualOutreachEmail
+from app.models.message_template import MessageTemplate
+from app.models.outreach_campaign_recipient import OutreachCampaignRecipient
+from app.models.outreach_email_campaign import OutreachEmailCampaign
 from app.models.outreach_send_queue import OutreachSendQueueItem
+from app.models.product_influencer import ProductInfluencer
+from app.models.product_influencer_source import ProductInfluencerSource
 from app.models.tenant import Product, ProductMember, User, WorkspaceMember
 from app.schemas.tenant import ProductCreate, ProductRead, ProductUpdate, UserRead
 from app.services.product_visibility import infer_test_flags, is_product_visible
@@ -207,10 +218,85 @@ class TenantService:
             product.is_default = True
         elif payload.get("is_default") is False or (payload.get("is_default") is True and not is_admin):
             product.is_default = False
+        if "is_hidden" in payload and payload["is_hidden"] is not None and is_admin:
+            product.is_hidden = bool(payload["is_hidden"])
+        if "is_archived" in payload and payload["is_archived"] is not None and is_admin:
+            product.is_archived = bool(payload["is_archived"])
 
         await db.commit()
         await db.refresh(product)
         return ProductRead.model_validate(product)
+
+    @staticmethod
+    async def _purge_product_related_data(db: AsyncSession, product: Product) -> None:
+        product_id = product.id
+        product_influencer_ids = (
+            await db.execute(select(ProductInfluencer.id).where(ProductInfluencer.product_id == product_id))
+        ).scalars().all()
+        task_ids = (
+            await db.execute(select(CollectionTask.id).where(CollectionTask.product_id == product_id))
+        ).scalars().all()
+        link_kb_ids = (
+            await db.execute(select(LinkKnowledgeBase.id).where(LinkKnowledgeBase.product_id == product_id))
+        ).scalars().all()
+        queue_ids = (
+            await db.execute(select(OutreachSendQueueItem.id).where(OutreachSendQueueItem.product_id == product_id))
+        ).scalars().all()
+
+        if queue_ids:
+            await db.execute(
+                delete(OutreachSendQueueItem).where(OutreachSendQueueItem.parent_queue_id.in_(queue_ids))
+            )
+            await db.execute(delete(OutreachSendQueueItem).where(OutreachSendQueueItem.id.in_(queue_ids)))
+
+        await db.execute(delete(EmailReply).where(EmailReply.product_id == product_id))
+        await db.execute(delete(EmailLog).where(EmailLog.product_id == product_id))
+        await db.execute(delete(ManualOutreachEmail).where(ManualOutreachEmail.product_id == product_id))
+
+        if product_influencer_ids:
+            await db.execute(
+                delete(OutreachCampaignRecipient).where(
+                    OutreachCampaignRecipient.product_influencer_id.in_(product_influencer_ids)
+                )
+            )
+            await db.execute(
+                delete(InfluencerFollowup).where(InfluencerFollowup.product_influencer_id.in_(product_influencer_ids))
+            )
+            await db.execute(
+                delete(ProductInfluencerSource).where(
+                    ProductInfluencerSource.product_influencer_id.in_(product_influencer_ids)
+                )
+            )
+            await db.execute(
+                delete(LinkScriptResult).where(LinkScriptResult.influencer_id.in_(product_influencer_ids))
+            )
+
+        if link_kb_ids:
+            await db.execute(delete(LinkScriptJob).where(LinkScriptJob.link_knowledge_base_id.in_(link_kb_ids)))
+            await db.execute(
+                delete(LinkKnowledgeChunk).where(LinkKnowledgeChunk.link_knowledge_base_id.in_(link_kb_ids))
+            )
+
+        await db.execute(delete(LinkScriptJob).where(LinkScriptJob.product_id == product_id))
+        await db.execute(delete(LinkKnowledgeBase).where(LinkKnowledgeBase.product_id == product_id))
+        await db.execute(delete(OutreachEmailCampaign).where(OutreachEmailCampaign.product_id == product_id))
+        await db.execute(delete(MessageTemplate).where(MessageTemplate.product_id == product_id))
+        await db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.product_id == product_id))
+        await db.execute(delete(KnowledgeDocument).where(KnowledgeDocument.product_id == product_id))
+        await db.execute(delete(KnowledgeBase).where(KnowledgeBase.product_id == product_id))
+        await db.execute(
+            delete(CollectionTaskCandidate).where(
+                or_(
+                    CollectionTaskCandidate.product_id == product_id,
+                    CollectionTaskCandidate.task_id.in_(task_ids or [-1]),
+                    CollectionTaskCandidate.product_influencer_id.in_(product_influencer_ids or [-1]),
+                )
+            )
+        )
+        await db.execute(delete(ProductInfluencer).where(ProductInfluencer.product_id == product_id))
+        await db.execute(delete(CollectionTask).where(CollectionTask.product_id == product_id))
+        await db.execute(delete(LinkImportBatch).where(LinkImportBatch.product_id == product_id))
+        await db.execute(delete(ProductMember).where(ProductMember.product_id == product_id))
 
     @staticmethod
     async def delete_product(
@@ -222,11 +308,11 @@ class TenantService:
     ) -> None:
         product = await db.get(Product, product_id)
         if not product:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="品牌不存在或已被删除")
 
         if not is_admin:
             if TenantService._is_system_default_product(product):
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to system default brand")
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权删除系统默认品牌")
             membership = await db.execute(
                 select(ProductMember.id).where(
                     ProductMember.product_id == product.id,
@@ -234,18 +320,15 @@ class TenantService:
                 )
             )
             if membership.scalar_one_or_none() is None:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this product")
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权删除该品牌")
 
-        await db.execute(
-            delete(OutreachSendQueueItem).where(OutreachSendQueueItem.product_id == product.id)
-        )
-        await db.execute(delete(EmailLog).where(EmailLog.product_id == product.id))
-        await db.execute(delete(LinkScriptJob).where(LinkScriptJob.product_id == product.id))
-        await db.execute(delete(LinkKnowledgeBase).where(LinkKnowledgeBase.product_id == product.id))
-        await db.execute(
-            delete(CollectionTaskCandidate).where(CollectionTaskCandidate.product_id == product.id)
-        )
-        await db.execute(delete(CollectionTask).where(CollectionTask.product_id == product.id))
-        await db.execute(delete(ProductMember).where(ProductMember.product_id == product.id))
-        await db.delete(product)
-        await db.commit()
+        try:
+            await TenantService._purge_product_related_data(db, product)
+            await db.delete(product)
+            await db.commit()
+        except IntegrityError as exc:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="删除失败，品牌仍有关联业务数据未能清理，请稍后重试或联系管理员。",
+            ) from exc

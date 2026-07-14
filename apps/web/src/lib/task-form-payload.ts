@@ -37,6 +37,7 @@ export type TaskFormValues = {
   country: string;
   category: string;
   discovery_limit: string;
+  max_runtime_minutes: string;
   batch_round_enabled: boolean;
   batch_total_limit: string;
   batch_round_size: string;
@@ -82,6 +83,7 @@ const emptyForm: TaskFormValues = {
   country: "",
   category: "",
   discovery_limit: "50",
+  max_runtime_minutes: "60",
   batch_round_enabled: false,
   batch_total_limit: "",
   batch_round_size: "50",
@@ -452,6 +454,10 @@ function validateQualityAndDelivery(values: TaskFormValues): string | null {
   if (!Number.isFinite(discoveryLimit) || discoveryLimit < 1 || discoveryLimit > 10000) {
     return "采集数量上限需在 1-10000 之间";
   }
+  const maxRuntimeMinutes = Number(values.max_runtime_minutes);
+  if (!Number.isInteger(maxRuntimeMinutes) || maxRuntimeMinutes < 5 || maxRuntimeMinutes > 1440) {
+    return "最长运行时间需设置为 5-1440 分钟";
+  }
   if (values.batch_round_enabled) {
     const total = Number(values.batch_total_limit);
     const roundSize = Number(values.batch_round_size);
@@ -582,38 +588,7 @@ export function validateForm(values: TaskFormValues, platformCapabilities: Platf
       return "竞品商品发现需填写 Amazon 链接、ASIN 或商品关键词";
     }
   }
-  if (values.email_enabled && splitLines(values.email_recipientsText).length === 0) {
-    return "启用邮件发送时请填写收件人邮箱";
-  }
-  const discoveryLimit = Number(values.discovery_limit);
-  if (!Number.isFinite(discoveryLimit) || discoveryLimit < 1 || discoveryLimit > 10000) {
-    return "采集数量上限需在 1-10000 之间";
-  }
-  const minEngagementText = values.min_engagement_rate.trim();
-  if (minEngagementText) {
-    const minEngagement = Number(minEngagementText);
-    if (!Number.isFinite(minEngagement) || minEngagement < 0 || minEngagement > 100) {
-      return "最低互动率需在 0-100 之间";
-    }
-  }
-  const minFollowers = values.min_followers_count.trim();
-  const maxFollowers = values.max_followers_count.trim();
-  if (minFollowers) {
-    const n = Number(minFollowers);
-    if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
-      return "最低粉丝数需为非负整数";
-    }
-  }
-  if (maxFollowers) {
-    const n = Number(maxFollowers);
-    if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
-      return "最高粉丝数需为非负整数";
-    }
-  }
-  if (minFollowers && maxFollowers && Number(minFollowers) > Number(maxFollowers)) {
-    return "最低粉丝数不能大于最高粉丝数";
-  }
-  return null;
+  return validateQualityAndDelivery(values);
 }
 
 function parseOptionalInt(text: string): number | null {
@@ -678,10 +653,14 @@ function withBatchRoundPayload(
   payload: CollectionTaskPayload,
   values: TaskFormValues,
 ): CollectionTaskPayload {
-  if (!values.batch_round_enabled) return payload;
+  const runtimePayload = {
+    ...payload,
+    max_runtime_minutes: Number(values.max_runtime_minutes) || 60,
+  };
+  if (!values.batch_round_enabled) return runtimePayload;
   const roundCount = calculateBatchRoundCount(values);
   return {
-    ...payload,
+    ...runtimePayload,
     batch_round_enabled: true,
     batch_total_limit: Number(values.batch_total_limit),
     batch_round_size: Number(values.batch_round_size),
@@ -884,6 +863,7 @@ export function taskToFormValues(task: CollectionTask): TaskFormValues {
     country: task.country ?? "",
     category: task.category ?? "",
     discovery_limit: String(task.discovery_limit ?? 100),
+    max_runtime_minutes: String(task.max_runtime_minutes ?? 60),
     batch_round_enabled: Boolean(task.batch_round_count && !task.parent_task_id),
     batch_total_limit: task.batch_round_count && !task.parent_task_id ? String(task.discovery_limit ?? "") : "",
     batch_round_size:

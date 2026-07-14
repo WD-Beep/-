@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { ChevronDown, Loader2, List, Mail, Pause, Pencil, Play, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { ChevronDown, Loader2, List, Mail, Pause, Pencil, Play, Plus, RefreshCw, Square, Trash2, X } from "lucide-react";
 
 import { AdminShell } from "@/components/layout/admin-shell";
 import { useActiveProductId } from "@/components/providers/product-provider";
@@ -46,6 +46,7 @@ import {
   isCollectionTaskRunningStale,
   isCollectionTaskSettled,
   pauseCollectionTask,
+  stopCollectionTask,
   resumeCollectionTask,
   runCollectionTask,
   runCollectionTaskBatch,
@@ -397,6 +398,9 @@ export function CollectionTasksPanel() {
   const prevStatusRef = useRef<Map<number, CollectionTaskStatus>>(new Map());
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pageAlertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const loadRequestIdRef = useRef(0);
+  const loadAbortRef = useRef<AbortController | null>(null);
+  const loadInflightRef = useRef(false);
 
   const showToast = useCallback((next: TaskToast) => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -405,15 +409,21 @@ export function CollectionTasksPanel() {
   }, []);
 
   useEffect(() => {
+    let active = true;
     void fetchPlatformCapabilities()
       .then((caps) => {
+        if (!active) return;
         setMaxRunningTasks(Math.max(1, caps.collection_max_running_tasks ?? 2));
         setStaleAfterSeconds(Math.max(30, caps.collection_running_stale_seconds ?? 180));
       })
       .catch(() => {
+        if (!active) return;
         setMaxRunningTasks(2);
         setStaleAfterSeconds(180);
       });
+    return () => {
+      active = false;
+    };
   }, []);
 
   const applyTaskList = useCallback((items: CollectionTask[], totalCount: number, pages = 1) => {
@@ -427,18 +437,32 @@ export function CollectionTasksPanel() {
   }, []);
 
   const loadTasks = useCallback(async (options?: { silent?: boolean }) => {
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
+    const requestId = ++loadRequestIdRef.current;
+    loadInflightRef.current = true;
+
     if (!options?.silent) {
       setLoading(true);
+      setError(null);
     }
-    setError(null);
     try {
       const showLegacyBatches = effectivenessFilter === "test_history";
       const [data, batchData] = await Promise.all([
-        fetchCollectionTasks(page, pageSize, { task_view: effectivenessFilter }),
+        fetchCollectionTasks(page, pageSize, {
+          task_view: effectivenessFilter,
+          signal: controller.signal,
+        }),
         showLegacyBatches
-          ? fetchLinkImportBatches(1, 20).catch(() => ({ items: [] as LinkImportBatch[], total: 0 }))
+          ? fetchLinkImportBatches(1, 20, { signal: controller.signal }).catch((err) => {
+              if (controller.signal.aborted) throw err;
+              return { items: [] as LinkImportBatch[], total: 0 };
+            })
           : Promise.resolve({ items: [] as LinkImportBatch[], total: 0 }),
       ]);
+      if (controller.signal.aborted || requestId !== loadRequestIdRef.current) return;
+
       const filteredLegacy = batchData.items.filter((batch) =>
         matchesLegacyBatchFilter(effectivenessFilter, batch),
       );
@@ -450,10 +474,17 @@ export function CollectionTasksPanel() {
         setPage((current) => Math.max(1, current - 1));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "加载任务列表失败");
-    } finally {
+      if (controller.signal.aborted || requestId !== loadRequestIdRef.current) return;
+      if (err instanceof DOMException && err.name === "AbortError") return;
       if (!options?.silent) {
-        setLoading(false);
+        setError(err instanceof Error ? err.message : "加载任务列表失败");
+      }
+    } finally {
+      if (requestId === loadRequestIdRef.current) {
+        loadInflightRef.current = false;
+        if (!options?.silent) {
+          setLoading(false);
+        }
       }
     }
   }, [applyTaskList, effectivenessFilter, page, pageSize]);
@@ -482,6 +513,9 @@ export function CollectionTasksPanel() {
     queueMicrotask(() => {
       void loadTasks();
     });
+    return () => {
+      loadAbortRef.current?.abort();
+    };
   }, [loadTasks, productId]);
 
   useEffect(() => {
@@ -499,6 +533,7 @@ export function CollectionTasksPanel() {
 
   useEffect(() => {
     return () => {
+      loadAbortRef.current?.abort();
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
       if (pageAlertTimerRef.current) clearTimeout(pageAlertTimerRef.current);
     };
@@ -525,10 +560,11 @@ export function CollectionTasksPanel() {
 
   useEffect(() => {
     if (!hasRunningTasks) return;
-    const tick = () => setNowMs(Date.now());
-    tick();
-    const clockId = window.setInterval(tick, 1000);
+    const clockId = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
     const pollId = window.setInterval(() => {
+      if (loadInflightRef.current) return;
       void loadTasks({ silent: true });
     }, COLLECTION_TASK_POLL_INTERVAL_MS);
     return () => {
@@ -678,6 +714,10 @@ export function CollectionTasksPanel() {
   }
 
   async function handlePause(task: CollectionTask) {
+    const confirmed = window.confirm(
+      "确定暂停该采集任务吗？当前已采集的数据会保存入库。",
+    );
+    if (!confirmed) return;
     setActionTaskId(task.id);
     setMessage(null);
     setError(null);
@@ -690,6 +730,32 @@ export function CollectionTasksPanel() {
       await loadTasks({ silent: true });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : "暂停采集失败";
+      showToast({ tone: "error", message: errMsg });
+      setError(errMsg);
+      await loadTasks({ silent: true });
+    } finally {
+      setActionTaskId(null);
+    }
+  }
+
+  async function handleStop(task: CollectionTask) {
+    const confirmed = window.confirm(
+      "确定停止这个采集任务吗？\n\n已经采集成功的数据会保留并入库，正在执行的轮次和后续轮次会结束，停止后不会自动重试。",
+    );
+    if (!confirmed) return;
+    setActionTaskId(task.id);
+    setMessage(null);
+    setError(null);
+    try {
+      const stopped = await stopCollectionTask(task.id);
+      setTasks((prev) => prev.map((item) => (item.id === task.id ? { ...item, ...stopped } : item)));
+      setCandidatesTask((prev) => (prev?.id === task.id ? { ...prev, ...stopped } : prev));
+      const stoppedMessage = stopped.status_summary ?? "任务已停止，已采集的数据已经保留入库。";
+      setMessage(stoppedMessage);
+      showToast({ tone: "success", message: stoppedMessage });
+      await loadTasks({ silent: true });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : "停止采集失败";
       showToast({ tone: "error", message: errMsg });
       setError(errMsg);
       await loadTasks({ silent: true });
@@ -1372,6 +1438,7 @@ export function CollectionTasksPanel() {
                     const isBusy = actionTaskId === task.id;
                     const isRunning = isCollectionTaskRunning(task);
                     const isPaused = isCollectionTaskPaused(task);
+                    const isQueued = isCollectionTaskQueued(task);
                     const isStaleRunning = isRunning && isCollectionTaskRunningStale(task);
                     const runningElapsedMs = isRunning ? getCollectionTaskRunningElapsedMs(task, nowMs) : 0;
                     const runBlocked = isRunning && !isStaleRunning;
@@ -1438,6 +1505,7 @@ export function CollectionTasksPanel() {
                             {formatPercent(task.min_engagement_rate)}
                             {followerRange ? ` · ${followerRange}` : ""}
                             {keywordFilters ? ` · ${keywordFilters}` : ""}
+                            {task.max_runtime_minutes ? ` · 最长 ${task.max_runtime_minutes} 分钟` : ""}
                           </div>
                           {shouldShowCollectionTaskErrorMessage(task) ? (
                             <p
@@ -1572,27 +1640,16 @@ export function CollectionTasksPanel() {
                                 </Button>
                               </>
                             ) : null}
-                            {isRunning && !isStaleRunning && !isBatchParent ? (
+                            {(isRunning || isQueued || isPaused) ? (
                               <Button
                                 size="sm"
                                 variant="ghost"
-                                className={COLLECTION_TASK_TABLE_LAYOUT.actionButton}
+                                className={`${COLLECTION_TASK_TABLE_LAYOUT.actionButton} text-destructive hover:bg-destructive/10 hover:text-destructive`}
                                 disabled={isBusy}
-                                onClick={() => void handlePause(task)}
-                                title="暂停采集，保留已采集数据和进度"
+                                onClick={() => void handleStop(task)}
+                                title="停止采集并保留已入库数据"
                               >
-                                {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Pause className="h-4 w-4" />}
-                              </Button>
-                            ) : isPaused && !isBatchParent ? (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className={COLLECTION_TASK_TABLE_LAYOUT.actionButton}
-                                disabled={isBusy}
-                                onClick={() => void handleResume(task)}
-                                title="继续采集，从上次进度恢复"
-                              >
-                                {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                                {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4 fill-current" />}
                               </Button>
                             ) : null}
                             <Button
@@ -1615,6 +1672,29 @@ export function CollectionTasksPanel() {
                                 <Play className="h-4 w-4" />
                               )}
                             </Button>
+                            {(isRunning || isQueued) && !isBatchParent ? (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className={COLLECTION_TASK_TABLE_LAYOUT.actionButton}
+                                disabled={isBusy}
+                                onClick={() => void handlePause(task)}
+                                title="暂停采集，保留已采集数据和进度"
+                              >
+                                {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Pause className="h-4 w-4" />}
+                              </Button>
+                            ) : isPaused && !isBatchParent ? (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className={COLLECTION_TASK_TABLE_LAYOUT.actionButton}
+                                disabled={isBusy}
+                                onClick={() => void handleResume(task)}
+                                title="继续采集，从上次进度恢复"
+                              >
+                                {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                              </Button>
+                            ) : null}
                             <Button
                               size="sm"
                               variant="ghost"

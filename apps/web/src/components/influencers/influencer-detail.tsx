@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { AdminShell } from "@/components/layout/admin-shell";
+import { AdminBackButton } from "@/components/admin/admin-crud";
 import { ErrorAlert, SuccessAlert } from "@/components/shared/page-states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -64,6 +65,9 @@ const FOLLOW_STATUS_OPTIONS = [
 
 type InfluencerDetailProps = {
   initial: Influencer;
+  embedded?: boolean;
+  backFallback?: string;
+  onEdit?: () => void;
 };
 
 function formatNumber(value: number | null | undefined): string {
@@ -244,7 +248,7 @@ function SectionCard({
   );
 }
 
-export function InfluencerDetail({ initial }: InfluencerDetailProps) {
+export function InfluencerDetail({ initial, embedded = false, backFallback = "/influencers", onEdit }: InfluencerDetailProps) {
   const router = useRouter();
   const [influencer, setInfluencer] = useState(initial);
   const [followStatus, setFollowStatus] = useState(initial.follow_status ?? "new");
@@ -392,15 +396,22 @@ export function InfluencerDetail({ initial }: InfluencerDetailProps) {
     }
   }
 
-  return (
-    <AdminShell title="红人详情" description={`红人详情 · ${displayName}`}>
+  const toolbar = (
+    <>
       <div className="mb-4 flex flex-wrap items-center gap-3">
-        <Button variant="outline" asChild>
-          <Link href="/influencers">
-            <ArrowLeft className="h-4 w-4" />
-            返回列表
-          </Link>
-        </Button>
+        {!embedded ? (
+          <Button variant="outline" asChild>
+            <Link href={backFallback}>
+              <ArrowLeft className="h-4 w-4" />
+              返回列表
+            </Link>
+          </Button>
+        ) : null}
+        {onEdit ? (
+          <Button variant="outline" onClick={onEdit}>
+            编辑红人
+          </Button>
+        ) : null}
         <Button variant="default" onClick={handleAnalyze} disabled={analyzing || saving || refreshingContact}>
           {analyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
           {analyzing ? "分析中..." : "重新 AI 分析"}
@@ -425,7 +436,7 @@ export function InfluencerDetail({ initial }: InfluencerDetailProps) {
       {message ? <SuccessAlert message={message} className="mb-4" /> : null}
       {error ? <ErrorAlert message={error} className="mb-4" /> : null}
 
-      <div className="space-y-6">
+      <div className="space-y-6 pb-8">
         {/* 1. 基础信息 */}
         <SectionCard title="基础信息" description="红人账号基本资料">
           <div className="flex flex-col gap-6 lg:flex-row">
@@ -1006,6 +1017,20 @@ export function InfluencerDetail({ initial }: InfluencerDetailProps) {
           </div>
         </SectionCard>
       </div>
+    </>
+  );
+
+  if (embedded) {
+    return toolbar;
+  }
+
+  return (
+    <AdminShell
+      title="红人详情"
+      description={`红人详情 · ${displayName}`}
+      actions={<AdminBackButton fallbackHref={backFallback} />}
+    >
+      {toolbar}
     </AdminShell>
   );
 }

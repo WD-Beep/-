@@ -243,6 +243,32 @@ test("collection tasks support pause and resume without resetting progress", () 
   assert.match(panelSource, /继续采集，从上次进度恢复/);
 });
 
+test("collection tasks expose runtime limits and stop-with-results controls", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const apiSource = readFileSync(fileURLToPath(new URL("../src/lib/api.ts", import.meta.url)), "utf8");
+  const panelSource = readFileSync(
+    fileURLToPath(new URL("../src/components/collection-tasks/collection-tasks-panel.tsx", import.meta.url)),
+    "utf8",
+  );
+  const formSource = readFileSync(
+    fileURLToPath(new URL("../src/components/collection-tasks/task-form-dialog.tsx", import.meta.url)),
+    "utf8",
+  );
+  const payloadSource = readFileSync(
+    fileURLToPath(new URL("../src/lib/task-form-payload.ts", import.meta.url)),
+    "utf8",
+  );
+
+  assert.match(apiSource, /stopCollectionTask/);
+  assert.match(apiSource, /collection-tasks\/\$\{id\}\/stop/);
+  assert.match(panelSource, /停止采集并保留已入库数据/);
+  assert.match(panelSource, /后续轮次会结束/);
+  assert.match(formSource, /最长运行时间（分钟）/);
+  assert.match(formSource, /到时自动停止，保留并入库已经采集成功的数据/);
+  assert.match(payloadSource, /max_runtime_minutes/);
+});
+
 test("stale recoverable running task is flagged", () => {
   const staleTask = task({ stale: true, recoverable: true });
   assert.equal(isCollectionTaskRunningStale(staleTask), true);

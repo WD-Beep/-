@@ -5,8 +5,10 @@ import "./register-path-aliases.ts";
 
 const {
   buildAdminDashboardView,
+  buildSalespersonBrandProgressView,
   buildSalesWorkbenchDetailView,
   buildSalesWorkbenchView,
+  deriveSalespersonProgressStatus,
   filterAdminRows,
   formatAdminDate,
   formatAdminNumber,
@@ -16,6 +18,7 @@ const {
   getReplyProcessingStatusMeta,
   getProductStatusMeta,
   isOutreachInsufficient,
+  UNASSIGNED_SALESPERSON_KEY,
 } = await import("@/components/admin/admin-ui-helpers");
 
 test("admin helpers localize technical statuses for operators", () => {
@@ -403,4 +406,100 @@ test("sales workbench detail view groups task and outreach progress by brand", (
   assert.equal(detail.brandProgress[0].influencerCount, 1);
   assert.equal(detail.brandProgress[0].exceptionCount, 0);
   assert.equal(detail.brandProgress[0].outreachInsufficient, true);
+});
+
+test("salesperson brand progress view groups products by owner and unassigned bucket", () => {
+  const rows = buildSalespersonBrandProgressView(
+    [
+      {
+        id: 1,
+        name: "Alpha",
+        subject: null,
+        slug: "alpha",
+        created_at: "2026-07-01T00:00:00.000Z",
+        updated_at: "2026-07-10T00:00:00.000Z",
+        members: [{ user_id: 2, username: "alice", role: "owner" }],
+        owner_names: ["alice"],
+        collection_task_count: 1,
+        influencer_count: 2,
+        email_count: 3,
+        reply_count: 0,
+        status: "active",
+      },
+      {
+        id: 2,
+        name: "Beta",
+        subject: null,
+        slug: "beta",
+        created_at: "2026-07-02T00:00:00.000Z",
+        updated_at: "2026-07-11T00:00:00.000Z",
+        members: [],
+        owner_names: [],
+        collection_task_count: 0,
+        influencer_count: 0,
+        email_count: 0,
+        reply_count: 0,
+        status: "active",
+      },
+    ],
+    [
+      {
+        id: 2,
+        username: "alice",
+        display_name: "Alice",
+        email: null,
+        role: "sales",
+        is_admin: false,
+        is_active: true,
+        product_count: 1,
+        bound_products: [],
+        collection_task_count: 0,
+        collection_success_count: 0,
+        collection_failed_count: 0,
+        influencer_count: 0,
+        email_count: 0,
+        email_failed_count: 0,
+        reply_count: 0,
+        pending_reply_count: 0,
+        last_active_at: null,
+        created_at: null,
+        updated_at: null,
+        status: "active",
+      },
+    ],
+  );
+
+  const alice = rows.find((row) => row.key === "alice");
+  const unassigned = rows.find((row) => row.key === UNASSIGNED_SALESPERSON_KEY);
+
+  assert.equal(alice?.brandCount, 1);
+  assert.equal(alice?.pendingFollowUpCount, 1);
+  assert.equal(alice?.progressStatus.label, "需跟进");
+  assert.equal(unassigned?.brandCount, 1);
+  assert.equal(rows[0].key, UNASSIGNED_SALESPERSON_KEY);
+});
+
+test("salesperson progress status reflects reply rate thresholds", () => {
+  assert.equal(
+    deriveSalespersonProgressStatus({
+      brandCount: 2,
+      taskCount: 4,
+      influencerCount: 10,
+      emailCount: 10,
+      replyCount: 4,
+      pendingFollowUpCount: 0,
+    }).label,
+    "完成较好",
+  );
+  assert.equal(
+    deriveSalespersonProgressStatus({
+      brandCount: 1,
+      taskCount: 0,
+      influencerCount: 0,
+      emailCount: 0,
+      replyCount: 0,
+      pendingFollowUpCount: 0,
+    }).label,
+    "未开始",
+  );
 });

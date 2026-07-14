@@ -105,6 +105,49 @@ function isNavActive(pathname: string, href: string) {
 }
 
 const PRODUCT_LOAD_RETRY_DELAY_MS = 420;
+const PRODUCT_OPTIONS_MEMORY_CACHE_TTL_MS = 5 * 60 * 1000;
+
+type ProductOptionsMemoryCache = {
+  userId?: number | null;
+  items: TenantProduct[];
+  loadedAt: number;
+};
+
+let productOptionsMemoryCache: ProductOptionsMemoryCache | null = null;
+let productOptionsInflight: Promise<TenantProduct[]> | null = null;
+let productOptionsInflightUserId: number | null = null;
+
+function isSameProductCacheUser(left?: number | null, right?: number | null) {
+  return (left ?? null) === (right ?? null);
+}
+
+function readFreshProductOptionsMemoryCache(userId?: number | null): TenantProduct[] | null {
+  if (!productOptionsMemoryCache) return null;
+  if (!isSameProductCacheUser(productOptionsMemoryCache.userId, userId)) return null;
+  if (Date.now() - productOptionsMemoryCache.loadedAt > PRODUCT_OPTIONS_MEMORY_CACHE_TTL_MS) return null;
+  return productOptionsMemoryCache.items;
+}
+
+async function fetchTenantProductsShared(userId?: number | null, force = false) {
+  const cachedItems = force ? null : readFreshProductOptionsMemoryCache(userId);
+  if (cachedItems) return cachedItems;
+  if (!force && productOptionsInflight && isSameProductCacheUser(productOptionsInflightUserId, userId)) {
+    return productOptionsInflight;
+  }
+
+  productOptionsInflightUserId = userId ?? null;
+  productOptionsInflight = fetchTenantProductsWithRetry()
+    .then((items) => {
+      const preparedItems = prepareTenantProductOptions(items);
+      productOptionsMemoryCache = { userId, items: preparedItems, loadedAt: Date.now() };
+      return preparedItems;
+    })
+    .finally(() => {
+      productOptionsInflight = null;
+      productOptionsInflightUserId = null;
+    });
+  return productOptionsInflight;
+}
 
 function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -189,17 +232,27 @@ export function Sidebar() {
     [productId, scopedProducts],
   );
 
-  const loadProducts = useCallback(async (sessionForCache: AuthSession | null = getStoredAuthSession()) => {
+  const loadProducts = useCallback(async (
+    sessionForCache: AuthSession | null = getStoredAuthSession(),
+    options?: { force?: boolean },
+  ) => {
     const cacheUserId = sessionForCache?.userId;
-    const cachedItems = sessionForCache
+    const memoryItems = options?.force ? null : readFreshProductOptionsMemoryCache(cacheUserId);
+    const cachedItems = memoryItems ?? (sessionForCache
       ? prepareTenantProductOptions(readCachedTenantProducts(cacheUserId))
-      : [];
+      : []);
     if (cachedItems.length > 0) {
       setProducts(cachedItems);
+      setProductsLoading(false);
+    } else {
+      setProductsLoading(true);
     }
-    setProductsLoading(true);
+    if (memoryItems && !options?.force) {
+      setProductLoadError(null);
+      return memoryItems;
+    }
     try {
-      const items = prepareTenantProductOptions(await fetchTenantProductsWithRetry());
+      const items = await fetchTenantProductsShared(cacheUserId, options?.force);
       setProducts(items);
       writeCachedTenantProducts(items, cacheUserId);
       setProductLoadError(null);
@@ -335,7 +388,7 @@ export function Sidebar() {
   }
 
   async function handleProductCreated(product: TenantProduct) {
-    await loadProducts();
+    await loadProducts(getStoredAuthSession(), { force: true });
     setActiveProductId(product.id);
     router.refresh();
     showToast("已创建并切换到新产品/品牌");

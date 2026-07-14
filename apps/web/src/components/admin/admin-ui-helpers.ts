@@ -109,6 +109,14 @@ const replyProcessingStatuses: Record<string, StatusMeta> = {
   ignored: { label: "无需处理", tone: "muted" },
 };
 
+const adminWorkStatuses: Record<string, StatusMeta> = {
+  pending: { label: "待处理", tone: "warning" },
+  reminded: { label: "已提醒", tone: "info" },
+  in_progress: { label: "子账号处理中", tone: "info" },
+  handled: { label: "已处理", tone: "success" },
+  no_action: { label: "无需处理", tone: "muted" },
+};
+
 const replyIntentStatuses: Record<string, StatusMeta> = {
   positive: { label: "有意向", tone: "success" },
   interested: { label: "有意向", tone: "success" },
@@ -163,6 +171,10 @@ export function getReplyProcessingStatusMeta(status: string | null | undefined):
   return getStatusMeta(status, replyProcessingStatuses);
 }
 
+export function getAdminWorkStatusMeta(status: string | null | undefined): StatusMeta {
+  return getStatusMeta(status, adminWorkStatuses);
+}
+
 export function getReplyIntentStatusMeta(status: string | null | undefined): StatusMeta {
   return getStatusMeta(status, replyIntentStatuses);
 }
@@ -176,6 +188,14 @@ export function getRoleLabel(role: string | null | undefined): string {
   if (role === "sales") return "业务员";
   if (!role) return "暂无";
   return role;
+}
+
+export function formatSalespersonDisplay(user: {
+  display_name?: string | null;
+  username: string;
+}): string {
+  const name = user.display_name?.trim();
+  return name ? `${name} / ${user.username}` : user.username;
 }
 
 export function getPlatformLabel(platform: string | null | undefined): string {
@@ -290,6 +310,191 @@ export type SalesBrandProgress = {
   updatedAt: string | null;
   outreachInsufficient: boolean;
 };
+
+export const UNASSIGNED_SALESPERSON_KEY = "__unassigned__";
+export const UNASSIGNED_SALESPERSON_LABEL = "未分配";
+
+export type EnrichedBrandProduct = AdminProduct & {
+  operatorStatus: string;
+  pendingFollowUp: boolean;
+};
+
+export type SalespersonProgressRow = {
+  key: string;
+  name: string;
+  userId: number | null;
+  brands: EnrichedBrandProduct[];
+  brandCount: number;
+  taskCount: number;
+  influencerCount: number;
+  emailCount: number;
+  replyCount: number;
+  pendingFollowUpCount: number;
+  replyRate: number | null;
+  updatedAt: string | null;
+  progressStatus: StatusMeta;
+};
+
+export function deriveBrandOperatorStatus(product: AdminProduct): StatusMeta {
+  if (product.reply_count > 0) return { label: "已有回复", tone: "success" };
+  if (product.email_count > 0) return { label: "待跟进", tone: "warning" };
+  if (product.collection_task_count > 0) return { label: "采集中", tone: "info" };
+  return getProductStatusMeta(product.status);
+}
+
+export function isBrandPendingFollowUp(product: AdminProduct): boolean {
+  return product.email_count > 0 && product.reply_count === 0;
+}
+
+export function deriveSalespersonProgressStatus(row: {
+  brandCount: number;
+  taskCount: number;
+  influencerCount: number;
+  emailCount: number;
+  replyCount: number;
+  pendingFollowUpCount: number;
+}): StatusMeta {
+  if (row.brandCount === 0) return { label: "暂无品牌", tone: "muted" };
+  const replyRate = row.emailCount > 0 ? row.replyCount / row.emailCount : 0;
+  if (replyRate >= 0.3 && row.replyCount > 0) return { label: "完成较好", tone: "success" };
+  if (row.replyCount > 0) return { label: "已有回复", tone: "success" };
+  if (row.pendingFollowUpCount > 0) return { label: "需跟进", tone: "warning" };
+  if (row.taskCount > 0 || row.emailCount > 0 || row.influencerCount > 0) return { label: "进行中", tone: "info" };
+  return { label: "未开始", tone: "muted" };
+}
+
+function getProductOwnerUsername(product: AdminProduct): string | null {
+  if (product.owner_names.length > 0) return product.owner_names[0];
+  const owner = product.members.find((member) => member.role === "owner");
+  if (owner) return owner.username;
+  const assignee = product.members.find((member) => member.role === "sales" || member.role === "member");
+  return assignee?.username ?? null;
+}
+
+function aggregateSalespersonRow(
+  key: string,
+  name: string,
+  userId: number | null,
+  brands: EnrichedBrandProduct[],
+): SalespersonProgressRow {
+  const taskCount = brands.reduce((sum, brand) => sum + brand.collection_task_count, 0);
+  const influencerCount = brands.reduce((sum, brand) => sum + brand.influencer_count, 0);
+  const emailCount = brands.reduce((sum, brand) => sum + brand.email_count, 0);
+  const replyCount = brands.reduce((sum, brand) => sum + brand.reply_count, 0);
+  const pendingFollowUpCount = brands.filter((brand) => brand.pendingFollowUp).length;
+  const updatedAt = brands.reduce<string | null>((latest, brand) => {
+    const candidate = brand.updated_at ?? brand.created_at;
+    return isNewer(candidate, latest) ? candidate : latest;
+  }, null);
+  const metrics = {
+    brandCount: brands.length,
+    taskCount,
+    influencerCount,
+    emailCount,
+    replyCount,
+    pendingFollowUpCount,
+  };
+
+  return {
+    key,
+    name,
+    userId,
+    brands,
+    brandCount: brands.length,
+    taskCount,
+    influencerCount,
+    emailCount,
+    replyCount,
+    pendingFollowUpCount,
+    replyRate: emailCount > 0 ? replyCount / emailCount : null,
+    updatedAt,
+    progressStatus: deriveSalespersonProgressStatus(metrics),
+  };
+}
+
+export function buildSalespersonBrandProgressView(products: AdminProduct[], users: AdminUser[] = []): SalespersonProgressRow[] {
+  const userByUsername = new Map(users.map((user) => [user.username, user]));
+  const groups = new Map<string, EnrichedBrandProduct[]>();
+
+  for (const product of products) {
+    const owner = getProductOwnerUsername(product);
+    const key = owner ?? UNASSIGNED_SALESPERSON_KEY;
+    const enriched: EnrichedBrandProduct = {
+      ...product,
+      operatorStatus: deriveBrandOperatorStatus(product).label,
+      pendingFollowUp: isBrandPendingFollowUp(product),
+    };
+    const list = groups.get(key) ?? [];
+    list.push(enriched);
+    groups.set(key, list);
+  }
+
+  for (const user of users.filter((item) => item.role === "sales")) {
+    if (!groups.has(user.username)) groups.set(user.username, []);
+  }
+
+  const productById = new Map(products.map((product) => [product.id, product]));
+  for (const user of users.filter((item) => item.role === "sales")) {
+    const list = groups.get(user.username) ?? [];
+    const existingIds = new Set(list.map((brand) => brand.id));
+    for (const bound of user.bound_products ?? []) {
+      if (existingIds.has(bound.id)) continue;
+      const product = productById.get(bound.id);
+      if (!product) continue;
+      list.push({
+        ...product,
+        operatorStatus: deriveBrandOperatorStatus(product).label,
+        pendingFollowUp: isBrandPendingFollowUp(product),
+      });
+      existingIds.add(bound.id);
+    }
+    groups.set(user.username, list);
+  }
+
+  const rows = Array.from(groups.entries()).map(([key, brands]) => {
+    const user = key === UNASSIGNED_SALESPERSON_KEY ? null : userByUsername.get(key);
+    const name =
+      key === UNASSIGNED_SALESPERSON_KEY
+        ? UNASSIGNED_SALESPERSON_LABEL
+        : user?.display_name?.trim() || user?.username || key;
+    return aggregateSalespersonRow(key, name, user?.id ?? null, brands);
+  });
+
+  return rows.sort((left, right) => {
+    if (left.key === UNASSIGNED_SALESPERSON_KEY && left.brandCount > 0 && right.key !== UNASSIGNED_SALESPERSON_KEY) {
+      return -1;
+    }
+    if (right.key === UNASSIGNED_SALESPERSON_KEY && right.brandCount > 0 && left.key !== UNASSIGNED_SALESPERSON_KEY) {
+      return 1;
+    }
+    const pendingDiff = right.pendingFollowUpCount - left.pendingFollowUpCount;
+    if (pendingDiff !== 0) return pendingDiff;
+    return dateValue(right.updatedAt) - dateValue(left.updatedAt);
+  });
+}
+
+export function sortSalespersonBrands(
+  brands: EnrichedBrandProduct[],
+  sortBy: "status" | "reply" | "updatedAt",
+  direction: "asc" | "desc" = "desc",
+): EnrichedBrandProduct[] {
+  const factor = direction === "asc" ? 1 : -1;
+  return [...brands].sort((left, right) => {
+    if (sortBy === "status") {
+      const statusOrder = (brand: EnrichedBrandProduct) => {
+        if (brand.pendingFollowUp) return 0;
+        if (brand.reply_count > 0) return 1;
+        if (brand.collection_task_count > 0) return 2;
+        return 3;
+      };
+      return (statusOrder(left) - statusOrder(right)) * factor || left.name.localeCompare(right.name, "zh-Hans-CN");
+    }
+    if (sortBy === "reply") {
+      return (left.reply_count - right.reply_count) * factor || dateValue(right.updated_at ?? right.created_at) - dateValue(left.updated_at ?? left.created_at);
+    }
+    return (dateValue(left.updated_at ?? left.created_at) - dateValue(right.updated_at ?? right.created_at)) * factor;
+  });
+}
 
 export function buildSalesWorkbenchView(users: AdminUser[], now = new Date()): SalesWorkbenchView {
   const hasPreciseTodayTaskData =

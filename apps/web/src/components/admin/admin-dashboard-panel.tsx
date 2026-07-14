@@ -55,7 +55,7 @@ export function AdminDashboardPanel() {
   ];
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       <AdminPageHeader
         label="后台首页"
         title="管理员数据看板"

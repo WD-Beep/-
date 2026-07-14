@@ -4,8 +4,8 @@ import { AdminProductsPanel } from "@/components/admin/admin-products-panel";
 import { AdminShell } from "@/components/admin/admin-shell";
 
 export const metadata: Metadata = {
-  title: "品牌管理 · 红人智采管理员后台",
-  description: "管理员查看所有品牌和运营数据。",
+  title: "业务员品牌进度 · 红人智采管理员后台",
+  description: "管理员按业务员查看品牌跟进进度、邮件触达和回复情况。",
 };
 
 export default function AdminProductsPage() {

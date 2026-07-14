@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import asyncio
 import logging
@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 
 _collection_run_lock = asyncio.Lock()
 _active_collection_task_ids: set[int] = set()
+_active_collection_async_tasks: dict[int, asyncio.Task] = {}
 KEYWORD_SEED_PLATFORMS = frozenset({"pinterest", "shopmy"})
 KEYWORD_SEED_COLLECTION_MODES = frozenset(
     {
@@ -230,9 +231,81 @@ class CollectionRunnerService:
             _active_collection_task_ids.add(task_id)
 
     @staticmethod
+    async def _bind_collection_async_task(task_id: int) -> None:
+        current = asyncio.current_task()
+        if current is None:
+            return
+        async with _collection_run_lock:
+            _active_collection_async_tasks[task_id] = current
+
+    @staticmethod
+    async def cancel_active_task(task_id: int) -> bool:
+        async with _collection_run_lock:
+            active = _active_collection_async_tasks.get(task_id)
+        if active is None or active.done() or active is asyncio.current_task():
+            return False
+        active.cancel()
+        try:
+            await active
+        except (asyncio.CancelledError, Exception):
+            pass
+        return True
+
+    @staticmethod
     async def _release_collection_run(task_id: int) -> None:
         async with _collection_run_lock:
             _active_collection_task_ids.discard(task_id)
+            _active_collection_async_tasks.pop(task_id, None)
+
+    @staticmethod
+    async def run_task_with_timeout(
+        db: AsyncSession,
+        task: CollectionTask,
+        *,
+        allow_running: bool = False,
+        resume: bool = False,
+    ) -> dict[str, int | str | None]:
+        max_minutes = int(task.max_runtime_minutes or 60)
+        checkpoint = dict(task.run_checkpoint or {})
+        deadline_text = str(checkpoint.get("runtime_deadline_at") or "").strip()
+        now = datetime.now(UTC)
+        if deadline_text:
+            try:
+                deadline = datetime.fromisoformat(deadline_text.replace("Z", "+00:00"))
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=UTC)
+            except ValueError:
+                deadline = now + timedelta(minutes=max_minutes)
+        else:
+            deadline = now + timedelta(minutes=max_minutes)
+            checkpoint["runtime_started_at"] = now.isoformat()
+            checkpoint["runtime_deadline_at"] = deadline.isoformat()
+            task.run_checkpoint = checkpoint
+            await db.commit()
+        remaining_seconds = max(0.1, (deadline - now).total_seconds())
+        try:
+            return await asyncio.wait_for(
+                CollectionRunnerService.run_task(
+                    db,
+                    task,
+                    allow_running=allow_running,
+                    resume=resume,
+                ),
+                timeout=remaining_seconds,
+            )
+        except TimeoutError:
+            await db.rollback()
+            await db.refresh(task)
+            from app.services.collection_task import CollectionTaskService
+
+            stopped = await CollectionTaskService.stop_task_and_preserve(
+                db,
+                task,
+                reason=f"已达到最长运行时间 {max_minutes} 分钟，系统自动结束采集",
+                timed_out=True,
+            )
+            logger.warning("Collection task %s stopped after %s minutes", task.id, max_minutes)
+            return CollectionRunnerService._paused_result(stopped)
 
     @staticmethod
     def _collect_external_link_funnel_stats(
@@ -1148,9 +1221,125 @@ class CollectionRunnerService:
         data["paused"] = True
         data["paused_at"] = data.get("paused_at") or now
         task.run_checkpoint = data
-        task.status_summary = "Task paused. Continue later to resume from the saved progress."
+        task.status_summary = "任务已暂停，可从上次进度继续采集。"
         await db.commit()
         return True
+
+    @staticmethod
+    async def _finalize_paused_run(
+        db: AsyncSession,
+        task: CollectionTask,
+        *,
+        checkpoint: RunCheckpoint | None = None,
+        funnel: CollectionFunnelStats | None = None,
+        candidate_rows: list[dict] | None = None,
+        run_at: datetime | None = None,
+        status_summary: str | None = None,
+    ) -> dict[str, int | str | None]:
+        if funnel is not None:
+            task.discovered_count = funnel.discovered_count
+            task.deduped_count = funnel.deduped_count
+            task.profile_fetched_count = funnel.profile_fetched_count
+            task.profile_failed_count = funnel.profile_failed_count
+            task.filtered_out_count = funnel.filtered_out_count
+            task.inserted_count = funnel.inserted_count
+            task.hashtag_count = funnel.hashtag_count
+            task.post_count = funnel.post_count
+            task.comment_author_count = funnel.comment_author_count
+            task.result_count = funnel.inserted_count
+        if checkpoint is not None:
+            data = dict(task.run_checkpoint or {})
+            data.update(checkpoint.to_dict())
+            data["paused"] = True
+            task.run_checkpoint = data
+        inserted = task.inserted_count or task.result_count or 0
+        task.status = CollectionTaskStatus.PAUSED.value
+        task.status_summary = (
+            status_summary
+            or task.status_summary
+            or f"任务已暂停，已保存当前采集结果（已入库 {inserted} 条）。"
+        )
+        task.last_run_at = task.last_run_at or datetime.now(UTC)
+        if candidate_rows:
+            await TaskCandidateService.clear_for_task(db, task.id)
+            await TaskCandidateService.bulk_insert(
+                db,
+                task.id,
+                candidate_rows,
+                run_at=run_at or datetime.now(UTC),
+                product_id=task.product_id,
+                user_id=task.user_id,
+            )
+        await TaskCandidateService.sync_task_inserted_stats(db, task)
+        await TaskInfluencerService.refresh_task_stats(db, task)
+        await db.commit()
+        await db.refresh(task)
+        return CollectionRunnerService._paused_result(task)
+
+    @staticmethod
+    async def _exit_if_paused(
+        db: AsyncSession,
+        task: CollectionTask,
+        *,
+        checkpoint: RunCheckpoint | None = None,
+        funnel: CollectionFunnelStats | None = None,
+        candidate_rows: list[dict] | None = None,
+        run_at: datetime | None = None,
+    ) -> dict[str, int | str | None] | None:
+        if not await CollectionRunnerService._pause_if_requested(db, task, checkpoint=checkpoint):
+            return None
+        return await CollectionRunnerService._finalize_paused_run(
+            db,
+            task,
+            checkpoint=checkpoint,
+            funnel=funnel,
+            candidate_rows=candidate_rows,
+            run_at=run_at,
+        )
+
+    @staticmethod
+    async def _maybe_auto_pause(
+        db: AsyncSession,
+        task: CollectionTask,
+        checkpoint: RunCheckpoint,
+        *,
+        failure: bool = False,
+        empty_round: bool = False,
+        funnel: CollectionFunnelStats | None = None,
+        failure_threshold: int = 2,
+        empty_round_threshold: int = 2,
+    ) -> dict[str, int | str | None] | None:
+        data = dict(task.run_checkpoint or {})
+        data.update(checkpoint.to_dict())
+        if failure:
+            data["consecutive_collection_failures"] = int(data.get("consecutive_collection_failures", 0)) + 1
+        if empty_round:
+            data["consecutive_empty_rounds"] = int(data.get("consecutive_empty_rounds", 0)) + 1
+        else:
+            data["consecutive_empty_rounds"] = 0
+        if not failure and not empty_round:
+            return None
+        task.run_checkpoint = data
+        failures = int(data.get("consecutive_collection_failures", 0))
+        empties = int(data.get("consecutive_empty_rounds", 0))
+        if failures < failure_threshold and empties < empty_round_threshold:
+            await db.commit()
+            return None
+        reason = (
+            "连续采集失败，已自动暂停，已保存当前采集结果。"
+            if failures >= failure_threshold
+            else "连续多轮无新数据，已自动暂停，已保存当前采集结果。"
+        )
+        from app.services.collection_task import CollectionTaskService
+
+        await CollectionTaskService.auto_pause_task(db, task, reason=reason)
+        return await CollectionRunnerService._finalize_paused_run(
+            db,
+            task,
+            checkpoint=checkpoint,
+            funnel=funnel,
+            status_summary=reason,
+        )
 
     @staticmethod
     async def run_task(
@@ -1164,6 +1353,7 @@ class CollectionRunnerService:
             raise ValueError("Task is already running")
 
         await CollectionRunnerService._claim_collection_run(task.id)
+        await CollectionRunnerService._bind_collection_async_task(task.id)
 
         if task.status != CollectionTaskStatus.PAUSED.value:
             task.status = CollectionTaskStatus.RUNNING.value
@@ -1396,8 +1586,31 @@ class CollectionRunnerService:
                     ),
                 )
 
-            if await CollectionRunnerService._pause_if_requested(db, task, checkpoint=checkpoint):
-                return CollectionRunnerService._paused_result(task)
+            if paused := await CollectionRunnerService._exit_if_paused(db, task, checkpoint=checkpoint, funnel=funnel):
+                return paused
+
+            discovery_api_failed = bool(getattr(aggregate, "discovery_api_failed", False))
+            if pipeline_result and getattr(pipeline_result.stats, "discovery_api_failed", False):
+                discovery_api_failed = True
+            discovery_round_failed = discovery_api_failed or (
+                len(collected) == 0 and bool(collection_errors)
+            )
+            if discovery_round_failed:
+                if auto_paused := await CollectionRunnerService._maybe_auto_pause(
+                    db,
+                    task,
+                    checkpoint,
+                    failure=True,
+                    funnel=funnel,
+                ):
+                    return auto_paused
+            elif collected and not discovery_api_failed:
+                reset_data = dict(task.run_checkpoint or {})
+                reset_data.update(checkpoint.to_dict())
+                if int(reset_data.get("consecutive_collection_failures", 0)) > 0:
+                    reset_data["consecutive_collection_failures"] = 0
+                    task.run_checkpoint = reset_data
+                    await db.commit()
 
             if non_instagram and qualified_target > 0:
                 seen_profile_keys = {collected_identity_key(item) for item in collected}
@@ -1429,16 +1642,27 @@ class CollectionRunnerService:
                         extra_profiles = getattr(result, "profiles", None) or []
                         if extra_profiles:
                             aggregate.platform_profiles.extend(extra_profiles)
-                    empty_round_reason = should_stop_overfetch_round(new_unique_count=len(new_items))
                     if overfetch_stop_reason == RATE_LIMIT_STOP_REASON and not new_items:
                         break
-                    if empty_round_reason:
+                    if len(new_items) <= 0:
+                        if auto_paused := await CollectionRunnerService._maybe_auto_pause(
+                            db,
+                            task,
+                            checkpoint,
+                            empty_round=True,
+                            funnel=funnel,
+                        ):
+                            return auto_paused
                         if not overfetch_stop_reason:
-                            overfetch_stop_reason = empty_round_reason
+                            overfetch_stop_reason = "平台无更多结果"
                         break
                     collected.extend(new_items)
                     funnel.discovered_count += len(new_items)
                     total_candidates_seen += len(new_items)
+                    reset_data = dict(task.run_checkpoint or {})
+                    reset_data.update(checkpoint.to_dict())
+                    reset_data["consecutive_empty_rounds"] = 0
+                    task.run_checkpoint = reset_data
                     if discovery_reporter:
                         await discovery_reporter.update(
                             phase=STAGE_DISCOVERY,
@@ -1448,8 +1672,10 @@ class CollectionRunnerService:
                             rate_limited=overfetch_stop_reason == RATE_LIMIT_STOP_REASON,
                             rate_limit_note=RATE_LIMIT_STOP_REASON if overfetch_stop_reason == RATE_LIMIT_STOP_REASON else None,
                         )
-                    if await CollectionRunnerService._pause_if_requested(db, task, checkpoint=checkpoint):
-                        return CollectionRunnerService._paused_result(task)
+                    if paused := await CollectionRunnerService._exit_if_paused(
+                        db, task, checkpoint=checkpoint, funnel=funnel
+                    ):
+                        return paused
                     if overfetch_stop_reason == RATE_LIMIT_STOP_REASON:
                         break
                 total_count = len(collected)
@@ -1478,8 +1704,10 @@ class CollectionRunnerService:
                 checkpoint=checkpoint,
                 commit=True,
             )
-            if await CollectionRunnerService._pause_if_requested(db, task, checkpoint=checkpoint):
-                return CollectionRunnerService._paused_result(task)
+            if paused := await CollectionRunnerService._exit_if_paused(
+                db, task, checkpoint=checkpoint, funnel=funnel
+            ):
+                return paused
 
             product_id = task.product_id or 1
             global_map = await InfluencerPersistenceService.find_global_profiles_batch(db, collected)
@@ -1788,8 +2016,10 @@ class CollectionRunnerService:
                         task.profile_fetched_count = funnel.profile_fetched_count
                         task.profile_failed_count = funnel.profile_failed_count
                         task.filtered_out_count = funnel.filtered_out_count
-                        if await CollectionRunnerService._pause_if_requested(db, task, checkpoint=checkpoint):
-                            return CollectionRunnerService._paused_result(task)
+                        if paused := await CollectionRunnerService._exit_if_paused(
+                            db, task, checkpoint=checkpoint, funnel=funnel
+                        ):
+                            return paused
 
             candidate_rows = CollectionRunnerService._build_candidate_rows(
                 task,

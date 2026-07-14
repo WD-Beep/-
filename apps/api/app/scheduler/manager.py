@@ -174,7 +174,7 @@ async def run_scheduled_collection(task_id: int) -> None:
             return
 
         try:
-            await CollectionRunnerService.run_task(db, task, allow_running=True)
+            await CollectionRunnerService.run_task_with_timeout(db, task, allow_running=True)
             logger.info("Scheduled collection completed for task_id=%s", task_id)
         except CollectionRunCapacityError as exc:
             await CollectionQueueService.restore_task_to_queue(

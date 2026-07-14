@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   BriefcaseBusiness,
@@ -8,6 +8,8 @@ import {
   Clock3,
   Database,
   MessageSquareReply,
+  Pencil,
+  Plus,
   Search,
   Send,
   UserCheck,
@@ -15,12 +17,16 @@ import {
 } from "lucide-react";
 
 import {
+  AdminActionButton,
+  AdminBrandLabel,
   AdminCompactActions,
+  AdminConfirmDialog,
   AdminFilterBar,
   AdminFilterField,
   AdminInput,
   AdminKpiCard,
   AdminKpiGrid,
+  AdminMoreMenu,
   AdminPageHeader,
   AdminSection,
   AdminSelect,
@@ -29,16 +35,27 @@ import {
   AdminTable,
 } from "@/components/admin/admin-ui";
 import {
+  AdminDeleteConfirmDialog,
+  AssignBrandsDrawer,
+  buildBrandDeleteDescription,
+  deleteBrandSafely,
+  disableSalesperson,
+  WorkbenchBrandDrawer,
+} from "@/components/admin/admin-products-management";
+import { AdminUserAccountDialog } from "@/components/admin/admin-user-dialogs";
+import {
   buildSalesWorkbenchView,
+  deriveBrandOperatorStatus,
   filterAdminRows,
   formatAdminDate,
   formatAdminNumber,
+  formatSalespersonDisplay,
   type AdminTone,
   type SalesWorkbenchActivityStatus,
   type SalesWorkbenchAttentionLevel,
   type SalesWorkbenchRow,
 } from "@/components/admin/admin-ui-helpers";
-import { type AdminUser, fetchAdminUsers } from "@/lib/api";
+import { fetchAdminProducts, fetchAdminUsers, type AdminProduct, type AdminUser } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const activityStatusMeta: Record<SalesWorkbenchActivityStatus, { label: string; tone: "success" | "warning" | "muted" }> = {
@@ -54,10 +71,23 @@ const attentionMeta: Record<SalesWorkbenchAttentionLevel, { label: string; tone:
   disabled: { label: "账号停用", tone: "muted", helper: "该账号当前停用" },
 };
 
+type PanelAction =
+  | { type: "create-sales" }
+  | { type: "edit-sales-full"; user: AdminUser }
+  | { type: "assign-sales"; user: AdminUser }
+  | { type: "create-brand"; ownerUserId: number | null }
+  | { type: "edit-brand"; brand: AdminProduct }
+  | { type: "delete-brand"; brand: AdminProduct };
+
 export function AdminSalesWorkbenchPanel() {
   const [items, setItems] = useState<AdminUser[]>([]);
+  const [products, setProducts] = useState<AdminProduct[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [disableConfirmUser, setDisableConfirmUser] = useState<AdminUser | null>(null);
+  const [panelAction, setPanelAction] = useState<PanelAction | null>(null);
   const [filters, setFilters] = useState({
     search: "",
     salesId: "",
@@ -68,22 +98,28 @@ export function AdminSalesWorkbenchPanel() {
     endDate: "",
   });
 
+  const reload = useCallback(async () => {
+    const [users, productItems] = await Promise.all([fetchAdminUsers(), fetchAdminProducts()]);
+    setItems(users);
+    setProducts(productItems);
+  }, []);
+
   useEffect(() => {
     let active = true;
-    fetchAdminUsers()
-      .then((data) => {
-        if (active) setItems(data);
-      })
-      .catch((err) => {
-        if (active) setError(err instanceof Error ? err.message : "业务员作业数据加载失败。");
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+    queueMicrotask(() => {
+      if (!active) return;
+      void reload()
+        .catch((err) => {
+          if (active) setError(err instanceof Error ? err.message : "业务员作业数据加载失败。");
+        })
+        .finally(() => {
+          if (active) setLoading(false);
+        });
+    });
     return () => {
       active = false;
     };
-  }, []);
+  }, [reload]);
 
   const view = useMemo(() => buildSalesWorkbenchView(items), [items]);
 
@@ -102,11 +138,22 @@ export function AdminSalesWorkbenchPanel() {
     [filters.salesId, view.rows],
   );
 
+  const selectedUser = useMemo(
+    () => (selectedRow ? items.find((user) => user.id === selectedRow.id) ?? null : null),
+    [items, selectedRow],
+  );
+
+  const selectedBrands = useMemo(() => {
+    if (!selectedRow) return [];
+    const ids = new Set((selectedRow.bound_products ?? []).map((product) => product.id));
+    return products.filter((product) => ids.has(product.id));
+  }, [products, selectedRow]);
+
   const filteredRows = useMemo(() => {
     const matches = filterAdminRows(
       view.rows.map((item) => ({
         row: item,
-        name: `${item.username} ${item.display_name ?? ""}`,
+        name: `${formatSalespersonDisplay(item)} ${item.email ?? ""}`,
         owner: item.username,
         brand: (item.bound_products ?? []).map((product) => product.name).join(" "),
         status: item.activityStatus,
@@ -136,16 +183,72 @@ export function AdminSalesWorkbenchPanel() {
     });
   }, [filters, view.rows]);
 
+  async function handleSaved(message: string) {
+    setSuccessMessage(message);
+    await reload();
+  }
+
+  async function confirmDisableSalesperson() {
+    if (!disableConfirmUser) return;
+    try {
+      await disableSalesperson(disableConfirmUser.id);
+      setDisableConfirmUser(null);
+      await handleSaved("业务员已停用。");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "停用业务员失败。");
+      setDisableConfirmUser(null);
+    }
+  }
+
+  async function confirmDeleteBrand() {
+    if (panelAction?.type !== "delete-brand") return;
+    setDeleteLoading(true);
+    try {
+      await deleteBrandSafely(panelAction.brand);
+      setPanelAction(null);
+      await handleSaved("品牌已删除。");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除品牌失败。");
+      setPanelAction(null);
+    } finally {
+      setDeleteLoading(false);
+    }
+  }
+
   const activeTaskHelper = view.hasPreciseTodayTaskData ? "按任务创建/更新时间" : "暂无精确今日字段";
   const activeInfluencerHelper = view.hasPreciseTodayInfluencerData ? "按红人创建/更新时间" : "暂无精确今日字段";
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       <AdminPageHeader
         label="业务员作业"
         title="业务员作业看板"
-        description="按天查看每个业务员的动作、风险、外联和回复状态，快速定位需要跟进的人。"
+        description="按天查看每个业务员的动作、风险、外联和回复状态，并可直接编辑业务员与品牌。"
+        backFallback="/admin/dashboard"
+        actions={
+          <>
+            <AdminActionButton onClick={() => setPanelAction({ type: "create-sales" })}>
+              <Plus className="h-3.5 w-3.5" />
+              新增业务员
+            </AdminActionButton>
+            <AdminActionButton
+              onClick={() =>
+                setPanelAction({
+                  type: "create-brand",
+                  ownerUserId: selectedRow?.id ?? null,
+                })
+              }
+            >
+              <Plus className="h-3.5 w-3.5" />
+              新增品牌
+            </AdminActionButton>
+          </>
+        }
       />
+
+      {successMessage ? (
+        <div className="rounded-md border border-[#BAE6D1] bg-[#ECFDF3] px-4 py-3 text-sm text-[#047857]">{successMessage}</div>
+      ) : null}
 
       <AdminKpiGrid>
         <AdminKpiCard label="业务员总数" value={view.kpis.salesCount} helper="销售角色账号" icon={Users} tone="info" />
@@ -166,24 +269,78 @@ export function AdminSalesWorkbenchPanel() {
           </div>
         </AdminSection>
 
-        <AdminSection title={selectedRow ? "当前业务员" : "业务员选择"} description={selectedRow ? attentionMeta[selectedRow.attentionLevel].helper : "选择后查看个人状态摘要。"}>
+        <AdminSection title={selectedRow ? "当前业务员" : "业务员选择"} description={selectedRow ? attentionMeta[selectedRow.attentionLevel].helper : "选择后查看个人状态摘要，也可直接编辑、分配品牌或停用。"}>
           <div className="space-y-3 p-4">
-            <AdminSelect
-              value={filters.salesId}
-              onChange={(event) => setFilters((prev) => ({ ...prev, salesId: event.target.value }))}
-              aria-label="选择业务员"
-            >
-              <option value="">全部业务员</option>
-              {view.rows.map((row) => (
-                <option key={row.id} value={row.id}>
-                  #{row.id} {row.username}
-                </option>
-              ))}
-            </AdminSelect>
-            {selectedRow ? <SelectedSalesSummary row={selectedRow} /> : <SalesRoster rows={view.rows} onSelect={(id) => setFilters((prev) => ({ ...prev, salesId: String(id) }))} />}
+            <div className="flex flex-wrap items-center gap-2">
+              <AdminSelect
+                className="min-w-0 flex-1"
+                value={filters.salesId}
+                onChange={(event) => setFilters((prev) => ({ ...prev, salesId: event.target.value }))}
+                aria-label="选择业务员"
+              >
+                <option value="">全部业务员</option>
+                {view.rows.map((row) => (
+                  <option key={row.id} value={row.id}>
+                    {formatSalespersonDisplay(row)}
+                  </option>
+                ))}
+              </AdminSelect>
+              <AdminActionButton onClick={() => setPanelAction({ type: "create-sales" })}>
+                <Plus className="h-3.5 w-3.5" />
+                新增
+              </AdminActionButton>
+            </div>
+            {selectedRow && selectedUser ? (
+              <SelectedSalesSummary
+                row={selectedRow}
+                onEdit={() => setPanelAction({ type: "edit-sales-full", user: selectedUser })}
+                onAssign={() => setPanelAction({ type: "assign-sales", user: selectedUser })}
+                onDisable={() => setDisableConfirmUser(selectedUser)}
+                onClear={() => setFilters((prev) => ({ ...prev, salesId: "" }))}
+              />
+            ) : (
+              <SalesRoster
+                rows={view.rows}
+                users={items}
+                onSelect={(id) => setFilters((prev) => ({ ...prev, salesId: String(id) }))}
+                onEdit={(user) => setPanelAction({ type: "edit-sales-full", user })}
+                onAssign={(user) => setPanelAction({ type: "assign-sales", user })}
+                onDisable={(user) => setDisableConfirmUser(user)}
+              />
+            )}
           </div>
         </AdminSection>
       </div>
+
+      {selectedRow ? (
+        <AdminSection title="负责品牌明细" description={`${formatSalespersonDisplay(selectedRow)} 当前负责的 ${formatAdminNumber(selectedBrands.length)} 个品牌。`}>
+          {selectedBrands.length ? (
+            <AdminTable
+              minWidth={980}
+              columns={["品牌", "任务", "红人", "邮件 / 回复", "状态", "最近更新", "操作"]}
+              rows={selectedBrands.map((brand) => [
+                <AdminBrandLabel key="brand" name={brand.name} subtitle={`#${brand.id} · ${brand.slug}`} compact />,
+                formatAdminNumber(brand.collection_task_count),
+                formatAdminNumber(brand.influencer_count),
+                `${formatAdminNumber(brand.email_count)} / ${formatAdminNumber(brand.reply_count)}`,
+                <AdminStatusBadge key="status" meta={deriveBrandOperatorStatus(brand)} />,
+                formatAdminDate(brand.updated_at ?? brand.created_at),
+                <AdminCompactActions
+                  key="actions"
+                  primaryHref={`/admin/products/${brand.id}`}
+                  primaryLabel="品牌详情"
+                  secondaryLabel="编辑"
+                  secondaryOnClick={() => setPanelAction({ type: "edit-brand", brand })}
+                  items={[{ label: "删除", danger: true, onClick: () => setPanelAction({ type: "delete-brand", brand }) }]}
+                />,
+              ])}
+              emptyMessage="暂无品牌。"
+            />
+          ) : (
+            <AdminState message="当前业务员暂无负责品牌，可点击右上角“新增品牌”。" />
+          )}
+        </AdminSection>
+      ) : null}
 
       <AdminFilterBar>
         <AdminFilterField label="搜索业务员 / 品牌" className="min-w-[240px] flex-1">
@@ -243,31 +400,98 @@ export function AdminSalesWorkbenchPanel() {
             minWidth={1180}
             pageSize={10}
             columns={["业务员", "今日状态", "关注等级", "负责品牌", "今日任务", "采集成功/失败", "红人", "邮件发送/失败", "回复/待处理", "最近活跃", "操作"]}
-            rows={filteredRows.map((item) => [
-              <SalesName key="name" row={item} />,
-              <AdminStatusBadge key="status" meta={activityStatusMeta[item.activityStatus]} />,
-              <AdminStatusBadge key="attention" meta={attentionMeta[item.attentionLevel]} />,
-              <BrandTags key="brands" brands={(item.bound_products ?? []).map((product) => product.name)} />,
-              <MetricStack key="tasks" main={item.todayTaskCount} sub={`${formatAdminNumber(item.activeTaskCount)} 进行中`} />,
-              `${formatAdminNumber(item.collection_success_count)} / ${formatAdminNumber(item.collection_failed_count)}`,
-              <MetricStack key="influencers" main={item.influencer_count ?? 0} sub={`今日 ${formatAdminNumber(item.todayInfluencerCount)}`} />,
-              `${formatAdminNumber(item.email_count)} / ${formatAdminNumber(item.email_failed_count)}`,
-              `${formatAdminNumber(item.reply_count)} / ${formatAdminNumber(item.pending_reply_count)}`,
-              formatAdminDate(item.last_active_at),
-              <AdminCompactActions
-                key="actions"
-                primaryHref={`/admin/users/${item.id}`}
-                primaryLabel="查看作业明细"
-                items={[
-                  { label: "查看采集任务", href: "/admin/collection-tasks" },
-                  { label: "查看邮件回复", href: "/admin/emails" },
-                ]}
-              />,
-            ])}
+            rows={filteredRows.map((item) => {
+              const user = items.find((entry) => entry.id === item.id);
+              return [
+                <SalesName key="name" row={item} />,
+                <AdminStatusBadge key="status" meta={activityStatusMeta[item.activityStatus]} />,
+                <AdminStatusBadge key="attention" meta={attentionMeta[item.attentionLevel]} />,
+                <BrandTags key="brands" brands={(item.bound_products ?? []).map((product) => product.name)} />,
+                <MetricStack key="tasks" main={item.todayTaskCount} sub={`${formatAdminNumber(item.activeTaskCount)} 进行中`} />,
+                `${formatAdminNumber(item.collection_success_count)} / ${formatAdminNumber(item.collection_failed_count)}`,
+                <MetricStack key="influencers" main={item.influencer_count ?? 0} sub={`今日 ${formatAdminNumber(item.todayInfluencerCount)}`} />,
+                `${formatAdminNumber(item.email_count)} / ${formatAdminNumber(item.email_failed_count)}`,
+                `${formatAdminNumber(item.reply_count)} / ${formatAdminNumber(item.pending_reply_count)}`,
+                formatAdminDate(item.last_active_at),
+                user ? (
+                  <AdminCompactActions
+                    key="actions"
+                    primaryHref={`/admin/users/${item.id}`}
+                    primaryLabel="作业明细"
+                    secondaryLabel="编辑"
+                    secondaryOnClick={() => setPanelAction({ type: "edit-sales-full", user })}
+                    items={[
+                      { label: "分配品牌", onClick: () => setPanelAction({ type: "assign-sales", user }) },
+                      { label: "停用业务员", danger: true, onClick: () => setDisableConfirmUser(user) },
+                    ]}
+                  />
+                ) : (
+                  <AdminCompactActions key="actions" primaryHref={`/admin/users/${item.id}`} primaryLabel="作业明细" items={[]} />
+                ),
+              ];
+            })}
             emptyMessage="暂无匹配的业务员作业。"
           />
         )}
       </AdminSection>
+
+      <AdminUserAccountDialog
+        key={`account-${panelAction?.type === "create-sales" ? "new" : panelAction?.type === "edit-sales-full" ? panelAction.user.id : "closed"}`}
+        open={panelAction?.type === "create-sales" || panelAction?.type === "edit-sales-full"}
+        user={panelAction?.type === "edit-sales-full" ? panelAction.user : null}
+        products={products}
+        onClose={() => setPanelAction(null)}
+        onSaved={async () => {
+          await handleSaved(panelAction?.type === "create-sales" ? "业务员已创建。" : "业务员账号与权限已更新。");
+        }}
+      />
+
+      <AssignBrandsDrawer
+        open={panelAction?.type === "assign-sales"}
+        rowKey={panelAction?.type === "assign-sales" ? panelAction.user.username : null}
+        rowName={panelAction?.type === "assign-sales" ? formatSalespersonDisplay(panelAction.user) : ""}
+        user={panelAction?.type === "assign-sales" ? panelAction.user : null}
+        products={products}
+        onClose={() => setPanelAction(null)}
+        onSaved={() => void handleSaved("品牌分配已更新。")}
+      />
+
+      <WorkbenchBrandDrawer
+        open={panelAction?.type === "create-brand" || panelAction?.type === "edit-brand"}
+        mode={panelAction?.type === "edit-brand" ? "edit" : "create"}
+        brand={panelAction?.type === "edit-brand" ? panelAction.brand : null}
+        users={items}
+        defaultOwnerUserId={panelAction?.type === "create-brand" ? panelAction.ownerUserId : null}
+        onClose={() => setPanelAction(null)}
+        onSaved={() => void handleSaved(panelAction?.type === "edit-brand" ? "品牌已更新。" : "品牌已创建。")}
+      />
+
+      <AdminDeleteConfirmDialog
+        open={panelAction?.type === "delete-brand"}
+        title="确认删除品牌？"
+        description={
+          panelAction?.type === "delete-brand"
+            ? buildBrandDeleteDescription(panelAction.brand)
+            : ""
+        }
+        loading={deleteLoading}
+        onCancel={() => setPanelAction(null)}
+        onConfirm={() => void confirmDeleteBrand()}
+      />
+
+      <AdminConfirmDialog
+        open={Boolean(disableConfirmUser)}
+        title="确认停用业务员？"
+        description={
+          disableConfirmUser
+            ? `停用后 ${formatSalespersonDisplay(disableConfirmUser)} 将无法登录后台，其负责品牌仍可重新分配给其他业务员。`
+            : ""
+        }
+        confirmLabel="确认停用"
+        danger
+        onCancel={() => setDisableConfirmUser(null)}
+        onConfirm={() => void confirmDisableSalesperson()}
+      />
     </div>
   );
 }
@@ -309,38 +533,100 @@ function DistributionBlock({
   );
 }
 
-function SalesRoster({ rows, onSelect }: { rows: SalesWorkbenchRow[]; onSelect: (id: number) => void }) {
+function SalesRoster({
+  rows,
+  users,
+  onSelect,
+  onEdit,
+  onAssign,
+  onDisable,
+}: {
+  rows: SalesWorkbenchRow[];
+  users: AdminUser[];
+  onSelect: (id: number) => void;
+  onEdit: (user: AdminUser) => void;
+  onAssign: (user: AdminUser) => void;
+  onDisable: (user: AdminUser) => void;
+}) {
   const visible = rows.slice(0, 12);
-  if (!visible.length) return <p className="text-sm text-[#667085]">暂无业务员。</p>;
+  if (!visible.length) return <p className="text-sm text-[#667085]">暂无业务员，可点击上方“新增”创建。</p>;
   return (
-    <div className="grid max-h-[220px] gap-2 overflow-auto pr-1 sm:grid-cols-2">
-      {visible.map((row) => (
-        <button
-          key={row.id}
-          type="button"
-          onClick={() => onSelect(row.id)}
-          className="flex min-w-0 items-center justify-between gap-2 rounded-lg border border-[#DDE6F0] bg-[#FBFCFE] px-3 py-2 text-left transition hover:border-[#2563EB] hover:bg-[#F4F7FF]"
-        >
-          <span className="min-w-0">
-            <span className="block truncate text-sm font-semibold text-[#102033]">{row.username}</span>
-            <span className="block truncate text-xs text-[#667085]">{(row.bound_products ?? []).map((item) => item.name).filter(Boolean).slice(0, 2).join("、") || "暂无品牌"}</span>
-          </span>
-          <span className={cn("h-2.5 w-2.5 shrink-0 rounded-full", dotToneClasses[attentionMeta[row.attentionLevel].tone])} />
-        </button>
-      ))}
+    <div className="grid max-h-[280px] gap-2 overflow-auto pr-1 sm:grid-cols-2">
+      {visible.map((row) => {
+        const user = users.find((entry) => entry.id === row.id);
+        return (
+          <div
+            key={row.id}
+            className="flex min-w-0 items-center gap-2 rounded-lg border border-[#DDE6F0] bg-[#FBFCFE] px-3 py-2 transition hover:border-[#2563EB] hover:bg-[#F4F7FF]"
+          >
+            <button type="button" onClick={() => onSelect(row.id)} className="min-w-0 flex-1 text-left">
+              <span className="block truncate text-sm font-medium text-[#102033]">{formatSalespersonDisplay(row)}</span>
+              <span className="block truncate text-xs text-[#667085]">
+                {(row.bound_products ?? []).map((item) => item.name).filter(Boolean).slice(0, 2).join("、") || "暂无品牌"}
+              </span>
+            </button>
+            <span className={cn("h-2.5 w-2.5 shrink-0 rounded-full", dotToneClasses[attentionMeta[row.attentionLevel].tone])} />
+            {user ? (
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  title="编辑业务员"
+                  onClick={() => onEdit(user)}
+                  className="inline-flex h-7 items-center gap-1 rounded-md border border-[#DDE6F0] bg-white px-2 text-xs font-medium text-[#344054] hover:border-[#2563EB] hover:text-[#2563EB]"
+                >
+                  <Pencil className="h-3 w-3" />
+                  编辑
+                </button>
+                <AdminMoreMenu
+                  items={[
+                    { label: "查看摘要", onClick: () => onSelect(row.id) },
+                    { label: "分配品牌", onClick: () => onAssign(user) },
+                    { label: "停用业务员", danger: true, onClick: () => onDisable(user) },
+                  ]}
+                />
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-function SelectedSalesSummary({ row }: { row: SalesWorkbenchRow }) {
+function SelectedSalesSummary({
+  row,
+  onEdit,
+  onAssign,
+  onDisable,
+  onClear,
+}: {
+  row: SalesWorkbenchRow;
+  onEdit: () => void;
+  onAssign: () => void;
+  onDisable: () => void;
+  onClear: () => void;
+}) {
   return (
     <div className="rounded-lg border border-[#DDE6F0] bg-[#FBFCFE] p-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="text-lg font-semibold text-[#102033]">#{row.id} {row.username}</p>
-          <p className="mt-1 text-xs text-[#667085]">{row.email || "暂无邮箱"}</p>
+          <p className="text-lg font-semibold text-[#102033]">{formatSalespersonDisplay(row)}</p>
+          <p className="mt-1 text-xs text-[#667085]">{row.email || "暂无邮箱"} · #{row.id}</p>
         </div>
-        <AdminStatusBadge meta={attentionMeta[row.attentionLevel]} />
+        <div className="flex flex-wrap items-center gap-2">
+          <AdminStatusBadge meta={attentionMeta[row.attentionLevel]} />
+          <AdminActionButton onClick={onEdit}>
+            <Pencil className="h-3.5 w-3.5" />
+            编辑业务员
+          </AdminActionButton>
+          <AdminActionButton onClick={onAssign}>分配品牌</AdminActionButton>
+          <button type="button" onClick={onDisable} className="text-xs font-medium text-[#B42318] hover:underline">
+            停用
+          </button>
+          <button type="button" onClick={onClear} className="text-xs font-medium text-[#667085] hover:underline">
+            返回列表
+          </button>
+        </div>
       </div>
       <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
         <SummaryMetric label="负责品牌" value={row.product_count ?? 0} icon={BriefcaseBusiness} />
@@ -371,8 +657,8 @@ function SummaryMetric({ label, value, icon: Icon }: { label: string; value: num
 
 function SalesName({ row }: { row: SalesWorkbenchRow }) {
   return (
-    <span className="block min-w-[120px]">
-      <span className="block font-semibold text-[#102033]">#{row.id} {row.username}</span>
+    <span className="block min-w-[140px]">
+      <span className="block font-medium text-[#102033]">{formatSalespersonDisplay(row)}</span>
       <span className="block text-xs text-[#667085]">{formatAdminNumber(row.product_count)} 个品牌</span>
     </span>
   );
