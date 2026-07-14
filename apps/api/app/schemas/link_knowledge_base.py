@@ -25,10 +25,12 @@ class LinkKnowledgeBaseCreate(BaseModel):
 
 class LinkKnowledgeBaseUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=255)
+    url: HttpUrl | None = None
     summary: str | None = None
     extracted_knowledge: dict[str, Any] | None = None
     tags: list[str] | None = None
     is_active: bool | None = None
+    reparse: bool = False
 
 
 class LinkKnowledgeChunkRead(ORMModel):

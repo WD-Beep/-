@@ -4,15 +4,16 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
-  Archive,
   Copy,
   Download,
   Eye,
   Loader2,
+  Pencil,
   Plus,
   RefreshCw,
   Save,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 
 import { AdminShell } from "@/components/layout/admin-shell";
@@ -105,6 +106,70 @@ function firstString(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function getPlatformScriptKeys(platform: string | null | undefined): string[] {
+  const normalized = (platform ?? "").toLowerCase();
+  if (normalized.includes("tiktok")) return ["email_first_touch", "youtube_pitch", "tiktok_dm", "instagram_dm"];
+  if (normalized.includes("instagram")) return ["email_first_touch", "youtube_pitch", "instagram_dm", "tiktok_dm"];
+  if (normalized.includes("youtube")) return ["youtube_pitch", "email_first_touch", "instagram_dm"];
+  return ["email_first_touch", "youtube_pitch", "instagram_dm", "tiktok_dm"];
+}
+
+function hasTextValue(value: unknown): boolean {
+  return firstString(value).trim().length > 0;
+}
+
+function getPrimaryLinkScriptKey(result: LinkScriptResult, content: Record<string, unknown>): string {
+  if (hasTextValue(content.primary_script)) return "primary_script";
+  const candidates = [
+    ...getPlatformScriptKeys(result.platform),
+    "email_first_touch",
+    "instagram_dm",
+    "tiktok_dm",
+    "youtube_pitch",
+    "follow_up_1",
+    "comment_script",
+  ];
+  return candidates.find((key) => hasTextValue(content[key])) ?? "primary_script";
+}
+
+function getPrimaryLinkScriptText(result: LinkScriptResult, content: Record<string, unknown>): string {
+  const key = getPrimaryLinkScriptKey(result, content);
+  return buildCompleteLinkScript(result, content, firstString(content[key]).trim());
+}
+
+function wordCount(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+function buildCompleteLinkScript(
+  result: LinkScriptResult,
+  content: Record<string, unknown>,
+  baseText: string,
+): string {
+  const trimmed = baseText.trim();
+  if (wordCount(trimmed) >= 55) return trimmed;
+
+  const parts = trimmed ? [trimmed] : [];
+  const matchReason = firstString(content.match_reason).trim();
+  if (matchReason && !trimmed.toLowerCase().includes(matchReason.toLowerCase().slice(0, 40))) {
+    parts.push(`The reason I thought of you: ${matchReason}`);
+  }
+
+  const followUp = firstString(content.follow_up_1).trim();
+  const hasCta = /\?|\b(open|interested|collaborate|details|work together)\b/i.test(trimmed);
+  if (!hasCta) {
+    parts.push("Would you be open to a lightweight collaboration? We can share product details, gifting terms, and a simple content idea if it sounds like a fit.");
+  } else {
+    parts.push("If you're interested, I can send over product details, gifting terms, and a simple collaboration outline so you can quickly see whether it fits your content.");
+  }
+  if (followUp && wordCount(parts.join(" ")) < 85) {
+    parts.push(followUp);
+  }
+
+  const signatureName = result.influencer_name || result.influencer_handle ? "[Your Name]" : "";
+  return `${parts.join("\n\n")}${signatureName ? `\n\nBest,\n${signatureName}` : ""}`;
+}
+
 export function LinkKnowledgeBasesPanel() {
   const productId = useActiveProductId();
   const requiresProduct = productId === ALL_PRODUCTS_ID;
@@ -150,14 +215,14 @@ export function LinkKnowledgeBasesPanel() {
     }
   }
 
-  async function handleArchive(id: number) {
-    if (!window.confirm("确定归档这个链接库？")) return;
+  async function handleDelete(id: number) {
+    if (!window.confirm("确定删除这个链接吗？删除后列表中不再显示。")) return;
     setActionId(id);
     try {
       await archiveLinkKnowledgeBase(id);
       await load();
     } catch (err) {
-      setError(translateErrorMessage(err instanceof Error ? err.message : "归档失败"));
+      setError(translateErrorMessage(err instanceof Error ? err.message : "删除失败"));
     } finally {
       setActionId(null);
     }
@@ -339,11 +404,16 @@ export function LinkKnowledgeBasesPanel() {
                                     <Eye className="h-4 w-4" />
                                   </Link>
                                 </Button>
-                                <Button size="icon" variant="ghost" className="ops-icon-button" disabled={busy} onClick={() => void handleRefresh(item.id)} title="解析">
+                                <Button asChild size="icon" variant="ghost" className="ops-icon-button" title="编辑">
+                                  <Link href={`/link-knowledge-bases/${item.id}/edit`}>
+                                    <Pencil className="h-4 w-4" />
+                                  </Link>
+                                </Button>
+                                <Button size="icon" variant="ghost" className="ops-icon-button" disabled={busy} onClick={() => void handleRefresh(item.id)} title="重新解析">
                                   {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                                 </Button>
-                                <Button size="icon" variant="ghost" className="ops-icon-button" disabled={busy} onClick={() => void handleArchive(item.id)} title="归档">
-                                  <Archive className="h-4 w-4" />
+                                <Button size="icon" variant="ghost" className="ops-icon-button" disabled={busy} onClick={() => void handleDelete(item.id)} title="删除">
+                                  <Trash2 className="h-4 w-4" />
                                 </Button>
                               </div>
                             </td>
@@ -446,6 +516,128 @@ export function NewLinkKnowledgeBasePanel() {
   );
 }
 
+export function EditLinkKnowledgeBasePanel({ baseId }: { baseId: number }) {
+  const router = useRouter();
+  const productId = useActiveProductId();
+  const requiresProduct = productId === ALL_PRODUCTS_ID;
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [url, setUrl] = useState("");
+  const [name, setName] = useState("");
+  const [tags, setTags] = useState("");
+  const [summary, setSummary] = useState("");
+  const [reparse, setReparse] = useState(false);
+
+  const load = useCallback(async () => {
+    if (requiresProduct) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchLinkKnowledgeBase(baseId);
+      setUrl(data.url);
+      setName(data.name);
+      setTags(tagsText(data.tags));
+      setSummary(data.summary ?? "");
+    } catch (err) {
+      setError(translateErrorMessage(err instanceof Error ? err.message : "加载链接失败"));
+    } finally {
+      setLoading(false);
+    }
+  }, [baseId, requiresProduct]);
+
+  useEffect(() => {
+    queueMicrotask(() => {
+      void load();
+    });
+  }, [load, productId]);
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    try {
+      await updateLinkKnowledgeBase(baseId, {
+        url,
+        name: name || null,
+        tags: parseTags(tags),
+        summary: summary || null,
+        reparse,
+      });
+      router.push(`/link-knowledge-bases/${baseId}`);
+    } catch (err) {
+      setError(translateErrorMessage(err instanceof Error ? err.message : "保存失败"));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <AdminShell title="编辑链接" description="修改链接名称、URL、标签等信息，保存后可继续生成外联话术">
+      {requiresProduct ? (
+        <Card>
+          <CardContent className="py-10">
+            <EmptyState title="请选择具体产品/品牌" description="请先在左侧切换到具体产品后再编辑链接。" />
+          </CardContent>
+        </Card>
+      ) : loading ? (
+        <LoadingState label="加载链接..." />
+      ) : (
+        <Card className="max-w-3xl">
+          <CardHeader>
+            <CardTitle>链接信息</CardTitle>
+            <CardDescription>修改 URL 或勾选重新解析时，会重新抓取页面并更新提取知识。</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form className="space-y-4" onSubmit={(event) => void handleSubmit(event)}>
+              {error ? <ErrorAlert message={error} /> : null}
+              <div className="space-y-2">
+                <label className="text-sm font-medium" htmlFor="edit-link-url">URL</label>
+                <Input id="edit-link-url" required value={url} onChange={(event) => setUrl(event.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium" htmlFor="edit-link-name">名称</label>
+                <Input id="edit-link-name" value={name} onChange={(event) => setName(event.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium" htmlFor="edit-link-tags">标签</label>
+                <Input id="edit-link-tags" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="skincare, amazon, serum" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium" htmlFor="edit-link-summary">摘要</label>
+                <Textarea id="edit-link-summary" value={summary} onChange={(event) => setSummary(event.target.value)} rows={4} />
+              </div>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={reparse}
+                  onChange={(event) => setReparse(event.target.checked)}
+                />
+                保存时重新解析网页
+              </label>
+              <div className="flex gap-2">
+                <Button type="submit" disabled={submitting}>
+                  {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                  保存
+                </Button>
+                <Button type="button" variant="outline" onClick={() => router.push(`/link-knowledge-bases/${baseId}`)}>
+                  取消
+                </Button>
+                <Button type="button" variant="ghost" onClick={() => router.push("/link-knowledge-bases")}>
+                  返回列表
+                </Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+      )}
+    </AdminShell>
+  );
+}
+
 export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
   const router = useRouter();
   const productId = useActiveProductId();
@@ -498,12 +690,15 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
     try {
       const extracted = parseJsonObject(knowledgeText);
       const updated = await updateLinkKnowledgeBase(baseId, {
+        name: base?.name ?? null,
         summary,
         tags: parseTags(tags),
         extracted_knowledge: extracted,
       });
       setBase(updated);
       setKnowledgeText(stringifyJson(updated.extracted_knowledge));
+      setSummary(updated.summary ?? "");
+      setTags(tagsText(updated.tags));
     } catch (err) {
       setError(translateErrorMessage(err instanceof Error ? err.message : "保存失败"));
     } finally {
@@ -535,6 +730,40 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
     setGenerating(true);
     setError(null);
     try {
+      let extracted: Record<string, unknown> = {};
+      try {
+        extracted = parseJsonObject(knowledgeText);
+      } catch {
+        setError("结构化知识 JSON 格式不正确，请先修正并保存后再生成话术");
+        return;
+      }
+      const hasManualKnowledge =
+        Boolean(summary.trim()) ||
+        Object.keys(extracted).some((key) => {
+          const value = extracted[key];
+          if (value == null) return false;
+          if (typeof value === "string") return value.trim().length > 0;
+          if (Array.isArray(value)) return value.length > 0;
+          if (typeof value === "object") return Object.keys(value as object).length > 0;
+          return true;
+        });
+      if ((base?.status === "failed" || base?.status === "pending") && !hasManualKnowledge) {
+        setError(
+          "当前链接尚未解析出品牌知识（常见于 Amazon 限流）。请先手动填写摘要或结构化知识并点保存，或换链接后重新解析，再生成话术。",
+        );
+        return;
+      }
+      const updated = await updateLinkKnowledgeBase(baseId, {
+        name: base?.name ?? null,
+        summary: summary || null,
+        tags: parseTags(tags),
+        extracted_knowledge: extracted,
+      });
+      setBase(updated);
+      setKnowledgeText(stringifyJson(updated.extracted_knowledge));
+      setSummary(updated.summary ?? "");
+      setTags(tagsText(updated.tags));
+
       const job = await generateLinkScripts(baseId, {
         influencer_ids: selectedIds,
         tone,
@@ -568,13 +797,23 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
                 <CardTitle>{base.name}</CardTitle>
                 <CardDescription>{base.url}</CardDescription>
               </div>
-              <Badge variant={STATUS_VARIANT[base.status] ?? "secondary"}>{base.status}</Badge>
+              <div className="flex items-center gap-2">
+                <Badge variant={STATUS_VARIANT[base.status] ?? "secondary"}>{base.status}</Badge>
+                <Button asChild size="sm" variant="outline">
+                  <Link href={`/link-knowledge-bases/${base.id}/edit`}>
+                    <Pencil className="h-4 w-4" />
+                    编辑
+                  </Link>
+                </Button>
+              </div>
             </CardHeader>
             <CardContent className="grid gap-3 text-sm md:grid-cols-3">
               <div><span className="text-muted-foreground">域名：</span>{base.domain ?? "-"}</div>
               <div><span className="text-muted-foreground">来源：</span>{base.source_type}</div>
               <div><span className="text-muted-foreground">最近解析：</span>{formatDate(base.last_fetched_at)}</div>
-              {base.error_message ? <div className="md:col-span-3 text-red-600">{base.error_message}</div> : null}
+              {base.error_message ? (
+                <div className="md:col-span-3 text-red-600">{translateErrorMessage(base.error_message)}</div>
+              ) : null}
             </CardContent>
           </Card>
 
@@ -694,26 +933,6 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
             </div>
           </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>知识片段</CardTitle>
-              <CardDescription>{base.chunks.length} 个片段</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {base.chunks.length === 0 ? (
-                <EmptyState title="暂无片段" description="保存结构化知识或重新解析后会生成片段。" />
-              ) : (
-                <div className="space-y-3">
-                  {base.chunks.map((chunk) => (
-                    <div key={chunk.id} className="rounded-md border px-3 py-2 text-sm">
-                      <p className="font-medium">#{chunk.chunk_index + 1} · {chunk.chunk_type}{chunk.title ? ` · ${chunk.title}` : ""}</p>
-                      <p className="mt-1 whitespace-pre-wrap text-muted-foreground">{chunk.content}</p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
         </div>
       ) : null}
     </AdminShell>
@@ -721,15 +940,28 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
 }
 
 export function LinkScriptJobDetailPanel({ jobId }: { jobId: number }) {
+  const productId = useActiveProductId();
   const [job, setJob] = useState<LinkScriptJob | null>(null);
   const [results, setResults] = useState<LinkScriptResult[]>([]);
-  const [selected, setSelected] = useState<LinkScriptResult | null>(null);
-  const [editText, setEditText] = useState("{}");
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState<{ resultId: number | null; text: string }>({ resultId: null, text: "" });
   const [loading, setLoading] = useState(true);
   const [actionId, setActionId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const selected = useMemo(
+    () => results.find((item) => item.id === selectedId) ?? null,
+    [results, selectedId],
+  );
+
   const load = useCallback(async () => {
+    if (productId === ALL_PRODUCTS_ID) {
+      setJob(null);
+      setResults([]);
+      setError("请先在左侧选择具体产品/品牌，再查看话术结果。");
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -739,17 +971,16 @@ export function LinkScriptJobDetailPanel({ jobId }: { jobId: number }) {
       ]);
       setJob(jobData);
       setResults(resultData.items);
-      if (selected) {
-        const fresh = resultData.items.find((item) => item.id === selected.id) ?? null;
-        setSelected(fresh);
-        setEditText(stringifyJson(fresh?.edited_content ?? fresh?.generated_content));
-      }
+      setSelectedId((current) => {
+        if (current == null) return current;
+        return resultData.items.some((item) => item.id === current) ? current : null;
+      });
     } catch (err) {
       setError(translateErrorMessage(err instanceof Error ? err.message : "加载话术任务失败"));
     } finally {
       setLoading(false);
     }
-  }, [jobId, selected]);
+  }, [jobId, productId]);
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -761,17 +992,33 @@ export function LinkScriptJobDetailPanel({ jobId }: { jobId: number }) {
     () => selected?.used_content ?? selected?.edited_content ?? selected?.generated_content ?? {},
     [selected],
   );
+  const selectedScriptKey = useMemo(
+    () => (selected ? getPrimaryLinkScriptKey(selected, selectedContent) : "primary_script"),
+    [selected, selectedContent],
+  );
+  const selectedScriptText = useMemo(
+    () => (selected ? getPrimaryLinkScriptText(selected, selectedContent) : ""),
+    [selected, selectedContent],
+  );
+  const editText = selected && editDraft.resultId === selected.id ? editDraft.text : selectedScriptText;
 
   async function handleSaveResult() {
     if (!selected) return;
     setActionId(selected.id);
     setError(null);
     try {
-      const edited = parseJsonObject(editText);
+      const scriptText = editText.trim();
+      const baseContent = selected.edited_content ?? selected.generated_content ?? {};
+      const edited = {
+        ...baseContent,
+        [selectedScriptKey]: scriptText,
+        primary_script: scriptText,
+      };
       const updated = await updateLinkScriptResult(selected.id, { edited_content: edited });
-      setSelected(updated);
-      setEditText(stringifyJson(updated.edited_content ?? updated.generated_content));
-      await load();
+      setResults((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      setSelectedId(updated.id);
+      const nextContent = updated.edited_content ?? updated.generated_content ?? {};
+      setEditDraft({ resultId: updated.id, text: getPrimaryLinkScriptText(updated, nextContent) });
     } catch (err) {
       setError(translateErrorMessage(err instanceof Error ? err.message : "保存话术失败"));
     } finally {
@@ -784,9 +1031,10 @@ export function LinkScriptJobDetailPanel({ jobId }: { jobId: number }) {
     setError(null);
     try {
       const updated = await regenerateLinkScript(resultId);
-      setSelected(updated);
-      setEditText(stringifyJson(updated.edited_content ?? updated.generated_content));
-      await load();
+      setResults((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      setSelectedId(updated.id);
+      const nextContent = updated.edited_content ?? updated.generated_content ?? {};
+      setEditDraft({ resultId: updated.id, text: getPrimaryLinkScriptText(updated, nextContent) });
     } catch (err) {
       setError(translateErrorMessage(err instanceof Error ? err.message : "重新生成失败"));
     } finally {
@@ -795,7 +1043,7 @@ export function LinkScriptJobDetailPanel({ jobId }: { jobId: number }) {
   }
 
   async function handleCopy() {
-    await navigator.clipboard.writeText(stringifyJson(selectedContent));
+    await navigator.clipboard.writeText(editText.trim() || selectedScriptText);
   }
 
   return (
@@ -860,10 +1108,7 @@ export function LinkScriptJobDetailPanel({ jobId }: { jobId: number }) {
                                   <Button
                                     size="sm"
                                     variant="outline"
-                                    onClick={() => {
-                                      setSelected(result);
-                                      setEditText(stringifyJson(result.edited_content ?? result.generated_content));
-                                    }}
+                                    onClick={() => setSelectedId(result.id)}
                                   >
                                     查看
                                   </Button>
@@ -885,7 +1130,7 @@ export function LinkScriptJobDetailPanel({ jobId }: { jobId: number }) {
 
             <Card>
               <CardHeader>
-                <CardTitle>结果详情</CardTitle>
+                <CardTitle>推荐话术</CardTitle>
                 <CardDescription>{selected ? selected.influencer_handle || selected.influencer_name : "请选择一条结果"}</CardDescription>
               </CardHeader>
               <CardContent>
@@ -899,8 +1144,9 @@ export function LinkScriptJobDetailPanel({ jobId }: { jobId: number }) {
                     </div>
                     <Textarea
                       value={editText}
-                      onChange={(event) => setEditText(event.target.value)}
-                      className="min-h-[420px] font-mono text-xs"
+                      onChange={(event) => setEditDraft({ resultId: selected.id, text: event.target.value })}
+                      className="min-h-[280px] text-sm leading-6"
+                      placeholder="这里显示一份可直接发送给红人的完整话术。"
                     />
                     <div className="flex flex-wrap gap-2">
                       <Button disabled={actionId === selected.id} onClick={() => void handleSaveResult()}>
@@ -909,7 +1155,7 @@ export function LinkScriptJobDetailPanel({ jobId }: { jobId: number }) {
                       </Button>
                       <Button variant="outline" onClick={() => void handleCopy()}>
                         <Copy className="h-4 w-4" />
-                        复制 JSON
+                        复制话术
                       </Button>
                       <Button variant="outline" disabled={actionId === selected.id} onClick={() => void handleRegenerate(selected.id)}>
                         <RefreshCw className="h-4 w-4" />

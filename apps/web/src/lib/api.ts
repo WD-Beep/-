@@ -2834,10 +2834,12 @@ export type CreateLinkKnowledgeBasePayload = {
 
 export type UpdateLinkKnowledgeBasePayload = {
   name?: string | null;
+  url?: string | null;
   summary?: string | null;
   extracted_knowledge?: Record<string, unknown> | null;
   tags?: string[] | null;
   is_active?: boolean;
+  reparse?: boolean;
 };
 
 export type GenerateLinkScriptsPayload = {

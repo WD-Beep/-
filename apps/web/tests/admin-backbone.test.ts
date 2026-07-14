@@ -252,3 +252,14 @@ test("sales sidebar reuses product options across route remounts", () => {
   assert.match(sidebar, /fetchTenantProductsShared/);
   assert.match(sidebar, /setProductsLoading\(false\)/);
 });
+
+test("link script results show simple outreach copy instead of raw JSON", () => {
+  const panel = source("../src/components/link-knowledge-bases/link-knowledge-panels.tsx");
+
+  assert.match(panel, /getPrimaryLinkScriptText/);
+  assert.match(panel, /getPrimaryLinkScriptKey/);
+  assert.match(panel, /primary_script/);
+  assert.match(panel, /复制话术/);
+  assert.doesNotMatch(panel, /复制 JSON/);
+  assert.doesNotMatch(panel, /setEditText\(stringifyJson\(selected\.edited_content \?\? selected\.generated_content\)\)/);
+});

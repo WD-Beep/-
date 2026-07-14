@@ -166,6 +166,9 @@ async def list_link_knowledge_bases(
     query = select(LinkKnowledgeBase).where(LinkKnowledgeBase.product_id == scoped_product_id)
     if status_filter:
         query = query.where(LinkKnowledgeBase.status == status_filter)
+    else:
+        # 默认不展示已删除/归档项，保持列表为可维护的 CRUD 视图
+        query = query.where(LinkKnowledgeBase.is_active.is_(True), LinkKnowledgeBase.status != "archived")
     if domain:
         query = query.where(LinkKnowledgeBase.domain == domain)
     if keyword:
@@ -210,11 +213,25 @@ async def update_link_knowledge_base(
     product_id = require_write_product_id(ctx)
     row = await _load_base(db, base_id, product_id)
     payload = data.model_dump(exclude_unset=True)
+    reparse = bool(payload.pop("reparse", False))
     knowledge_changed = "extracted_knowledge" in payload
+    url_changed = False
+    if "url" in payload and payload["url"] is not None:
+        next_url = str(payload["url"])
+        url_changed = next_url != row.url
+        payload["url"] = next_url
+        payload["domain"] = urlparse(next_url).netloc.lower()
     for field, value in payload.items():
         setattr(row, field, value)
-    if knowledge_changed:
+    if knowledge_changed and not (reparse or url_changed):
         await _replace_chunks(db, row)
+    if reparse or url_changed:
+        await _fetch_and_parse(db, row)
+    elif row.status == "failed" and (row.summary or row.extracted_knowledge):
+        # 抓取失败后允许人工补齐知识，再继续生成话术
+        row.status = "parsed"
+        row.parse_status = "manual"
+        row.error_message = None
     await db.commit()
     await db.refresh(row)
     return await _read_base(db, row)
