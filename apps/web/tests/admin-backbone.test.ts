@@ -122,6 +122,13 @@ test("browser long-running API calls use the public proxy by default", () => {
   assert.match(compose, /NEXT_PUBLIC_LONG_RUNNING_API_URL: \$\{NEXT_PUBLIC_LONG_RUNNING_API_URL:-\/api-proxy\}/);
 });
 
+test("docker web service waits for the API healthcheck", () => {
+  const compose = source("../../../docker-compose.yml");
+
+  assert.match(compose, /api:[\s\S]*healthcheck:/);
+  assert.match(compose, /web:[\s\S]*depends_on:[\s\S]*api:[\s\S]*condition: service_healthy/);
+});
+
 test("admin placeholder modules were replaced with real data panels", () => {
   const collectionTasks = source("../src/app/admin/collection-tasks/page.tsx");
   const influencers = source("../src/app/admin/influencers/page.tsx");
