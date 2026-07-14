@@ -455,6 +455,7 @@ export function AdminProductsPanel() {
         mode={panelAction?.type === "edit-sales" ? "edit" : "create"}
         user={panelAction?.type === "edit-sales" ? panelAction.user : null}
         products={items}
+        users={users}
         avatarUrl={draftAvatarUrl}
         onAvatarChange={(url) => {
           setDraftAvatarUrl(url);
@@ -462,6 +463,7 @@ export function AdminProductsPanel() {
         }}
         onClose={() => setPanelAction(null)}
         onSaved={() => void handleSaved(panelAction?.type === "edit-sales" ? "业务员已更新。" : "业务员创建成功。")}
+        onProductsChanged={reload}
       />
 
       <AssignBrandsDrawer

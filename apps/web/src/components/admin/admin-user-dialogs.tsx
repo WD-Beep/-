@@ -1,9 +1,10 @@
 "use client";
 
 import { useMemo, useState, type FormEvent } from "react";
-import { Eye, EyeOff, Loader2, Search, ShieldCheck, X } from "lucide-react";
+import { Eye, EyeOff, Loader2, Pencil, Search, ShieldCheck, X } from "lucide-react";
 
 import { AdminConfirmDialog } from "@/components/admin/admin-ui";
+import { AdminBrandManagementDrawer } from "@/components/admin/admin-products-management";
 import { Button } from "@/components/ui/button";
 import {
   createAdminUser,
@@ -18,8 +19,11 @@ type AccountDialogProps = {
   open: boolean;
   user?: AdminUser | null;
   products: AdminProduct[];
+  users: AdminUser[];
+  currentUserId?: number | null;
   onClose: () => void;
   onSaved: (user: AdminUser) => void | Promise<void>;
+  onProductsChanged: () => void | Promise<void>;
 };
 
 const fieldClass =
@@ -31,7 +35,15 @@ export function AdminUserAccountDialog(props: AccountDialogProps) {
   return <AdminUserAccountDialogContent key={user?.id ?? "new"} {...props} />;
 }
 
-function AdminUserAccountDialogContent({ open, user, products, onClose, onSaved }: AccountDialogProps) {
+function AdminUserAccountDialogContent({
+  user,
+  products,
+  users,
+  currentUserId,
+  onClose,
+  onSaved,
+  onProductsChanged,
+}: AccountDialogProps) {
   const [username, setUsername] = useState(user?.username ?? "");
   const [displayName, setDisplayName] = useState(user?.display_name ?? "");
   const [email, setEmail] = useState(user?.email ?? "");
@@ -47,6 +59,8 @@ function AdminUserAccountDialogContent({ open, user, products, onClose, onSaved 
   const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
   const [pendingSubmit, setPendingSubmit] = useState<(() => Promise<void>) | null>(null);
   const [removedProductNames, setRemovedProductNames] = useState<string[]>([]);
+  const [brandManagementOpen, setBrandManagementOpen] = useState(false);
+  const usernameLocked = Boolean(user && currentUserId && user.id === currentUserId);
 
   const initialProductIds = useMemo(
     () => (user?.bound_products ?? []).map((product) => product.id),
@@ -60,9 +74,14 @@ function AdminUserAccountDialogContent({ open, user, products, onClose, onSaved 
       (product) =>
         product.name.toLowerCase().includes(query) ||
         product.slug.toLowerCase().includes(query) ||
-        String(product.id).includes(query),
+      String(product.id).includes(query),
     );
   }, [brandSearch, products]);
+
+  const activeProductIds = useMemo(() => {
+    const availableIds = new Set(products.map((product) => product.id));
+    return productIds.filter((id) => availableIds.has(id));
+  }, [productIds, products]);
 
   function toggleProduct(productId: number) {
     setProductIds((current) =>
@@ -77,6 +96,7 @@ function AdminUserAccountDialogContent({ open, user, products, onClose, onSaved 
       let saved: AdminUser;
       if (user) {
         saved = await updateAdminUser(user.id, {
+          username: username.trim(),
           display_name: displayName.trim() || null,
           email: email.trim() || null,
           role,
@@ -85,7 +105,7 @@ function AdminUserAccountDialogContent({ open, user, products, onClose, onSaved 
         if (password.trim().length > 0) {
           await resetAdminUserPassword(user.id, password.trim());
         }
-        saved = await setAdminUserProducts(user.id, role === "admin" ? [] : productIds);
+        saved = await setAdminUserProducts(user.id, role === "admin" ? [] : activeProductIds);
       } else {
         saved = await createAdminUser({
           username: username.trim(),
@@ -94,14 +114,19 @@ function AdminUserAccountDialogContent({ open, user, products, onClose, onSaved 
           email: email.trim() || null,
           role,
           is_active: isActive,
-          product_ids: role === "admin" ? [] : productIds,
+          product_ids: role === "admin" ? [] : activeProductIds,
         });
       }
       await onSaved(saved);
       setSuccessMessage(user ? "账号与品牌权限已更新。" : "账号创建成功。");
       window.setTimeout(() => onClose(), 600);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "保存账号失败");
+      const message = err instanceof Error ? err.message : "保存账号失败";
+      if (/exist|duplicate|409|已存在|重复/i.test(message)) {
+        setError("登录账号已存在，请更换后再保存。");
+      } else {
+        setError(message);
+      }
     } finally {
       setSubmitting(false);
       setConfirmRemoveOpen(false);
@@ -114,11 +139,15 @@ function AdminUserAccountDialogContent({ open, user, products, onClose, onSaved 
     setError(null);
     const trimmedUsername = username.trim();
     const trimmedEmail = email.trim();
-    if (!user && (!trimmedUsername || !password.trim())) {
-      setError("请填写登录账号和初始密码。");
+    if (!trimmedUsername) {
+      setError("请填写登录账号。");
       return;
     }
-    if (!user && !/^[A-Za-z0-9_.-]+$/.test(trimmedUsername)) {
+    if (!user && !password.trim()) {
+      setError("请填写初始密码。");
+      return;
+    }
+    if (!/^[A-Za-z0-9_.-]+$/.test(trimmedUsername)) {
       setError("登录账号只能包含字母、数字、下划线、点和短横线。");
       return;
     }
@@ -126,7 +155,7 @@ function AdminUserAccountDialogContent({ open, user, products, onClose, onSaved 
       setError("邮箱格式不正确，请输入有效的邮箱地址。");
       return;
     }
-    const removed = initialProductIds.filter((id) => !productIds.includes(id));
+    const removed = initialProductIds.filter((id) => !activeProductIds.includes(id));
     if (user && role === "sales" && removed.length > 0) {
       const names = products.filter((product) => removed.includes(product.id)).map((product) => product.name);
       setRemovedProductNames(names);
@@ -171,10 +200,14 @@ function AdminUserAccountDialogContent({ open, user, products, onClose, onSaved 
                   className={fieldClass}
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  disabled={Boolean(user)}
+                  disabled={usernameLocked}
                   placeholder="例如 sales11"
                 />
-                {user ? <span className="text-xs font-normal text-[#667085]">账号创建后不可修改。</span> : null}
+                {usernameLocked ? (
+                  <span className="text-xs font-normal text-[#667085]">
+                    当前登录管理员账号不可修改登录账号；请使用其他管理员账号操作。
+                  </span>
+                ) : null}
               </label>
               <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
                 {user ? "重置密码" : "初始密码 *"}
@@ -221,19 +254,29 @@ function AdminUserAccountDialogContent({ open, user, products, onClose, onSaved 
                   <h3 className="text-sm font-semibold text-[#102033]">品牌数据权限</h3>
                   <p className="mt-1 text-xs text-[#667085]">业务员只能看到勾选品牌的数据；管理员默认可查看全部品牌。</p>
                 </div>
-                {role === "sales" && products.length ? (
+                <div className="flex items-center gap-3">
                   <button
                     type="button"
-                    onClick={() =>
-                      setProductIds(
-                        productIds.length === products.length ? [] : products.map((product) => product.id),
-                      )
-                    }
-                    className="text-xs font-semibold text-[#2563EB]"
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#2563EB]"
+                    onClick={() => setBrandManagementOpen(true)}
                   >
-                    {productIds.length === products.length ? "取消全选" : "全选"}
+                    <Pencil className="h-3.5 w-3.5" />
+                    编辑品牌
                   </button>
-                ) : null}
+                  {role === "sales" && products.length ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setProductIds(
+                          activeProductIds.length === products.length ? [] : products.map((product) => product.id),
+                        )
+                      }
+                      className="text-xs font-semibold text-[#2563EB]"
+                    >
+                      {activeProductIds.length === products.length ? "取消全选" : "全选"}
+                    </button>
+                  ) : null}
+                </div>
               </div>
               {role === "admin" ? (
                 <div className="mt-3 rounded-md border border-[#BFDBFE] bg-[#EFF6FF] px-3 py-2 text-sm text-[#1D4ED8]">
@@ -267,7 +310,7 @@ function AdminUserAccountDialogContent({ open, user, products, onClose, onSaved 
                     ))}
                   </div>
                   {!filteredProducts.length ? <p className="mt-3 text-sm text-[#667085]">没有匹配的品牌。</p> : null}
-                  <p className="mt-2 text-xs text-[#667085]">已选 {productIds.length} / {products.length} 个品牌</p>
+                  <p className="mt-2 text-xs text-[#667085]">已选 {activeProductIds.length} / {products.length} 个品牌</p>
                 </>
               ) : (
                 <p className="mt-3 text-sm text-[#667085]">暂无可分配品牌，可先到“品牌管理”创建品牌。</p>
@@ -301,6 +344,15 @@ function AdminUserAccountDialogContent({ open, user, products, onClose, onSaved 
         onConfirm={() => {
           void pendingSubmit?.();
         }}
+      />
+      <AdminBrandManagementDrawer
+        open={brandManagementOpen}
+        products={products}
+        users={users}
+        selectedProductIds={activeProductIds}
+        onSelectedProductIdsChange={setProductIds}
+        onClose={() => setBrandManagementOpen(false)}
+        onProductsChanged={onProductsChanged}
       />
     </>
   );

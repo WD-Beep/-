@@ -516,6 +516,7 @@ export function AdminUserDetailPanel({ userId }: { userId: number }) {
     replies: AdminReply[];
   } | null>(null);
   const [allProducts, setAllProducts] = useState<AdminProduct[]>([]);
+  const [allUsers, setAllUsers] = useState<AdminUser[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [draftAvatarUrl, setDraftAvatarUrl] = useState<string | null>(null);
@@ -523,7 +524,7 @@ export function AdminUserDetailPanel({ userId }: { userId: number }) {
   const avatarCache = useAdminAvatarCache();
 
   const reloadDetail = useCallback(async () => {
-    const [user, products, tasks, influencers, emails, replies, catalog] = await Promise.all([
+    const [user, products, tasks, influencers, emails, replies, catalog, users] = await Promise.all([
       fetchAdminUser(userId),
       fetchAdminUserProducts(userId),
       fetchAdminUserCollectionTasks(userId),
@@ -531,6 +532,7 @@ export function AdminUserDetailPanel({ userId }: { userId: number }) {
       fetchAdminUserEmails(userId),
       fetchAdminUserReplies(userId),
       fetchAdminProducts(),
+      fetchAdminUsers(),
     ]);
     setData({
       user,
@@ -541,6 +543,7 @@ export function AdminUserDetailPanel({ userId }: { userId: number }) {
       replies: replies ?? [],
     });
     setAllProducts(catalog);
+    setAllUsers(users);
   }, [userId]);
 
   useEffect(() => {
@@ -621,6 +624,7 @@ export function AdminUserDetailPanel({ userId }: { userId: number }) {
         mode="edit"
         user={user}
         products={allProducts}
+        users={allUsers}
         avatarUrl={draftAvatarUrl}
         onAvatarChange={(url) => {
           setDraftAvatarUrl(url);
@@ -631,6 +635,7 @@ export function AdminUserDetailPanel({ userId }: { userId: number }) {
           setSuccessMessage("业务员已更新。");
           await reloadDetail();
         }}
+        onProductsChanged={reloadDetail}
       />
     </div>
   );

@@ -296,6 +296,134 @@ def test_admin_can_create_single_character_sales_username():
     asyncio.run(_run())
 
 
+def test_admin_can_update_username_and_login_with_new_username():
+    async def _run() -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        from app.main import app
+
+        suffix = uuid.uuid4().hex[:8]
+        old_username = f"rename-sales-old-{suffix}"
+        new_username = f"rename-sales-new-{suffix}"
+        password = "rename-pass-1"
+        created_id: int | None = None
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                created = await client.post(
+                    "/api/admin/users",
+                    headers={"X-User-Id": "1", "X-Product-Id": "0"},
+                    json={
+                        "username": old_username,
+                        "password": password,
+                        "display_name": "Rename Sales",
+                        "email": None,
+                        "role": "sales",
+                        "is_active": True,
+                        "product_ids": [],
+                    },
+                )
+                assert created.status_code == 201, created.text
+                created_id = created.json()["id"]
+
+                updated = await client.patch(
+                    f"/api/admin/users/{created_id}",
+                    headers={"X-User-Id": "1", "X-Product-Id": "0"},
+                    json={"username": new_username},
+                )
+                assert updated.status_code == 200, updated.text
+                assert updated.json()["username"] == new_username
+
+                detail = await client.get(
+                    f"/api/admin/users/{created_id}",
+                    headers={"X-User-Id": "1", "X-Product-Id": "0"},
+                )
+                assert detail.status_code == 200, detail.text
+                assert detail.json()["username"] == new_username
+
+                new_login = await client.post(
+                    "/api/auth/login",
+                    json={"username": new_username, "password": password},
+                )
+                assert new_login.status_code == 200, new_login.text
+
+                old_login = await client.post(
+                    "/api/auth/login",
+                    json={"username": old_username, "password": password},
+                )
+                assert old_login.status_code == 401, old_login.text
+        finally:
+            async with async_session_factory() as db_session:
+                if created_id is not None:
+                    await db_session.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == created_id))
+                    await db_session.execute(delete(ProductMember).where(ProductMember.user_id == created_id))
+                    await db_session.execute(delete(User).where(User.id == created_id))
+                await db_session.execute(delete(User).where(User.username.in_([old_username, new_username])))
+                await db_session.commit()
+
+    asyncio.run(_run())
+
+
+def test_admin_username_update_rejects_duplicate_but_allows_unchanged_value():
+    async def _run() -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        from app.main import app
+
+        suffix = uuid.uuid4().hex[:8]
+        first_username = f"dup-sales-a-{suffix}"
+        second_username = f"dup-sales-b-{suffix}"
+        first_id: int | None = None
+        second_id: int | None = None
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                for username in [first_username, second_username]:
+                    created = await client.post(
+                        "/api/admin/users",
+                        headers={"X-User-Id": "1", "X-Product-Id": "0"},
+                        json={
+                            "username": username,
+                            "password": "1",
+                            "display_name": username,
+                            "email": None,
+                            "role": "sales",
+                            "is_active": True,
+                            "product_ids": [],
+                        },
+                    )
+                    assert created.status_code == 201, created.text
+                    if username == first_username:
+                        first_id = created.json()["id"]
+                    else:
+                        second_id = created.json()["id"]
+
+                unchanged = await client.patch(
+                    f"/api/admin/users/{first_id}",
+                    headers={"X-User-Id": "1", "X-Product-Id": "0"},
+                    json={"username": first_username},
+                )
+                assert unchanged.status_code == 200, unchanged.text
+
+                duplicate = await client.patch(
+                    f"/api/admin/users/{first_id}",
+                    headers={"X-User-Id": "1", "X-Product-Id": "0"},
+                    json={"username": second_username},
+                )
+                assert duplicate.status_code == 409, duplicate.text
+        finally:
+            async with async_session_factory() as db_session:
+                for user_id in [first_id, second_id]:
+                    if user_id is not None:
+                        await db_session.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == user_id))
+                        await db_session.execute(delete(ProductMember).where(ProductMember.user_id == user_id))
+                        await db_session.execute(delete(User).where(User.id == user_id))
+                await db_session.execute(delete(User).where(User.username.in_([first_username, second_username])))
+                await db_session.commit()
+
+    asyncio.run(_run())
+
+
 def test_admin_products_include_brand_created_by_sales_member():
     async def _run() -> None:
         from httpx import ASGITransport, AsyncClient

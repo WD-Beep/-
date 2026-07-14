@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import type React from "react";
 import type { LucideIcon } from "lucide-react";
 import { AlertTriangle, ChevronLeft, ChevronRight, Loader2, MoreHorizontal, ShoppingBag, UserRound, X } from "lucide-react";
@@ -396,7 +397,7 @@ export function AdminMoreMenu({
           >
             {items.map((item) =>
               item.href && !item.disabled ? (
-                <a
+                <Link
                   key={item.label}
                   href={item.href}
                   role="menuitem"
@@ -407,7 +408,7 @@ export function AdminMoreMenu({
                   )}
                 >
                   {item.label}
-                </a>
+                </Link>
               ) : (
                 <button
                   key={item.label}
@@ -636,9 +637,9 @@ export function AdminActionButton({
     "inline-flex h-7 items-center gap-1 rounded-md border border-[#D8E2EE] bg-white px-2 text-xs font-medium text-[#344054] transition hover:border-[#2563EB] hover:bg-[#F4F7FF] hover:text-[#2563EB] disabled:cursor-not-allowed disabled:opacity-50";
   if (href) {
     return (
-      <a href={href} className={className}>
+      <Link href={href} className={className}>
         {children}
-      </a>
+      </Link>
     );
   }
   return (

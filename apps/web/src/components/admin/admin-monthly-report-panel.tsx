@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { BarChart3, CheckCircle2, Download, Mail, RefreshCw } from "lucide-react";
 
@@ -148,7 +149,7 @@ export function AdminMonthlyReportPanel() {
 
       <AdminKpiGrid>
         {sections.overview.cards.map((card, index) => (
-          <a key={card.label} href={adminHref(card.href)} className="block">
+          <Link key={card.label} href={adminHref(card.href)} className="block">
             <AdminKpiCard
               label={card.label}
               value={card.value}
@@ -156,7 +157,7 @@ export function AdminMonthlyReportPanel() {
               icon={index % 3 === 0 ? BarChart3 : index % 3 === 1 ? CheckCircle2 : Mail}
               tone={toneToAdminTone(card.tone)}
             />
-          </a>
+          </Link>
         ))}
       </AdminKpiGrid>
 
@@ -170,7 +171,7 @@ export function AdminMonthlyReportPanel() {
             const max = Math.max(...sections.outreachRecap.funnel.map((item) => item.value), 1);
             const percent = Math.max(8, Math.round((step.value / max) * 100));
             return (
-              <a
+              <Link
                 key={step.label}
                 href={adminHref(step.href)}
                 className="rounded-lg border border-[#DDE6F0] bg-[#FBFCFE] p-3 transition hover:-translate-y-0.5 hover:shadow-[0_10px_22px_rgba(16,32,51,0.08)]"
@@ -183,7 +184,7 @@ export function AdminMonthlyReportPanel() {
                 <div className="mt-3 h-2 rounded-full bg-[#E8EEF6]">
                   <div className="h-2 rounded-full bg-[#2563EB]" style={{ width: `${percent}%` }} />
                 </div>
-              </a>
+              </Link>
             );
           })}
         </div>
@@ -198,13 +199,13 @@ export function AdminMonthlyReportPanel() {
         <AdminSection title={sections.skipReasons.title} description="看清楚没发出或没推进的主要原因。">
           <div className="grid gap-2 p-4 sm:grid-cols-2">
             {sections.skipReasons.items.map((item) => (
-              <a key={item.label} href={adminHref(item.href)} className="rounded-lg border border-[#DDE6F0] bg-white p-3 transition hover:bg-[#F8FAFD]">
+              <Link key={item.label} href={adminHref(item.href)} className="rounded-lg border border-[#DDE6F0] bg-white p-3 transition hover:bg-[#F8FAFD]">
                 <div className="flex items-center justify-between gap-3">
                   <span className="font-medium text-[#102033]">{item.label}</span>
                   <AdminStatusBadge meta={{ label: String(item.value), tone: toneToAdminTone(item.tone) }} />
                 </div>
                 <p className="mt-1 text-xs text-[#667085]">{item.helper}</p>
-              </a>
+              </Link>
             ))}
           </div>
         </AdminSection>
@@ -214,7 +215,7 @@ export function AdminMonthlyReportPanel() {
       <AdminSection title="本月待办" description="从月度复盘回到可执行事项。">
         <div className="grid gap-3 p-4 xl:grid-cols-2">
           {sections.todos.map((todo) => (
-            <a key={todo.title} href={adminHref(todo.href)} className="rounded-lg border border-[#DDE6F0] bg-white p-4 transition hover:-translate-y-0.5 hover:shadow-[0_10px_22px_rgba(16,32,51,0.08)]">
+            <Link key={todo.title} href={adminHref(todo.href)} className="rounded-lg border border-[#DDE6F0] bg-white p-4 transition hover:-translate-y-0.5 hover:shadow-[0_10px_22px_rgba(16,32,51,0.08)]">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <h3 className="font-semibold text-[#102033]">{todo.title}</h3>
@@ -222,7 +223,7 @@ export function AdminMonthlyReportPanel() {
                 </div>
                 <AdminStatusBadge meta={{ label: todo.actionLabel, tone: toneToAdminTone(todo.tone) }} />
               </div>
-            </a>
+            </Link>
           ))}
         </div>
       </AdminSection>
@@ -243,13 +244,13 @@ function ReportCards({
     <AdminSection title={title}>
       <div className="grid gap-3 p-4 sm:grid-cols-2 2xl:grid-cols-3">
         {cards.map((card) => (
-          <a key={card.label} href={adminHref(card.href)} className="rounded-lg border border-[#DDE6F0] bg-white p-3 transition hover:bg-[#F8FAFD]">
+          <Link key={card.label} href={adminHref(card.href)} className="rounded-lg border border-[#DDE6F0] bg-white p-3 transition hover:bg-[#F8FAFD]">
             <div className="flex items-center justify-between gap-3">
               <span className="text-sm font-medium text-[#667085]">{card.label}</span>
               <AdminStatusBadge meta={{ label: card.value, tone: toneToAdminTone(card.tone) }} />
             </div>
             <p className="mt-2 text-xs leading-5 text-[#667085]">{card.helper}</p>
-          </a>
+          </Link>
         ))}
       </div>
     </AdminSection>

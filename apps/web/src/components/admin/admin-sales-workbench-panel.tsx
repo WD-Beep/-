@@ -56,6 +56,7 @@ import {
   type SalesWorkbenchRow,
 } from "@/components/admin/admin-ui-helpers";
 import { fetchAdminProducts, fetchAdminUsers, type AdminProduct, type AdminUser } from "@/lib/api";
+import { getStoredAuthSession } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
 const activityStatusMeta: Record<SalesWorkbenchActivityStatus, { label: string; tone: "success" | "warning" | "muted" }> = {
@@ -440,7 +441,10 @@ export function AdminSalesWorkbenchPanel() {
         open={panelAction?.type === "create-sales" || panelAction?.type === "edit-sales-full"}
         user={panelAction?.type === "edit-sales-full" ? panelAction.user : null}
         products={products}
+        users={items}
+        currentUserId={getStoredAuthSession()?.userId ?? null}
         onClose={() => setPanelAction(null)}
+        onProductsChanged={reload}
         onSaved={async () => {
           await handleSaved(panelAction?.type === "create-sales" ? "业务员已创建。" : "业务员账号与权限已更新。");
         }}

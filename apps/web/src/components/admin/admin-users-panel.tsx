@@ -28,6 +28,7 @@ import {
 } from "@/components/admin/admin-ui-helpers";
 import { AdminPasswordResetDialog, AdminUserAccountDialog } from "@/components/admin/admin-user-dialogs";
 import { fetchAdminProducts, fetchAdminUsers, updateAdminUser, type AdminProduct, type AdminUser } from "@/lib/api";
+import { getStoredAuthSession } from "@/lib/auth";
 
 const activeMeta: Record<string, StatusMeta> = {
   active: { label: "启用", tone: "success" },
@@ -226,7 +227,10 @@ export function AdminUsersPanel() {
         open={accountDialogOpen}
         user={editingUser}
         products={products}
+        users={items}
+        currentUserId={getStoredAuthSession()?.userId ?? null}
         onClose={() => setAccountDialogOpen(false)}
+        onProductsChanged={reloadAll}
         onSaved={async (saved) => {
           replaceUser(saved);
           await reloadAll();

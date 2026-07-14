@@ -178,6 +178,45 @@ test("admin shared crud shell exposes back navigation and work queue", () => {
   assert.match(influencerDetailPage, /AdminInfluencerDetailPanel/);
 });
 
+test("admin shared navigation actions use client-side links", () => {
+  const ui = source("../src/components/admin/admin-ui.tsx");
+  const monthlyReport = source("../src/components/admin/admin-monthly-report-panel.tsx");
+
+  assert.match(ui, /import Link from "next\/link"/);
+  assert.match(ui, /<Link[\s\S]*href=\{href\}/);
+  assert.doesNotMatch(ui, /<a\s+href=\{href\}/);
+  assert.doesNotMatch(ui, /<a\s+[\s\S]*href=\{item\.href\}/);
+
+  assert.match(monthlyReport, /import Link from "next\/link"/);
+  assert.doesNotMatch(monthlyReport, /<a\s+/);
+});
+
+test("admin account dialogs save editable usernames and expose brand management", () => {
+  const userDialogs = source("../src/components/admin/admin-user-dialogs.tsx");
+  const productManagement = source("../src/components/admin/admin-products-management.tsx");
+  const usersPanel = source("../src/components/admin/admin-users-panel.tsx");
+
+  assert.match(userDialogs, /username: username\.trim\(\)/);
+  assert.doesNotMatch(userDialogs, /disabled=\{Boolean\(user\)\}/);
+  assert.doesNotMatch(userDialogs, /账号创建后不可修改|璐﹀彿鍒涘缓鍚庝笉鍙/);
+  assert.match(userDialogs, /AdminBrandManagementDrawer/);
+  assert.match(usersPanel, /users=\{items\}/);
+  assert.match(usersPanel, /onProductsChanged=\{reloadAll\}/);
+
+  assert.match(productManagement, /export function AdminBrandManagementDrawer/);
+  assert.match(productManagement, /WorkbenchBrandDrawer/);
+  assert.match(productManagement, /deleteBrandSafely/);
+  assert.match(productManagement, /clearCachedTenantProducts/);
+});
+
+test("salesperson brand assignment drawer exposes shared brand management", () => {
+  const productManagement = source("../src/components/admin/admin-products-management.tsx");
+
+  assert.match(productManagement, /AdminBrandManagementDrawer/);
+  assert.match(productManagement, /setBrandManagementOpen\(true\)/);
+  assert.match(productManagement, /onProductsChanged/);
+});
+
 test("admin route guard clears non-admin sessions before showing admin pages", () => {
   const guard = source("../src/components/admin/admin-route-guard.tsx");
 

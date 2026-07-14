@@ -39,3 +39,20 @@ export function writeCachedTenantProducts(products: TenantProduct[], userId?: nu
   if (typeof window === "undefined") return;
   window.localStorage.setItem(cacheKeyForUser(userId), JSON.stringify(products));
 }
+
+export function clearCachedTenantProducts(userId?: number | null): void {
+  if (typeof window === "undefined") return;
+  if (Number.isFinite(userId)) {
+    window.localStorage.removeItem(cacheKeyForUser(userId));
+    return;
+  }
+
+  const keysToRemove: string[] = [];
+  for (let index = 0; index < window.localStorage.length; index += 1) {
+    const key = window.localStorage.key(index);
+    if (key === PRODUCT_OPTIONS_CACHE_KEY || key?.startsWith(`${PRODUCT_OPTIONS_CACHE_KEY}:`)) {
+      keysToRemove.push(key);
+    }
+  }
+  keysToRemove.forEach((key) => window.localStorage.removeItem(key));
+}

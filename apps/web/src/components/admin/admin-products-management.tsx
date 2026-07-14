@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useState, type FormEvent } from "react";
-import { Eye, EyeOff, Loader2, Search, Upload } from "lucide-react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { Eye, EyeOff, Loader2, Pencil, Plus, Search, Trash2, Upload } from "lucide-react";
 
 import {
   AdminConfirmDialog,
@@ -16,7 +16,6 @@ import {
   createAdminUser,
   createTenantProduct,
   deleteAdminUser,
-  deleteTenantProduct,
   deleteAdminProduct,
   resetAdminUserPassword,
   setAdminUserProducts,
@@ -25,6 +24,7 @@ import {
   type AdminProduct,
   type AdminUser,
 } from "@/lib/api";
+import { clearCachedTenantProducts } from "@/lib/product-options-cache";
 import { slugifyProductName } from "@/lib/product-slug";
 import { cn } from "@/lib/utils";
 
@@ -251,10 +251,12 @@ type SalespersonDrawerProps = {
   mode: "create" | "edit";
   user: AdminUser | null;
   products: AdminProduct[];
+  users: AdminUser[];
   avatarUrl: string | null;
   onAvatarChange: (url: string | null) => void;
   onClose: () => void;
   onSaved: () => void;
+  onProductsChanged: () => void | Promise<void>;
 };
 
 export function SalespersonFormDrawer(props: SalespersonDrawerProps) {
@@ -268,10 +270,12 @@ function SalespersonFormDrawerContent({
   mode,
   user,
   products,
+  users,
   avatarUrl,
   onAvatarChange,
   onClose,
   onSaved,
+  onProductsChanged,
 }: SalespersonDrawerProps) {
   const [username, setUsername] = useState(user?.username ?? "");
   const [displayName, setDisplayName] = useState(user?.display_name ?? "");
@@ -286,6 +290,7 @@ function SalespersonFormDrawerContent({
   const [revokeConfirmOpen, setRevokeConfirmOpen] = useState(false);
   const [pendingRevokeNames, setPendingRevokeNames] = useState<string[]>([]);
   const [pendingSave, setPendingSave] = useState<(() => Promise<void>) | null>(null);
+  const [brandManagementOpen, setBrandManagementOpen] = useState(false);
 
   const initialProductIds = useMemo(
     () => (user?.bound_products ?? []).map((product) => product.id),
@@ -303,6 +308,11 @@ function SalespersonFormDrawerContent({
     );
   }, [brandSearch, products]);
 
+  const activeProductIds = useMemo(() => {
+    const availableIds = new Set(products.map((product) => product.id));
+    return productIds.filter((id) => availableIds.has(id));
+  }, [productIds, products]);
+
   async function performSave() {
     setSubmitting(true);
     setError(null);
@@ -317,7 +327,7 @@ function SalespersonFormDrawerContent({
           email: emailPayload,
           role: "sales",
           is_active: isActive,
-          product_ids: productIds,
+          product_ids: activeProductIds,
         });
       } else if (user) {
         await updateAdminUser(user.id, {
@@ -329,7 +339,7 @@ function SalespersonFormDrawerContent({
         if (password.trim()) {
           await resetAdminUserPassword(user.id, password.trim());
         }
-        await setAdminUserProducts(user.id, productIds);
+        await setAdminUserProducts(user.id, activeProductIds);
       }
       onSaved();
       onClose();
@@ -365,7 +375,7 @@ function SalespersonFormDrawerContent({
     }
 
     if (mode === "edit" && user) {
-      const removedIds = initialProductIds.filter((id) => !productIds.includes(id));
+      const removedIds = initialProductIds.filter((id) => !activeProductIds.includes(id));
       const riskyRemoved = products.filter(
         (product) =>
           removedIds.includes(product.id) &&
@@ -385,7 +395,7 @@ function SalespersonFormDrawerContent({
     await performSave();
   }
 
-  const visibleSelectedCount = filteredProducts.filter((product) => productIds.includes(product.id)).length;
+  const visibleSelectedCount = filteredProducts.filter((product) => activeProductIds.includes(product.id)).length;
 
   return (
     <>
@@ -459,23 +469,33 @@ function SalespersonFormDrawerContent({
                 <h3 className="text-sm font-semibold text-[#102033]">负责品牌</h3>
                 <p className="mt-1 text-xs text-[#667085]">勾选后该业务员可在工作台查看和处理这些品牌。</p>
               </div>
-              {products.length ? (
+              <div className="flex items-center gap-3">
                 <button
                   type="button"
-                  className="text-xs font-semibold text-[#2563EB]"
-                  onClick={() => {
-                    const visibleIds = filteredProducts.map((product) => product.id);
-                    const allVisibleSelected = visibleIds.every((id) => productIds.includes(id));
-                    setProductIds((current) =>
-                      allVisibleSelected
-                        ? current.filter((id) => !visibleIds.includes(id))
-                        : Array.from(new Set([...current, ...visibleIds])),
-                    );
-                  }}
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-[#2563EB]"
+                  onClick={() => setBrandManagementOpen(true)}
                 >
-                  {filteredProducts.length > 0 && visibleSelectedCount === filteredProducts.length ? "取消全选" : "全选"}
+                  <Pencil className="h-3.5 w-3.5" />
+                  编辑品牌
                 </button>
-              ) : null}
+                {products.length ? (
+                  <button
+                    type="button"
+                    className="text-xs font-semibold text-[#2563EB]"
+                    onClick={() => {
+                      const visibleIds = filteredProducts.map((product) => product.id);
+                      const allVisibleSelected = visibleIds.every((id) => productIds.includes(id));
+                      setProductIds((current) =>
+                        allVisibleSelected
+                          ? current.filter((id) => !visibleIds.includes(id))
+                          : Array.from(new Set([...current, ...visibleIds])),
+                      );
+                    }}
+                  >
+                    {filteredProducts.length > 0 && visibleSelectedCount === filteredProducts.length ? "取消全选" : "全选"}
+                  </button>
+                ) : null}
+              </div>
             </div>
             {products.length ? (
               <>
@@ -538,6 +558,16 @@ function SalespersonFormDrawerContent({
         onConfirm={() => {
           void pendingSave?.();
         }}
+      />
+      <AdminBrandManagementDrawer
+        open={brandManagementOpen}
+        products={products}
+        users={users}
+        selectedProductIds={activeProductIds}
+        onSelectedProductIdsChange={setProductIds}
+        defaultOwnerUserId={user?.id ?? null}
+        onClose={() => setBrandManagementOpen(false)}
+        onProductsChanged={onProductsChanged}
       />
     </>
   );
@@ -1047,6 +1077,195 @@ export async function deleteBrandSafely(brand: AdminProduct) {
   await deleteAdminProduct(brand.id);
 }
 
+type AdminBrandManagementDrawerProps = {
+  open: boolean;
+  products: AdminProduct[];
+  users: AdminUser[];
+  selectedProductIds?: number[];
+  defaultOwnerUserId?: number | null;
+  onSelectedProductIdsChange?: (productIds: number[]) => void;
+  onClose: () => void;
+  onProductsChanged: () => void | Promise<void>;
+};
+
+export function AdminBrandManagementDrawer({
+  open,
+  products,
+  users,
+  selectedProductIds = [],
+  defaultOwnerUserId = null,
+  onSelectedProductIdsChange,
+  onClose,
+  onProductsChanged,
+}: AdminBrandManagementDrawerProps) {
+  const [query, setQuery] = useState("");
+  const [editingBrand, setEditingBrand] = useState<AdminProduct | null>(null);
+  const [creatingBrand, setCreatingBrand] = useState(false);
+  const [deletingBrand, setDeletingBrand] = useState<AdminProduct | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const selectedSet = useMemo(() => new Set(selectedProductIds), [selectedProductIds]);
+  const filteredProducts = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return products;
+    return products.filter(
+      (product) =>
+        product.name.toLowerCase().includes(normalized) ||
+        product.slug.toLowerCase().includes(normalized) ||
+        String(product.id).includes(normalized),
+    );
+  }, [products, query]);
+
+  useEffect(() => {
+    if (!onSelectedProductIdsChange) return;
+    const availableIds = new Set(products.map((product) => product.id));
+    const nextSelectedIds = selectedProductIds.filter((id) => availableIds.has(id));
+    if (nextSelectedIds.length !== selectedProductIds.length) {
+      onSelectedProductIdsChange(nextSelectedIds);
+    }
+  }, [onSelectedProductIdsChange, products, selectedProductIds]);
+
+  if (!open) return null;
+
+  async function refreshProducts() {
+    clearCachedTenantProducts();
+    await onProductsChanged();
+  }
+
+  function toggleSelected(productId: number) {
+    if (!onSelectedProductIdsChange) return;
+    onSelectedProductIdsChange(
+      selectedSet.has(productId)
+        ? selectedProductIds.filter((id) => id !== productId)
+        : [...selectedProductIds, productId],
+    );
+  }
+
+  async function handleBrandSaved() {
+    setError(null);
+    await refreshProducts();
+  }
+
+  async function confirmDelete() {
+    if (!deletingBrand) return;
+    setDeleteLoading(true);
+    setError(null);
+    try {
+      const deletedId = deletingBrand.id;
+      await deleteBrandSafely(deletingBrand);
+      if (onSelectedProductIdsChange) {
+        onSelectedProductIdsChange(selectedProductIds.filter((id) => id !== deletedId));
+      }
+      setDeletingBrand(null);
+      await refreshProducts();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除品牌失败。");
+    } finally {
+      setDeleteLoading(false);
+    }
+  }
+
+  return (
+    <>
+      <AdminDrawer
+        open={open}
+        title="编辑品牌"
+        description="新增、修改、删除品牌后，账号权限和业务员负责品牌列表会立即刷新。"
+        onClose={onClose}
+      >
+        <div className="space-y-4">
+          {error ? <div className="rounded-md border border-[#FECDCA] bg-[#FEF3F2] px-4 py-3 text-sm text-[#B42318]">{error}</div> : null}
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="relative min-w-[220px] flex-1">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#98A2B3]" />
+              <AdminInput
+                className="pl-9"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="搜索品牌名称 / slug / ID"
+              />
+            </label>
+            <Button type="button" className="bg-[#2563EB] text-white hover:bg-[#1D4ED8]" onClick={() => setCreatingBrand(true)}>
+              <Plus className="h-4 w-4" />
+              新增品牌
+            </Button>
+          </div>
+
+          <div className="grid max-h-[58vh] gap-2 overflow-auto">
+            {filteredProducts.map((product) => (
+              <div key={product.id} className="flex items-center gap-3 rounded-md border border-[#DDE6F0] bg-white px-3 py-2 text-sm">
+                {onSelectedProductIdsChange ? (
+                  <input
+                    type="checkbox"
+                    checked={selectedSet.has(product.id)}
+                    onChange={() => toggleSelected(product.id)}
+                    className="h-4 w-4 accent-[#2563EB]"
+                    aria-label={`选择 ${product.name}`}
+                  />
+                ) : null}
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-medium text-[#102033]">{product.name}</div>
+                  <div className="truncate font-mono text-[11px] text-[#98A2B3]">
+                    #{product.id} / {product.slug}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="rounded-md p-2 text-[#475467] hover:bg-[#F3F6FA] hover:text-[#2563EB]"
+                  onClick={() => setEditingBrand(product)}
+                  aria-label={`编辑 ${product.name}`}
+                >
+                  <Pencil className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  className="rounded-md p-2 text-[#B42318] hover:bg-[#FEF3F2]"
+                  onClick={() => setDeletingBrand(product)}
+                  aria-label={`删除 ${product.name}`}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
+            ))}
+            {!filteredProducts.length ? (
+              <div className="rounded-md border border-dashed border-[#DDE6F0] bg-[#FAFBFC] px-4 py-6 text-center text-sm text-[#667085]">
+                没有匹配的品牌。
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </AdminDrawer>
+
+      <WorkbenchBrandDrawer
+        open={creatingBrand}
+        mode="create"
+        brand={null}
+        users={users}
+        defaultOwnerUserId={defaultOwnerUserId}
+        onClose={() => setCreatingBrand(false)}
+        onSaved={() => void handleBrandSaved()}
+      />
+      <WorkbenchBrandDrawer
+        open={Boolean(editingBrand)}
+        mode="edit"
+        brand={editingBrand}
+        users={users}
+        onClose={() => setEditingBrand(null)}
+        onSaved={() => void handleBrandSaved()}
+      />
+      <AdminDeleteConfirmDialog
+        open={Boolean(deletingBrand)}
+        title="确认删除品牌？"
+        description={deletingBrand ? buildBrandDeleteDescription(deletingBrand) : ""}
+        loading={deleteLoading}
+        onCancel={() => setDeletingBrand(null)}
+        onConfirm={() => void confirmDelete()}
+      />
+    </>
+  );
+}
+
 type WorkbenchBrandDrawerProps = {
   open: boolean;
   mode: "create" | "edit";
@@ -1227,6 +1446,7 @@ function WorkbenchSalespersonDrawerContent({
   onClose,
   onSaved,
 }: WorkbenchSalespersonDrawerProps & { user: AdminUser }) {
+  const [username, setUsername] = useState(user.username);
   const [displayName, setDisplayName] = useState(user.display_name ?? "");
   const [email, setEmail] = useState(user.email ?? "");
   const [isActive, setIsActive] = useState(user.is_active);
@@ -1235,10 +1455,20 @@ function WorkbenchSalespersonDrawerContent({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    const trimmedUsername = username.trim();
+    if (!trimmedUsername) {
+      setError("请填写登录账号。");
+      return;
+    }
+    if (!/^[A-Za-z0-9_.-]+$/.test(trimmedUsername)) {
+      setError("登录账号只能包含字母、数字、下划线、点和短横线。");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
       await updateAdminUser(user!.id, {
+        username: trimmedUsername,
         display_name: displayName.trim() || null,
         email: email.trim() || null,
         is_active: isActive,
@@ -1246,7 +1476,8 @@ function WorkbenchSalespersonDrawerContent({
       onSaved();
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "保存业务员失败。");
+      const message = err instanceof Error ? err.message : "保存业务员失败。";
+      setError(/exist|duplicate|409|已存在|重复/i.test(message) ? "登录账号已存在，请更换后再保存。" : message);
     } finally {
       setSubmitting(false);
     }
@@ -1256,14 +1487,14 @@ function WorkbenchSalespersonDrawerContent({
     <AdminDrawer
       open={open}
       title={`编辑业务员 · ${user.username}`}
-      description="修改显示名称、邮箱和账号状态。登录账号创建后不可修改。"
+      description="修改登录账号、显示名称、邮箱和账号状态。"
       onClose={onClose}
     >
       <form onSubmit={submit} className="space-y-4">
         {error ? <div className="rounded-md border border-[#FECDCA] bg-[#FEF3F2] px-4 py-3 text-sm text-[#B42318]">{error}</div> : null}
         <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
           登录账号
-          <AdminInput value={user.username} disabled />
+          <AdminInput value={username} onChange={(event) => setUsername(event.target.value)} />
         </label>
         <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
           业务员姓名 / 昵称
