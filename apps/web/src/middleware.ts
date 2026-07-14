@@ -16,9 +16,6 @@ export function middleware(request: NextRequest) {
       response.cookies.set(AUTH_COOKIE, "", { path: "/", maxAge: 0 });
       return response;
     }
-    if (isAuthenticated) {
-      return NextResponse.redirect(new URL("/admin/dashboard", request.url));
-    }
     return NextResponse.next();
   }
 
@@ -28,9 +25,6 @@ export function middleware(request: NextRequest) {
       const response = NextResponse.next();
       response.cookies.set(AUTH_COOKIE, "", { path: "/", maxAge: 0 });
       return response;
-    }
-    if (isAuthenticated) {
-      return NextResponse.redirect(new URL("/", request.url));
     }
     return NextResponse.next();
   }

@@ -181,6 +181,22 @@ test("admin route guard clears non-admin sessions before showing admin pages", (
   assert.match(guard, /\/admin\/login\?error=admin_required/);
 });
 
+test("admin login page is not server-redirected by a stale auth cookie", () => {
+  const middleware = source("../src/middleware.ts");
+  const adminLoginBlock = middleware.match(/if \(isAdminLoginPage\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
+
+  assert.match(adminLoginBlock, /return NextResponse\.next\(\)/);
+  assert.doesNotMatch(adminLoginBlock, /\/admin\/dashboard/);
+});
+
+test("sales login page is not server-redirected by a stale auth cookie", () => {
+  const middleware = source("../src/middleware.ts");
+  const loginBlock = middleware.match(/if \(isLoginPage\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
+
+  assert.match(loginBlock, /return NextResponse\.next\(\)/);
+  assert.doesNotMatch(loginBlock, /NextResponse\.redirect\(new URL\("\/"/);
+});
+
 test("sales sidebar reuses product options across route remounts", () => {
   const sidebar = source("../src/components/layout/sidebar.tsx");
 
