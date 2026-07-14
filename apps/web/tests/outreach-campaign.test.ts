@@ -496,6 +496,30 @@ test("one click workbench explains disabled primary actions", () => {
     }),
     null,
   );
+  assert.equal(
+    getOneClickPrimaryDisabledReason({
+      recipientCount: 10,
+      sourceAvailable: true,
+      smtpReady: true,
+      aiReady: false,
+      configLoading: true,
+      generationMode: "ai",
+      action: "preview",
+    }),
+    "正在检查配置，请稍候",
+  );
+  assert.equal(
+    getOneClickPrimaryDisabledReason({
+      recipientCount: 10,
+      sourceAvailable: true,
+      smtpReady: true,
+      aiReady: false,
+      configLoading: false,
+      generationMode: "ai",
+      action: "preview",
+    }),
+    "AI 模型未配置，暂时无法自动优化话术。",
+  );
 });
 
 test("one click workbench exposes exactly one primary action by state", () => {

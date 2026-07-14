@@ -222,7 +222,10 @@ export function OutreachCampaignsPanel() {
   const canUseFilters = Boolean(filterSnapshot || filterCount > 0);
   const canUseSelected = selectedCount > 0;
   const aiReady = workbench?.ai_generation.status === "normal";
+  const aiNotConfigured = workbench?.ai_generation.status === "not_configured";
   const smtpReady = workbench?.smtp.status === "normal";
+  const workbenchStatusTone = (status: string | undefined) =>
+    statusVariant(loading || !workbench ? "checking" : status ?? "checking");
   const selectedTemplate = templates.find((template) => template.id === selectedTemplateId) ?? null;
   const sourceAvailable =
     (sourceMode === "filters" && canUseFilters) ||
@@ -449,7 +452,9 @@ export function OutreachCampaignsPanel() {
       recipientCount: estimatedSourceCount || preview?.can_queue_count || 0,
       sourceAvailable,
       smtpReady: Boolean(smtpReady),
+      smtpStatus: workbench?.smtp.status,
       aiReady: Boolean(aiReady),
+      configLoading: loading || !workbench,
       generationMode: copyMode === "ai" ? "ai" : "template",
       action,
       scheduledAt,
@@ -494,6 +499,7 @@ export function OutreachCampaignsPanel() {
           sent: processed.sent,
           failed: processed.failed,
           skipped,
+          reason: processed.message,
         });
         if (processed.failed > 0 && processed.sent === 0) {
           setError(resultMessage);
@@ -780,12 +786,12 @@ export function OutreachCampaignsPanel() {
               <MetricPill
                 label="AI 话术"
                 value={aiStatusText}
-                status={statusVariant(workbench?.ai_generation.status ?? "not_configured")}
+                status={workbenchStatusTone(workbench?.ai_generation.status)}
               />
               <MetricPill
                 label="SMTP"
                 value={smtpStatusText}
-                status={statusVariant(workbench?.smtp.status ?? "not_configured")}
+                status={workbenchStatusTone(workbench?.smtp.status)}
               />
               <MetricPill label="可发送邮箱" value={`${workbench?.available_recipient_count ?? 0} 个`} />
               <MetricPill
@@ -1081,7 +1087,7 @@ export function OutreachCampaignsPanel() {
                     </div>
                   </div>
                 ) : null}
-                {copyMode === "ai" && !aiReady ? (
+                {copyMode === "ai" && aiNotConfigured ? (
                   <div className="campaign-inline-warning flex gap-2 text-sm">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                     AI 模型未配置，暂时无法自动优化话术。

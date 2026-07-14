@@ -33,8 +33,23 @@ class EmailNotConfiguredError(Exception):
 
 def format_smtp_send_error(exc: Exception) -> str:
     message = str(exc)
-    if "535" in message or "authentication failed" in message.lower():
+    lowered = message.lower()
+    if "535" in message or "authentication failed" in lowered:
         return SMTP_AUTH_FAILED_MSG
+    if (
+        "timed out" in lowered
+        or "timeout" in lowered
+        or "10060" in message
+        or ("connect" in lowered and ("failed" in lowered or "error" in lowered or "refused" in lowered))
+    ):
+        host = (settings.smtp_host or "").strip() or "SMTP 服务器"
+        port = settings.smtp_port
+        return (
+            f"无法连接邮件服务器 {host}:{port}（连接超时）。"
+            "当前网络访问不了 Gmail SMTP 时，请改用可连通的邮箱服务"
+            "（如 smtp.qq.com / smtp.exmail.qq.com），"
+            "或打通 smtp.gmail.com 后再发送。"
+        )
     return message[:2000]
 
 
@@ -248,12 +263,32 @@ class EmailService:
             "username": settings.smtp_user,
             "password": settings.smtp_password,
             "recipients": recipients,
+            "timeout": 20,
         }
 
         if settings.smtp_port == 465:
             send_kwargs["use_tls"] = True
         elif settings.smtp_use_tls:
             send_kwargs["start_tls"] = True
+
+        proxy_url = (settings.smtp_proxy_url or "").strip()
+        if proxy_url:
+            try:
+                from python_socks.async_.asyncio import Proxy
+            except ImportError as exc:
+                raise RuntimeError(
+                    "已配置 SMTP_PROXY_URL，但未安装 python-socks。"
+                    "请在 apps/api 执行: pip install python-socks"
+                ) from exc
+            proxy = Proxy.from_url(proxy_url)
+            sock = await proxy.connect(
+                dest_host=settings.smtp_host.strip(),
+                dest_port=int(settings.smtp_port),
+            )
+            send_kwargs["sock"] = sock
+            # When using an existing socket, hostname/port are not used for connect.
+            send_kwargs.pop("hostname", None)
+            send_kwargs.pop("port", None)
 
         await aiosmtplib.send(message, **send_kwargs)
 

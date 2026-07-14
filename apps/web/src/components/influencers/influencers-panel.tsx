@@ -261,7 +261,8 @@ function resolveContactSummary(item: Influencer): string {
 }
 
 function aiReasonPreview(item: Influencer): string {
-  return item.score_reason || item.ai_summary || "-";
+  const raw = item.score_reason || item.ai_summary || "-";
+  return raw === "-" ? raw : translateErrorMessage(raw);
 }
 
 function resolveEmailSource(item: Influencer): string {

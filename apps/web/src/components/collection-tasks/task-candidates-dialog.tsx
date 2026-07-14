@@ -344,7 +344,7 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
           result.total === 0
         ) {
           setStatsMismatch(
-            "任务统计显示有入库数据，但当前筛选下暂无候选记录。系统已尝试补齐历史明细；请切换到「全部状态」查看，或重新运行任务。",
+            "顶部「已入库」是任务统计数字；当前候选池明细表为空。常见于手动停止时还在解析主页、尚未真正写入候选明细。请到红人库查看，或重新运行任务完成入库；切换「全部状态」若仍为 0，说明这次没有可展示明细。",
           );
         } else {
           setStatsMismatch(null);

@@ -13,8 +13,13 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+def _ai_provider_label() -> str:
+    return settings.ai_provider_display_name
+
+
 OPENAI_NOT_CONFIGURED_MSG = (
-    "未配置 OPENAI_API_KEY。请在环境变量中设置 OPENAI_API_KEY 与 OPENAI_MODEL 后重启 API 服务。"
+    "未配置 AI API Key。请在环境变量中设置 OPENAI_API_KEY 与 OPENAI_MODEL "
+    "（当前可对接 DeepSeek / OpenAI 兼容接口）后重启 API 服务。"
 )
 
 
@@ -25,7 +30,7 @@ def _parse_json_content(content: str) -> dict[str, Any]:
         text = re.sub(r"\s*```$", "", text)
     parsed = json.loads(text)
     if not isinstance(parsed, dict):
-        raise ValueError("OpenAI 返回的 JSON 不是对象")
+        raise ValueError(f"{_ai_provider_label()} 返回的 JSON 不是对象")
     return parsed
 
 
@@ -44,21 +49,25 @@ def _chat_temperature(model: str, requested: float) -> float:
 
 
 def _format_openai_error(exc: Exception, *, status_code: int | None = None, body: str = "") -> str:
+    provider = _ai_provider_label()
     text = body or str(exc)
     if status_code == 404:
         model = settings.openai_model.strip() or "(empty)"
         return (
-            f"OpenAI 模型不可用：{model}。"
+            f"{provider} 模型不可用：{model}。"
             f"请检查 OPENAI_MODEL 环境变量是否与当前 API 账户支持的模型一致。"
         )
     if status_code in {401, 403}:
         if "blocked" in text.lower():
-            return f"OpenAI API 错误 HTTP {status_code}: {text[:300]}"
-        return "OpenAI API Key 无效或已过期，请检查 OPENAI_API_KEY。"
+            return f"{provider} API 错误 HTTP {status_code}: {text[:300]}"
+        return f"{provider} API Key 无效或已过期，请检查 OPENAI_API_KEY。"
     if status_code is not None:
-        return f"OpenAI API 错误 HTTP {status_code}: {text[:300]}"
+        return f"{provider} API 错误 HTTP {status_code}: {text[:300]}"
     if isinstance(exc, httpx.HTTPError):
-        return f"无法连接 OpenAI API（{settings.openai_api_base}），请检查网络与 OPENAI_API_BASE。"
+        return (
+            f"无法连接 {provider} API（{settings.openai_api_base}），"
+            f"请检查网络与 OPENAI_API_BASE。"
+        )
     return str(exc).strip() or exc.__class__.__name__
 
 
@@ -85,7 +94,7 @@ async def _post_chat_completion(payload: dict[str, Any]) -> dict[str, Any]:
         )
     data = response.json()
     if not isinstance(data, dict):
-        raise ValueError("OpenAI 返回的响应不是 JSON 对象")
+        raise ValueError(f"{_ai_provider_label()} 返回的响应不是 JSON 对象")
     return data
 
 
@@ -116,10 +125,10 @@ async def chat_completion_json(
     except Exception as exc:
         message = str(exc)
         if "response_format" not in message and "json_object" not in message and "text.format" not in message:
-            logger.warning("OpenAI chat completion failed (model=%s): %s", model, message)
+            logger.warning("AI chat completion failed (model=%s): %s", model, message)
             raise RuntimeError(message) from exc
         logger.warning(
-            "OpenAI json_object mode failed (model=%s), retrying plain JSON prompt: %s",
+            "AI json_object mode failed (model=%s), retrying plain JSON prompt: %s",
             model,
             message,
         )
@@ -128,7 +137,7 @@ async def chat_completion_json(
             response = await _post_chat_completion(payload)
         except Exception as retry_exc:
             retry_message = str(retry_exc)
-            logger.warning("OpenAI chat completion failed (model=%s): %s", model, retry_message)
+            logger.warning("AI chat completion failed (model=%s): %s", model, retry_message)
             raise RuntimeError(retry_message) from retry_exc
 
     choices = response.get("choices")
@@ -136,7 +145,7 @@ async def chat_completion_json(
     message = choice.get("message") if isinstance(choice, dict) else {}
     content = (message.get("content") if isinstance(message, dict) else "") or ""
     if not content.strip():
-        raise ValueError("OpenAI 返回空内容")
+        raise ValueError(f"{_ai_provider_label()} 返回空内容")
     return _parse_json_content(content)
 
 
@@ -165,7 +174,7 @@ async def chat_completion_text(
         response = await _post_chat_completion(payload)
     except Exception as exc:
         message = str(exc)
-        logger.warning("OpenAI chat completion failed (model=%s): %s", model, message)
+        logger.warning("AI chat completion failed (model=%s): %s", model, message)
         raise RuntimeError(message) from exc
 
     choices = response.get("choices")
@@ -173,5 +182,5 @@ async def chat_completion_text(
     message = choice.get("message") if isinstance(choice, dict) else {}
     content = (message.get("content") if isinstance(message, dict) else "") or ""
     if not content.strip():
-        raise ValueError("OpenAI 返回空内容")
+        raise ValueError(f"{_ai_provider_label()} 返回空内容")
     return content.strip()

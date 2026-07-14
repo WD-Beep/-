@@ -138,7 +138,7 @@ export function LoginForm() {
                     name="password"
                     type={showPassword ? "text" : "password"}
                     autoComplete="current-password"
-                    placeholder="••••••"
+                    placeholder="请输入密码"
                     value={password}
                     onChange={(event) => {
                       setPassword(event.target.value);

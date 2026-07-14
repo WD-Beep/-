@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     smtp_test_recipient: str = ""
     smtp_test_schedule_enabled: bool = False
     smtp_test_interval_minutes: int = 1440
+    # Optional SOCKS/HTTP proxy for Gmail SMTP when direct connect is blocked.
+    # Example: socks5://127.0.0.1:7890
+    smtp_proxy_url: str = ""
 
     inbound_email_address: str = Field(
         default="",
@@ -211,14 +214,30 @@ class Settings(BaseSettings):
     @property
     def ai_mode(self) -> str:
         if self.is_openai_configured:
-            return "openai"
+            return self.active_ai_provider
         return "heuristic"
 
     @property
     def active_ai_provider(self) -> str:
-        if self.is_openai_configured:
-            return "openai"
-        return "heuristic"
+        if not self.is_openai_configured:
+            return "heuristic"
+        base = self.openai_api_base.strip().lower()
+        model = self.openai_model.strip().lower()
+        if "deepseek" in base or model.startswith("deepseek"):
+            return "deepseek"
+        if "moonshot" in base or model.startswith("kimi"):
+            return "kimi"
+        return "openai"
+
+    @property
+    def ai_provider_display_name(self) -> str:
+        names = {
+            "deepseek": "DeepSeek",
+            "kimi": "Kimi",
+            "openai": "OpenAI",
+            "heuristic": "规则评分",
+        }
+        return names.get(self.active_ai_provider, self.active_ai_provider)
 
     @property
     def active_ai_model(self) -> str | None:
@@ -243,8 +262,30 @@ class Settings(BaseSettings):
     def get_smtp_status(self) -> dict:
         configured = self.is_smtp_configured
         warning = SMTP_FROM_USER_MISMATCH_MSG if self.smtp_from_user_mismatch else None
+        reachable = None
+        if configured and self.smtp_host:
+            import socket
+
+            sock = socket.socket()
+            sock.settimeout(3)
+            try:
+                sock.connect((self.smtp_host.strip(), int(self.smtp_port)))
+                reachable = True
+            except OSError:
+                reachable = False
+                host_port = f"{self.smtp_host.strip()}:{self.smtp_port}"
+                unreachable_msg = (
+                    f"当前网络无法连通 {host_port}，发送会失败；"
+                    "请开启可访问 Google 的代理/VPN，并在 .env 设置 SMTP_PROXY_URL（如 socks5://127.0.0.1:7890），或打通 smtp.gmail.com。"
+                )
+                warning = f"{warning} {unreachable_msg}".strip() if warning else unreachable_msg
+            finally:
+                sock.close()
         if configured:
-            message = "SMTP configured, ready to send emails."
+            if reachable is False:
+                message = "SMTP 已配置但当前网络不可达，发送会失败。"
+            else:
+                message = "SMTP configured, ready to send emails."
             if warning:
                 message = f"{message} {warning}"
         else:

@@ -290,11 +290,11 @@ export function SettingsPanel() {
                   <div className="grid gap-3 p-3 md:grid-cols-2 xl:grid-cols-3">
                     <ServiceTile
                       title="AI 配置"
-                      description="OpenAI 优先，失败降级启发式评分"
+                      description="AI（DeepSeek/兼容接口）优先，失败降级启发式评分"
                       configured={status.ai.configured}
                       message={
                         status.ai.configured
-                          ? "OpenAI API 已配置，采集后将写入 AI 画像；失败时自动降级为本地启发式评分。"
+                          ? "AI API 已配置（当前可对接 DeepSeek），采集后将写入 AI 画像；失败时自动降级为本地启发式评分。"
                           : "未配置 OPENAI_API_KEY，采集后使用本地启发式评分。"
                       }
                     />
@@ -330,7 +330,7 @@ export function SettingsPanel() {
                     <div>
                       <h3 className="mb-2 text-sm font-semibold">AI 运行状态</h3>
                       <div className="rounded-lg border bg-muted/20 px-3">
-                        <ConfigRow label="服务商" value={status.ai.provider === "openai" ? "OpenAI" : aiModeLabel(status.ai.provider)} />
+                        <ConfigRow label="服务商" value={aiModeLabel(status.ai.provider)} />
                         <ConfigRow label="运行模式" badge={<Badge variant="secondary">{aiModeLabel(status.ai.mode)}</Badge>} />
                         {status.ai.configured && status.ai.model ? <ConfigRow label="模型" value={status.ai.model} /> : null}
                       </div>

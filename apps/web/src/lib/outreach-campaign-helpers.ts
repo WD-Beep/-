@@ -383,9 +383,12 @@ export function buildImmediateSendResultMessage(input: {
   sent: number;
   failed: number;
   skipped: number;
+  reason?: string | null;
 }): string {
   if (input.failed > 0 && input.sent === 0) {
-    return "发送失败，请检查 SMTP 配置、邮箱授权码、收件人邮箱格式或网络连接。";
+    return input.reason?.trim()
+      ? input.reason.trim()
+      : "发送失败：当前网络连不上 SMTP 服务器（如 Gmail）。请改用 QQ/企业邮 SMTP，或打通 Gmail 后再发。";
   }
   if (input.failed > 0) {
     return `成功 ${input.sent} 封，失败 ${input.failed} 封。点击查看失败原因。`;
@@ -421,14 +424,23 @@ export function getOneClickPrimaryDisabledReason(input: {
   recipientCount: number;
   sourceAvailable: boolean;
   smtpReady: boolean;
+  smtpStatus?: string | null;
   aiReady: boolean;
+  /** 工作台配置尚未拉回时不要报「未配置」，避免误导业务员 */
+  configLoading?: boolean;
   generationMode: "ai" | "template" | "preview";
   action: "preview" | "send" | "queue" | "save";
   scheduledAt?: Date | null;
 }): string | null {
+  if (input.configLoading) return "正在检查配置，请稍候";
   if (!input.sourceAvailable || input.recipientCount <= 0) return "没有邮件发出。没有可发送对象，请回到红人库选择收件人。";
   if (input.generationMode === "ai" && !input.aiReady) return "AI 模型未配置，暂时无法自动优化话术。";
-  if (input.action !== "preview" && !input.smtpReady) return "邮件没有发出。原因：SMTP 未配置，请先在设置中配置发件邮箱。";
+  if (input.action !== "preview" && !input.smtpReady) {
+    if (input.smtpStatus === "error") {
+      return "邮件没有发出。原因：SMTP 已配置，但当前网络连不上邮件服务器（如 Gmail）。请改用 QQ/企业邮 SMTP，或打通网络后再发。";
+    }
+    return "邮件没有发出。原因：SMTP 未配置，请先在设置中配置发件邮箱。";
+  }
   if ((input.action === "queue" || input.action === "save") && !input.scheduledAt) return "请先选择发送日期和具体时间";
   return null;
 }
@@ -462,8 +474,11 @@ export function humanizeOutreachFailureReason(message: string | null | undefined
   if (/insufficient balance|exceeded_current_quota|quota|account suspended|额度|余额不足|充值/i.test(text)) {
     return "AI 账户余额不足或额度受限，请充值 DeepSeek/API 账户或更换可用密钥后重试。";
   }
+  if (/timed out|timeout|10060|无法连接邮件服务器|smtp\.gmail\.com/i.test(text)) {
+    return "连不上邮件服务器（Gmail SMTP 超时）。请改用 QQ/企业邮 SMTP，或打通网络后再发";
+  }
   if (/SMTP|535|authentication|auth|认证失败/i.test(text)) {
-    return "邮箱授权码或 SMTP 配置不对，邮件没有发出去";
+    return "发件授权码或 SMTP 配置不对，邮件没有发出去";
   }
   if (/缺少邮箱|没有可用邮箱/.test(text)) return "该红人没有可用邮箱";
   if (/已.*成功.*发信|已发送过|重复发送|成功发信记录/.test(text)) return "为避免重复骚扰，系统跳过";

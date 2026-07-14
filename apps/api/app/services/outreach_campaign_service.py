@@ -307,8 +307,16 @@ class OutreachCampaignService:
                 ),
             ),
             smtp=OutreachWorkbenchStatusItem(
-                status="normal" if settings.is_smtp_configured and not settings.smtp_from_user_mismatch else "not_configured",
+                status=(
+                    "error"
+                    if settings.is_smtp_configured
+                    and "网络无法连通" in (settings.get_smtp_status().get("warning") or "")
+                    else "normal"
+                    if settings.is_smtp_configured and not settings.smtp_from_user_mismatch
+                    else "not_configured"
+                ),
                 message=settings.get_smtp_status()["message"],
+
             ),
             available_recipient_count=await OutreachCampaignService._count_available_recipients(
                 db, product_id=product_id
@@ -1675,6 +1683,7 @@ class OutreachCampaignService:
         )
         now = datetime.now(UTC)
         sent = failed = skipped = 0
+        first_send_error: str | None = None
 
         for rec in rows:
             if filter_ids and rec.product_influencer_id not in filter_ids:
@@ -1730,7 +1739,7 @@ class OutreachCampaignService:
                 "sender_email": sender_email,
                 "influencer_username": global_row.username,
                 "generated_by_ai": True,
-                "ai_provider": "openai",
+                "ai_provider": settings.active_ai_provider,
                 "ai_reason": rec.reason,
                 "matched_knowledge": rec.matched_knowledge,
                 "message_id": message_id,
@@ -1857,7 +1866,7 @@ class OutreachCampaignService:
             sent_today=await OutreachSendQueueService._count_sent_today_for_campaign(
                 db, product_id=product_id, campaign_id=campaign.id
             ),
-            message=f"Direct send processed {sent + failed + skipped} recipients, sent {sent}, failed {failed}, skipped {skipped}",
+            message=(f"发送失败：{first_send_error}" if sent == 0 and failed > 0 and first_send_error else f"已处理 {sent + failed + skipped} 人：成功 {sent}，失败 {failed}，跳过 {skipped}"),
         )
 
     @staticmethod

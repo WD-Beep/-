@@ -355,13 +355,25 @@ class TaskCandidateService:
         )
 
     @staticmethod
-    async def sync_task_inserted_stats(db: AsyncSession, task: CollectionTask) -> None:
+    async def sync_task_inserted_stats(
+        db: AsyncSession,
+        task: CollectionTask,
+        *,
+        force: bool = False,
+    ) -> None:
         total_candidates = await TaskCandidateService.count_by_status(db, task.id)
-        if total_candidates <= 0:
-            return
         inserted = await TaskCandidateService.count_by_status(
             db, task.id, status=CandidateStatus.INSERTED.value
         )
+        if total_candidates <= 0:
+            if not force:
+                return
+            # 候选明细为空时，避免把「已解析主页数」误当成已入库数长期挂在任务上
+            checkpoint = task.run_checkpoint if isinstance(task.run_checkpoint, dict) else {}
+            persisted = len(checkpoint.get("persisted_profiles") or [])
+            task.inserted_count = persisted
+            task.result_count = persisted
+            return
         task.inserted_count = inserted
         task.result_count = inserted
 
@@ -448,9 +460,30 @@ class TaskCandidateService:
                     if len(backfill_rows) >= missing:
                         break
 
-        if len(backfill_rows) < missing and task.last_run_at:
-            window_start = task.last_run_at - timedelta(minutes=15)
-            window_end = task.last_run_at + timedelta(minutes=15)
+        if len(backfill_rows) < missing:
+            # 手动停止/暂停时，候选池明细可能未写入，但 inserted_count 已累计。
+            # last_collected_at 也可能未刷新，因此按入库红人兜底回填，并放宽时间匹配。
+            time_clauses = []
+            if task.last_run_at:
+                window_start = task.last_run_at - timedelta(hours=48)
+                window_end = task.last_run_at + timedelta(hours=6)
+                time_clauses = [
+                    or_(
+                        and_(
+                            ProductInfluencer.last_collected_at.is_not(None),
+                            ProductInfluencer.last_collected_at >= window_start,
+                            ProductInfluencer.last_collected_at <= window_end,
+                        ),
+                        and_(
+                            ProductInfluencer.updated_at >= window_start,
+                            ProductInfluencer.updated_at <= window_end,
+                        ),
+                        and_(
+                            ProductInfluencer.created_at >= window_start,
+                            ProductInfluencer.created_at <= window_end,
+                        ),
+                    )
+                ]
             result = await db.execute(
                 select(ProductInfluencer, GlobalInfluencerProfile)
                 .join(
@@ -460,11 +493,13 @@ class TaskCandidateService:
                 .where(
                     ProductInfluencer.product_id == task.product_id,
                     ProductInfluencer.is_inserted.is_(True),
-                    ProductInfluencer.last_collected_at >= window_start,
-                    ProductInfluencer.last_collected_at <= window_end,
                     ProductInfluencer.id.notin_(linked_ids),
+                    *time_clauses,
                 )
-                .order_by(ProductInfluencer.last_collected_at.desc())
+                .order_by(
+                    ProductInfluencer.last_collected_at.desc().nullslast(),
+                    ProductInfluencer.updated_at.desc(),
+                )
                 .limit(missing - len(backfill_rows))
             )
             for product_row, global_row in result.all():

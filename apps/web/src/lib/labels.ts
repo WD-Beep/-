@@ -609,20 +609,30 @@ export function outreachLabel(provider: string): string {
 }
 
 export function aiModeLabel(mode: string): string {
+  if (mode === "deepseek") return "DeepSeek";
   if (mode === "openai") return "OpenAI";
   if (mode === "kimi") return "Kimi AI（兼容）";
-  if (mode === "heuristic") return "规则评分（未配置 OpenAI）";
+  if (mode === "heuristic") return "规则评分（未配置 AI）";
   if (mode === "heuristic_fallback") return "规则评分（AI 失败降级）";
   return mode;
 }
 
 const ERROR_TRANSLATIONS: Array<[RegExp, string]> = [
+  [/Timed out connecting to smtp\.gmail\.com|无法连接邮件服务器/i, "连不上邮件服务器（Gmail SMTP 超时）。本机可连通 smtp.qq.com / smtp.exmail.qq.com，请把 .env 的 SMTP_HOST 改成可用邮箱后再发。"],
+  [
+    /429\s*Too Many Requests|Client error '429/i,
+    "网页抓取被限流（如 Amazon 429）。请稍后重试、换商品详情页链接，或手动填写摘要/结构化知识后保存再生成话术。",
+  ],
   [
     /insufficient balance|exceeded_current_quota|quota|account suspended|额度|余额不足|充值/i,
     "AI 账户余额不足或额度受限，请充值 DeepSeek/API 账户或更换可用密钥后重试。",
   ],
-  [/OPENAI_API_KEY/i, "未配置 OpenAI API Key，请在 .env 中设置 OPENAI_API_KEY 与 OPENAI_MODEL 后重启后端"],
-  [/OPENAI_MODEL/i, "OpenAI 模型不可用，请检查 OPENAI_MODEL 环境变量"],
+  [/OpenAI API Key 无效或已过期/i, "DeepSeek API Key 无效或已过期，请检查 OPENAI_API_KEY（当前对接 DeepSeek）。"],
+  [/无法连接 OpenAI API/i, "无法连接 DeepSeek API，请检查 OPENAI_API_BASE 与网络。"],
+  [/OpenAI API 错误/i, "DeepSeek API 错误，请检查密钥、模型与账户状态。"],
+  [/OpenAI 模型不可用/i, "DeepSeek 模型不可用，请检查 OPENAI_MODEL 环境变量"],
+  [/OPENAI_API_KEY/i, "未配置 AI API Key，请在 .env 中设置 OPENAI_API_KEY 与 OPENAI_MODEL（当前对接 DeepSeek）后重启后端"],
+  [/OPENAI_MODEL/i, "AI 模型不可用，请检查 OPENAI_MODEL 环境变量"],
   [/SMTP 认证失败/i, "SMTP 认证失败：请在腾讯企业邮箱后台生成「客户端专用密码」，更新 .env 的 SMTP_PASSWORD 后重启后端"],
   [/535.*authentication failed/i, "SMTP 认证失败：请使用企业邮箱「客户端专用密码」，不要用网页登录密码"],
   [/API_DIRECT_API_KEY/i, "未配置 API Direct 密钥（API_DIRECT_API_KEY）"],

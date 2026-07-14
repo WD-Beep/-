@@ -38,6 +38,7 @@ from app.services.task_retention import (
     task_has_obvious_retention,
 )
 from app.services.task_run_progress import STAGE_COMPLETED, STAGE_FAILED
+from app.services.task_candidate import TaskCandidateService
 from app.schemas.common import PaginatedResponse
 
 
@@ -468,25 +469,35 @@ class CollectionTaskService:
         for child in targets:
             if child.status in terminal:
                 continue
-            has_results = (child.inserted_count or 0) > 0 or (child.result_count or 0) > 0
-            child.status = (
-                CollectionTaskStatus.COMPLETED_WITH_RESULTS.value
-                if has_results
-                else CollectionTaskStatus.COMPLETED_NO_RESULTS.value
-            )
-            child.current_stage = STAGE_COMPLETED
-            child.status_summary = (
-                f"{reason}；已保留并入库 {child.inserted_count or child.result_count or 0} 条数据"
-            )
-            child.error_message = None
-            child.last_error = None
-            child.last_run_at = child.last_run_at or now
             checkpoint = dict(child.run_checkpoint or {})
             checkpoint["stopped"] = True
             checkpoint["stopped_at"] = now.isoformat()
             checkpoint["stop_reason"] = "runtime_limit" if timed_out else "manual"
             checkpoint.pop("stop_requested", None)
             child.run_checkpoint = checkpoint
+            await TaskCandidateService.sync_task_inserted_stats(db, child, force=True)
+            actual_inserted = child.inserted_count or child.result_count or 0
+            hydrated = len(checkpoint.get("hydrated_profiles") or []) or int(
+                checkpoint.get("profiles_hydrating_completed") or 0
+            )
+            has_results = actual_inserted > 0
+            child.status = (
+                CollectionTaskStatus.COMPLETED_WITH_RESULTS.value
+                if has_results
+                else CollectionTaskStatus.COMPLETED_NO_RESULTS.value
+            )
+            child.current_stage = STAGE_COMPLETED
+            if actual_inserted > 0:
+                child.status_summary = f"{reason}；已保留并入库 {actual_inserted} 条数据"
+            elif hydrated > 0:
+                child.status_summary = (
+                    f"{reason}；已解析主页 {hydrated} 个，但尚未完成入库，候选池暂无明细"
+                )
+            else:
+                child.status_summary = f"{reason}；尚未入库数据"
+            child.error_message = None
+            child.last_error = None
+            child.last_run_at = child.last_run_at or now
         await db.commit()
 
         if CollectionTaskService._is_batch_parent(parent):
