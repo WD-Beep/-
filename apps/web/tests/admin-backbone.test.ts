@@ -258,6 +258,9 @@ test("link script results show simple outreach copy instead of raw JSON", () => 
 
   assert.match(panel, /getPrimaryLinkScriptText/);
   assert.match(panel, /getPrimaryLinkScriptKey/);
+  assert.match(panel, /FULL_LINK_SCRIPT_MIN_WORDS/);
+  assert.match(panel, /Why I thought of you/);
+  assert.match(panel, /Collaboration idea/);
   assert.match(panel, /primary_script/);
   assert.match(panel, /复制话术/);
   assert.doesNotMatch(panel, /复制 JSON/);

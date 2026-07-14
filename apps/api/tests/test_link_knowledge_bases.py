@@ -17,10 +17,39 @@ from app.services.influencer_persistence import (
     create_global_profile_from_collected,
     create_product_influencer_from_collected,
 )
+from app.services.link_script_generator import _fallback_script
 
 
 def _suffix() -> str:
     return uuid.uuid4().hex[:10]
+
+
+def test_fallback_link_script_is_complete_enough_to_send():
+    snapshot = {
+        "link_knowledge": {
+            "name": "FoldAway Travel Laundry Bag",
+            "extracted_knowledge": {
+                "brand_name": "FoldAway",
+                "product_name": "compressible travel laundry bag",
+                "selling_points": ["saves half the space", "keeps luggage neat"],
+                "collaboration_angles": ["packing tips", "travel routines"],
+            },
+        },
+        "influencer": {
+            "display_name": "Chellene",
+            "username": "chellene",
+            "category": "beauty and travel",
+        },
+    }
+
+    script = _fallback_script(snapshot)
+
+    email = script["email_first_touch"]
+    assert len(email.split()) >= 75
+    assert "Why I thought of you" in email
+    assert "Collaboration idea" in email
+    assert "Would you be open" in email
+    assert "Best," in email
 
 
 async def _create_product_influencer(db, suffix: str) -> ProductInfluencer:

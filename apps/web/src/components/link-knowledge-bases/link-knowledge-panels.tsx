@@ -70,6 +70,7 @@ const STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive" | "
   partial_failed: "destructive",
   archived: "secondary",
 };
+const FULL_LINK_SCRIPT_MIN_WORDS = 90;
 
 function formatDate(value: string | null | undefined): string {
   if (!value) return "-";
@@ -147,22 +148,27 @@ function buildCompleteLinkScript(
   baseText: string,
 ): string {
   const trimmed = baseText.trim();
-  if (wordCount(trimmed) >= 55) return trimmed;
+  if (wordCount(trimmed) >= FULL_LINK_SCRIPT_MIN_WORDS) return trimmed;
 
-  const parts = trimmed ? [trimmed] : [];
+  const influencerName = result.influencer_name || result.influencer_handle || "there";
+  const parts = trimmed
+    ? [trimmed]
+    : [`Hi ${influencerName},\n\nI came across your content and thought this could be a relevant fit for your audience.`];
   const matchReason = firstString(content.match_reason).trim();
   if (matchReason && !trimmed.toLowerCase().includes(matchReason.toLowerCase().slice(0, 40))) {
-    parts.push(`The reason I thought of you: ${matchReason}`);
+    parts.push(`Why I thought of you: ${matchReason}`);
+  } else {
+    parts.push("Why I thought of you: your content style feels practical, relatable, and close to the kind of audience this product is trying to reach.");
   }
 
   const followUp = firstString(content.follow_up_1).trim();
-  const hasCta = /\?|\b(open|interested|collaborate|details|work together)\b/i.test(trimmed);
-  if (!hasCta) {
-    parts.push("Would you be open to a lightweight collaboration? We can share product details, gifting terms, and a simple content idea if it sounds like a fit.");
-  } else {
-    parts.push("If you're interested, I can send over product details, gifting terms, and a simple collaboration outline so you can quickly see whether it fits your content.");
-  }
-  if (followUp && wordCount(parts.join(" ")) < 85) {
+  parts.push(
+    "Collaboration idea: we can share product details, gifting terms, and a simple content direction, then keep the brief lightweight so it fits your normal style instead of feeling like a scripted ad.",
+  );
+  parts.push(
+    "Would you be open to taking a quick look? If it feels aligned, I can send the product info and a clear outline so you can decide whether it works for your content.",
+  );
+  if (followUp && wordCount(parts.join(" ")) < FULL_LINK_SCRIPT_MIN_WORDS + 20) {
     parts.push(followUp);
   }
 
