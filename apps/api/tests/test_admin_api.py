@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timezone
 import uuid
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from app.db.session import async_session_factory
 from app.models.collection_task import CollectionTask
@@ -247,6 +247,50 @@ def test_sales_cannot_read_admin_summary():
         finally:
             async with async_session_factory() as db_session:
                 await db_session.execute(delete(User).where(User.username == username))
+                await db_session.commit()
+
+    asyncio.run(_run())
+
+
+def test_admin_can_create_single_character_sales_username():
+    async def _run() -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        from app.main import app
+
+        async with async_session_factory() as db_session:
+            existing = set((await db_session.execute(select(User.username))).scalars().all())
+        username = next(candidate for candidate in "123456789abcdefghijklmnopqrstuvwxyz" if candidate not in existing)
+        created_id: int | None = None
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post(
+                    "/api/admin/users",
+                    headers={"X-User-Id": "1", "X-Product-Id": "0"},
+                    json={
+                        "username": username,
+                        "password": "1",
+                        "display_name": "Single Character Sales",
+                        "email": None,
+                        "role": "sales",
+                        "is_active": True,
+                        "product_ids": [],
+                    },
+                )
+                assert response.status_code == 201, response.text
+                payload = response.json()
+                created_id = payload["id"]
+                assert payload["username"] == username
+                assert payload["role"] == "sales"
+        finally:
+            async with async_session_factory() as db_session:
+                if created_id is not None:
+                    await db_session.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == created_id))
+                    await db_session.execute(delete(ProductMember).where(ProductMember.user_id == created_id))
+                    await db_session.execute(delete(User).where(User.id == created_id))
+                else:
+                    await db_session.execute(delete(User).where(User.username == username))
                 await db_session.commit()
 
     asyncio.run(_run())

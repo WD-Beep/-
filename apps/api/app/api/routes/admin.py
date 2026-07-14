@@ -30,7 +30,7 @@ FAILED_TASK_STATUSES = {"failed", "partial_failed"}
 
 
 class AdminUserCreate(BaseModel):
-    username: str = Field(min_length=2, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    username: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
     password: str = Field(min_length=1, max_length=200)
     display_name: str | None = Field(default=None, max_length=255)
     email: EmailStr | None = None
@@ -40,7 +40,7 @@ class AdminUserCreate(BaseModel):
 
 
 class AdminUserUpdate(BaseModel):
-    username: str | None = Field(default=None, min_length=2, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    username: str | None = Field(default=None, min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
     display_name: str | None = Field(default=None, max_length=255)
     email: EmailStr | None = None
     role: str | None = Field(default=None, pattern=r"^(admin|sales)$")
