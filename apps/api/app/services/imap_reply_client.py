@@ -12,6 +12,7 @@ from email.utils import parsedate_to_datetime
 from app.core.config import settings
 from app.schemas.email_reply import InboundEmailPayload
 from app.services.email_reply_utils import extract_email_address, parse_references
+from app.services.smtp_account import ResolvedImapAccount, system_imap_account
 
 logger = logging.getLogger(__name__)
 
@@ -65,20 +66,25 @@ def _received_at(msg: email.message.Message) -> datetime:
     return datetime.now(UTC)
 
 
-def fetch_unread_imap_messages(*, mark_seen: bool = False) -> list[InboundEmailPayload]:
-    if not settings.is_imap_configured:
+def fetch_unread_imap_messages(
+    *,
+    mark_seen: bool = False,
+    account: ResolvedImapAccount | None = None,
+) -> list[InboundEmailPayload]:
+    imap_account = account or system_imap_account()
+    if not imap_account.configured:
         raise RuntimeError("邮箱收件配置未完成")
 
     try:
-        conn = imaplib.IMAP4_SSL(settings.imap_host, settings.imap_port)
+        conn = imaplib.IMAP4_SSL(imap_account.imap_host, imap_account.imap_port)
     except OSError as exc:
         raise RuntimeError("无法连接邮箱收件服务器，请检查 IMAP 地址和端口") from exc
     try:
         try:
-            conn.login(settings.imap_user, settings.imap_password)
+            conn.login(imap_account.imap_user, imap_account.imap_password)
         except imaplib.IMAP4.error as exc:
             raise RuntimeError("邮箱登录失败，请检查邮箱账号和客户端授权码") from exc
-        folder = settings.imap_folder or "INBOX"
+        folder = imap_account.folder or "INBOX"
         status, _selected = conn.select(folder)
         if status != "OK":
             raise RuntimeError(f"邮箱文件夹 {folder} 打不开，请检查 IMAP 文件夹配置")
@@ -95,7 +101,7 @@ def fetch_unread_imap_messages(*, mark_seen: bool = False) -> list[InboundEmailP
             msg = email.message_from_bytes(raw)
             headers = _header_map(msg)
             from_address = extract_email_address(headers.get("From")) or ""
-            to_address = extract_email_address(headers.get("To")) or settings.inbound_email_address or settings.imap_user
+            to_address = extract_email_address(headers.get("To")) or imap_account.inbound_email_address or imap_account.imap_user
             body = _extract_body(msg)
             messages.append(
                 InboundEmailPayload(

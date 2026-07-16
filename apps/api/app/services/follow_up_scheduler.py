@@ -27,6 +27,16 @@ class FollowUpProcessResult:
     skipped: int = 0
 
 
+@dataclass
+class BulkFollowUpResult:
+    requested_count: int
+    created_count: int
+    skipped_count: int
+    created_record_ids: list[int]
+    queue_item_ids: list[int]
+    skip_reasons: dict[int, str]
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -238,6 +248,124 @@ async def _create_follow_up_queue(db: AsyncSession, record: EmailLog) -> bool:
         record.next_follow_up_at = _utc_now() + timedelta(days=7)
         record.follow_up_status = "pending_check"
     return True
+
+
+def _skip_reason_for_bulk_follow_up(record: EmailLog) -> str | None:
+    if record.status != EmailLogStatus.SENT.value:
+        return "not_sent"
+    if record.has_replied:
+        return "already_replied"
+    if record.stop_follow_up:
+        return "follow_up_stopped"
+    if int(record.follow_up_count or 0) >= int(record.max_followups or 2):
+        return "max_followups_reached"
+    if not record.product_id or not record.product_influencer_id:
+        return "missing_influencer"
+    recipient = (record.recipients or [None])[0]
+    if not recipient:
+        return "missing_email"
+    return None
+
+
+async def _has_active_follow_up_queue(db: AsyncSession, record_id: int) -> bool:
+    existing = await db.scalar(
+        select(OutreachSendQueueItem.id)
+        .where(
+            OutreachSendQueueItem.outreach_record_id == record_id,
+            OutreachSendQueueItem.queue_type == "follow_up",
+            OutreachSendQueueItem.status.in_(("queued", "scheduled", "sending", "paused")),
+        )
+        .limit(1)
+    )
+    return existing is not None
+
+
+async def bulk_create_second_follow_ups(
+    db: AsyncSession,
+    *,
+    product_id: int,
+    user_id: int | None,
+    record_ids: list[int],
+) -> BulkFollowUpResult:
+    unique_ids = list(dict.fromkeys(int(record_id) for record_id in record_ids))
+    if not unique_ids:
+        return BulkFollowUpResult(
+            requested_count=0,
+            created_count=0,
+            skipped_count=0,
+            created_record_ids=[],
+            queue_item_ids=[],
+            skip_reasons={},
+        )
+
+    rows = (
+        await db.scalars(
+            select(EmailLog)
+            .where(
+                EmailLog.id.in_(unique_ids),
+                EmailLog.product_id == product_id,
+            )
+            .order_by(EmailLog.id.asc())
+        )
+    ).all()
+    records_by_id = {row.id: row for row in rows}
+
+    created_record_ids: list[int] = []
+    queue_item_ids: list[int] = []
+    skip_reasons: dict[int, str] = {}
+    now = _utc_now()
+
+    for record_id in unique_ids:
+        record = records_by_id.get(record_id)
+        if not record:
+            skip_reasons[record_id] = "not_found"
+            continue
+
+        reason = _skip_reason_for_bulk_follow_up(record)
+        if reason:
+            skip_reasons[record.id] = reason
+            continue
+        if await _has_active_follow_up_queue(db, record.id):
+            skip_reasons[record.id] = "already_queued"
+            continue
+
+        step = max(2, int(record.follow_up_count or 0) + 1)
+        subject, body = build_follow_up_email(record, step)
+        queue = OutreachSendQueueItem(
+            product_id=record.product_id,
+            user_id=user_id or record.user_id,
+            product_influencer_id=record.product_influencer_id,
+            recipient=(record.recipients or [""])[0],
+            sender_email=_resolve_sender_email(),
+            subject=subject,
+            body=body,
+            status="scheduled",
+            scheduled_at=now,
+            generated_by_ai=False,
+            allow_resend=True,
+            queue_type="follow_up",
+            follow_up_step=step,
+            outreach_record_id=record.id,
+            should_skip_if_replied=True,
+        )
+        db.add(queue)
+        await db.flush()
+        record.follow_up_count = max(1, int(record.follow_up_count or 0) + 1)
+        record.follow_up_status = "scheduled"
+        record.last_outbound_at = now
+        record.next_follow_up_at = None
+        created_record_ids.append(record.id)
+        queue_item_ids.append(queue.id)
+
+    await db.commit()
+    return BulkFollowUpResult(
+        requested_count=len(unique_ids),
+        created_count=len(created_record_ids),
+        skipped_count=len(skip_reasons),
+        created_record_ids=created_record_ids,
+        queue_item_ids=queue_item_ids,
+        skip_reasons=skip_reasons,
+    )
 
 
 async def process_due_follow_ups(limit: int = 50) -> FollowUpProcessResult:

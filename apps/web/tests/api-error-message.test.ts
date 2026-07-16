@@ -56,6 +56,54 @@ test("admin delete 405 errors use the unified Chinese message", async () => {
   assert.doesNotMatch(caught.message, /Method Not Allowed/i);
 });
 
+test("admin user deletion uses the long-running proxy to avoid false timeouts", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = "";
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    requestedUrl = String(input);
+    return new Response(
+      JSON.stringify({
+        success: true,
+        deleted_user_id: 12,
+        released_products: 0,
+        released_tasks: 0,
+        cancelled_campaigns: 0,
+        cancelled_queue_items: 0,
+        preserved_history_records: true,
+        preserved_history_count: 0,
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }) as typeof fetch;
+  try {
+    await deleteAdminUser(12);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.match(requestedUrl, /^\/api-long\/api\/admin\/users\/12$/);
+});
+
+test("admin deletion permission errors explain the admin session problem", async () => {
+  const originalFetch = globalThis.fetch;
+  let caught: unknown;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ detail: "Admin access required" }), {
+      status: 403,
+      headers: { "Content-Type": "application/json" },
+    })) as typeof fetch;
+  try {
+    await deleteAdminUser(12);
+  } catch (error) {
+    caught = error;
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.ok(caught instanceof Error);
+  assert.equal(caught.message, "管理员登录状态已失效或被业务员账号覆盖，请重新登录后台后再操作。");
+});
+
 test("Pydantic email validation errors are shown as understandable Chinese", async () => {
   const message = await getDashboardErrorMessage(
     new Response(

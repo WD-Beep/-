@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { Plus } from "lucide-react";
 
 import { ProductCreateDialog } from "@/components/layout/product-create-dialog";
@@ -19,7 +18,6 @@ type AdminShellProps = {
 };
 
 export function AdminShell({ children, title, description, actions }: AdminShellProps) {
-  const router = useRouter();
   const { setProductId } = useProductActions();
   const [session, setSession] = useState<AuthSession | null>(() => getStoredAuthSession());
   const [createOpen, setCreateOpen] = useState(false);
@@ -38,7 +36,6 @@ export function AdminShell({ children, title, description, actions }: AdminShell
       setSession(nextSession);
     }
     setProductId(product.id);
-    router.refresh();
   }
 
   return (

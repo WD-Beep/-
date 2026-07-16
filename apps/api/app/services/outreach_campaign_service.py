@@ -794,6 +794,25 @@ class OutreachCampaignService:
 
         preview_request = payload or OutreachCampaignPreviewRequest()
         content_source = preview_request.content_source
+        if content_source == "ai" and not campaign.message_template_id:
+            from app.models.message_template import MessageTemplate
+
+            default_template = await db.scalar(
+                select(MessageTemplate)
+                .where(MessageTemplate.product_id == product_id)
+                .order_by(
+                    MessageTemplate.is_default.desc(),
+                    MessageTemplate.usage_count.desc(),
+                    MessageTemplate.updated_at.desc(),
+                )
+                .limit(1)
+            )
+            if not default_template:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="请先创建或选择 AI 话术模板",
+                )
+            campaign.message_template_id = default_template.id
         script_ids = [campaign.message_template_id] if campaign.message_template_id else None
         template_subject: str | None = None
         template_body: str | None = None
@@ -984,10 +1003,6 @@ class OutreachCampaignService:
                     )
                     can_queue = False
                     item_skip_reason = f"AI 生成失败：{generation.error_message}"
-
-                if content_source == "ai" and generation.error_message and generation.configured and subject and body:
-                    can_queue = True
-                    item_skip_reason = None
 
                 item = OutreachCampaignPreviewItem(
                     influencer_id=product_row.id,
@@ -1232,6 +1247,10 @@ class OutreachCampaignService:
         rec.matched_knowledge = [m.model_dump() for m in _normalize_matched_knowledge(generation.matched_knowledge)]
         rec.can_queue = bool(rec.subject and rec.body)
         rec.skip_reason = None if rec.can_queue else "邮件标题或正文为空，无法批准"
+        if rec.can_queue and generation.error_message and generation.configured:
+            rec.can_queue = False
+            rec.skip_reason = f"AI 生成失败：{generation.error_message}"
+            rec.reason = f"{rec.reason}；{generation.error_message}" if rec.reason else generation.error_message
         rec.draft_status = DRAFT_MODIFIED if rec.can_queue else DRAFT_SKIPPED
         rec.is_high_value = _is_high_value_product_influencer(product_row=product_row, global_row=global_row)
         rec.approved_at = None

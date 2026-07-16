@@ -14,7 +14,9 @@ class OutreachSendQueueItem(Base):
     product_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("products.id", ondelete="CASCADE"), index=True
     )
-    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     product_influencer_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("product_influencers.id", ondelete="CASCADE"), index=True
     )

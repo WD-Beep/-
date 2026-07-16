@@ -56,8 +56,8 @@ export function AdminLoginForm() {
         return;
       }
       setAuthSession(session);
-      router.replace("/admin/dashboard");
-      router.refresh();
+      const redirectTo = searchParams.get("from") || "/admin/dashboard";
+      router.replace(redirectTo);
     } catch (err) {
       setError(err instanceof Error ? err.message : "登录失败，请稍后重试。");
       setSubmitting(false);

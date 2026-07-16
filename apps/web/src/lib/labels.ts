@@ -292,13 +292,17 @@ export const TASK_STATUS_LABELS: Record<
 > = {
   pending: { label: "待运行", variant: "warning" },
   queued: { label: "排队中", variant: "warning" },
-  running: { label: "运行中", variant: "default" },
-  completed: { label: "成功", variant: "success" },
+  running: { label: "正在运行", variant: "default" },
+  rate_limited: { label: "平台限流等待", variant: "warning" },
+  stopping: { label: "停止中", variant: "secondary" },
+  completed: { label: "已完成", variant: "success" },
   completed_with_results: { label: "有结果", variant: "success" },
   completed_no_results: { label: "无结果", variant: "warning" },
   partial_failed: { label: "部分成功", variant: "warning" },
   failed: { label: "失败", variant: "destructive" },
-  paused: { label: "已暂停", variant: "secondary" },
+  timeout: { label: "超时", variant: "destructive" },
+  stale: { label: "stale 回收", variant: "warning" },
+  paused: { label: "暂停中", variant: "secondary" },
   draft: { label: "草稿", variant: "secondary" },
 };
 

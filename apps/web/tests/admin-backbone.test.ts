@@ -111,15 +111,48 @@ test("admin dashboard and lists expose required real-data fields", () => {
   assert.match(products, /admin-products-management/);
 });
 
-test("browser long-running API calls use the public proxy by default", () => {
+test("browser long-running API calls use the long-running proxy by default", () => {
   const api = source("../src/lib/api.ts");
   const dockerfile = source("../Dockerfile");
   const compose = source("../../../docker-compose.yml");
 
   assert.doesNotMatch(api, /NEXT_PUBLIC_LONG_RUNNING_API_URL[\s\S]*127\.0\.0\.1:8000/);
-  assert.match(api, /NEXT_PUBLIC_LONG_RUNNING_API_URL[\s\S]*\?\? API_URL/);
-  assert.match(dockerfile, /ARG NEXT_PUBLIC_LONG_RUNNING_API_URL=\/api-proxy/);
-  assert.match(compose, /NEXT_PUBLIC_LONG_RUNNING_API_URL: \$\{NEXT_PUBLIC_LONG_RUNNING_API_URL:-\/api-proxy\}/);
+  assert.match(api, /NEXT_PUBLIC_LONG_RUNNING_API_URL[\s\S]*\?\? "\/api-long"/);
+  assert.match(dockerfile, /ARG NEXT_PUBLIC_LONG_RUNNING_API_URL=\/api-long/);
+  assert.match(compose, /NEXT_PUBLIC_LONG_RUNNING_API_URL: \$\{NEXT_PUBLIC_LONG_RUNNING_API_URL:-\/api-long\}/);
+});
+
+test("link knowledge fetch and script generation use the long-running proxy", () => {
+  const api = source("../src/lib/api.ts");
+  const refreshFunction = api.match(/export async function refreshLinkKnowledgeBase[\s\S]*?return response\.json\(\);\r?\n}/)?.[0] ?? "";
+  const generateFunction = api.match(/export async function generateLinkScripts[\s\S]*?return response\.json\(\);\r?\n}/)?.[0] ?? "";
+  const regenerateFunction = api.match(/export async function regenerateLinkScript[\s\S]*?return response\.json\(\);\r?\n}/)?.[0] ?? "";
+
+  assert.match(refreshFunction, /LONG_RUNNING_API_URL/);
+  assert.doesNotMatch(refreshFunction, /`\$\{API_URL\}\/api\/link-knowledge-bases\/\$\{id\}\/refresh`/);
+  assert.match(generateFunction, /LONG_RUNNING_API_URL/);
+  assert.doesNotMatch(generateFunction, /`\$\{API_URL\}\/api\/link-knowledge-bases\/\$\{id\}\/generate-scripts`/);
+  assert.match(regenerateFunction, /LONG_RUNNING_API_URL/);
+  assert.doesNotMatch(regenerateFunction, /`\$\{API_URL\}\/api\/link-script-results\/\$\{id\}\/regenerate`/);
+});
+
+test("inbox polling uses the long-running proxy to avoid false request timeouts", () => {
+  const api = source("../src/lib/api.ts");
+  const pollFunction = api.match(/export async function pollImapInbox[\s\S]*?return response\.json\(\);\r?\n}/)?.[0] ?? "";
+
+  assert.match(pollFunction, /LONG_RUNNING_API_URL/);
+  assert.doesNotMatch(pollFunction, /`\$\{API_URL\}\/api\/email-inbound\/poll-imap/);
+});
+
+test("long-running proxy returns structured timeout and connection errors", () => {
+  const route = source("../src/app/api-long/[...path]/route.ts");
+
+  assert.match(route, /LONG_PROXY_TIMEOUT/);
+  assert.match(route, /后端长任务请求超时/);
+  assert.match(route, /status:\s*504/);
+  assert.match(route, /LONG_PROXY_UNAVAILABLE/);
+  assert.match(route, /无法连接后端长任务服务/);
+  assert.match(route, /status:\s*502/);
 });
 
 test("docker web service waits for the API healthcheck", () => {
@@ -201,7 +234,7 @@ test("admin account dialogs save editable usernames and expose brand management"
   assert.doesNotMatch(userDialogs, /账号创建后不可修改|璐﹀彿鍒涘缓鍚庝笉鍙/);
   assert.match(userDialogs, /AdminBrandManagementDrawer/);
   assert.match(usersPanel, /users=\{items\}/);
-  assert.match(usersPanel, /onProductsChanged=\{reloadAll\}/);
+  assert.match(usersPanel, /onProductsChanged=\{reloadProducts\}/);
 
   assert.match(productManagement, /export function AdminBrandManagementDrawer/);
   assert.match(productManagement, /WorkbenchBrandDrawer/);
@@ -215,6 +248,48 @@ test("salesperson brand assignment drawer exposes shared brand management", () =
   assert.match(productManagement, /AdminBrandManagementDrawer/);
   assert.match(productManagement, /setBrandManagementOpen\(true\)/);
   assert.match(productManagement, /onProductsChanged/);
+});
+
+test("admin salesperson contact fields accept arbitrary bounded text", () => {
+  const userDialogs = source("../src/components/admin/admin-user-dialogs.tsx");
+  const productManagement = source("../src/components/admin/admin-products-management.tsx");
+
+  assert.match(userDialogs, /邮箱 \/ 手机 \/ 联系方式/);
+  assert.doesNotMatch(userDialogs, /邮箱格式不正确/);
+  assert.doesNotMatch(userDialogs, /\^\[\^\\s@\]\+@/);
+  assert.doesNotMatch(userDialogs, /inputMode="email"/);
+
+  assert.match(productManagement, /邮箱 \/ 手机 \/ 联系方式/);
+  assert.doesNotMatch(productManagement, /contact\.includes\("@"\)/);
+  assert.doesNotMatch(productManagement, /<AdminInput type="email"/);
+});
+
+test("salesperson deletion uses a simple confirmation and refreshes lists", () => {
+  const productManagement = source("../src/components/admin/admin-products-management.tsx");
+  const productsPanel = source("../src/components/admin/admin-products-panel.tsx");
+  const usersPanel = source("../src/components/admin/admin-users-panel.tsx");
+  const deleteDialog = productManagement.match(
+    /export function SalespersonDeleteDialog[\s\S]*?export async function disableSalesperson/,
+  )?.[0] ?? "";
+
+  assert.match(deleteDialog, /登录账号/);
+  assert.match(deleteDialog, /关联品牌/);
+  assert.match(deleteDialog, /关联任务/);
+  assert.match(deleteDialog, /确认删除/);
+  assert.doesNotMatch(deleteDialog, /停用业务员/);
+  assert.doesNotMatch(deleteDialog, /转移名下品牌/);
+  assert.doesNotMatch(productsPanel, /salespersonHasRelatedData\(panelAction\.user, panelAction\.row\)/);
+  assert.match(productsPanel, /await reload\(\)/);
+  assert.match(usersPanel, /deleteAdminUser/);
+  assert.match(usersPanel, /删除/);
+  assert.match(usersPanel, /await reloadAll\(\)/);
+});
+
+test("admin users page does not block initial list on product permission loading", () => {
+  const usersPanel = source("../src/components/admin/admin-users-panel.tsx");
+
+  assert.doesNotMatch(usersPanel, /Promise\.all\(\[fetchAdminUsers\(\), fetchAdminProducts\(\)\]\)/);
+  assert.match(usersPanel, /ensureProductsLoaded/);
 });
 
 test("admin route guard clears non-admin sessions before showing admin pages", () => {
@@ -235,6 +310,14 @@ test("admin login page is not server-redirected by a stale auth cookie", () => {
   assert.doesNotMatch(adminLoginBlock, /\/admin\/dashboard/);
 });
 
+test("admin login redirects without a blocking router refresh", () => {
+  const loginForm = source("../src/components/auth/admin-login-form.tsx");
+
+  assert.match(loginForm, /const redirectTo = searchParams\.get\("from"\) \|\| "\/admin\/dashboard"/);
+  assert.match(loginForm, /router\.replace\(redirectTo\)/);
+  assert.doesNotMatch(loginForm, /router\.refresh\(\)/);
+});
+
 test("sales login page is not server-redirected by a stale auth cookie", () => {
   const middleware = source("../src/middleware.ts");
   const loginBlock = middleware.match(/if \(isLoginPage\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
@@ -251,6 +334,31 @@ test("sales sidebar reuses product options across route remounts", () => {
   assert.match(sidebar, /readFreshProductOptionsMemoryCache/);
   assert.match(sidebar, /fetchTenantProductsShared/);
   assert.match(sidebar, /setProductsLoading\(false\)/);
+});
+
+test("sales sidebar shows current sender email without blocking navigation", () => {
+  const sidebar = source("../src/components/layout/sidebar.tsx");
+
+  assert.match(sidebar, /fetchMySmtpAccount/);
+  assert.match(sidebar, /smtpAccountInflight/);
+  assert.match(sidebar, /邮箱配置/);
+  assert.match(sidebar, /当前发件/);
+  assert.match(sidebar, /\/settings/);
+});
+
+test("settings page exposes optional salesperson email configuration", () => {
+  const settings = source("../src/components/settings/settings-panel.tsx");
+  const api = source("../src/lib/api.ts");
+
+  assert.match(settings, /我的发件邮箱/);
+  assert.match(settings, /邮箱地址/);
+  assert.match(settings, /发信授权码/);
+  assert.match(settings, /收信授权码/);
+  assert.match(settings, /收信授权码与发信授权码相同/);
+  assert.match(settings, /saveMySmtpAccount/);
+  assert.match(settings, /testMySmtpAccount/);
+  assert.match(api, /imap_password/);
+  assert.match(api, /provider\?:/);
 });
 
 test("link script results show simple outreach copy instead of raw JSON", () => {

@@ -45,6 +45,7 @@ from app.services.follow_up_scheduler import mark_record_replied
 from app.services.influencer_lead import InfluencerLeadService
 from app.services.imap_reply_client import fetch_unread_imap_messages
 from app.services.outreach_recipient import normalize_email_address
+from app.services.smtp_account import resolve_imap_account, resolve_smtp_account
 
 logger = logging.getLogger(__name__)
 
@@ -151,9 +152,11 @@ class EmailReplyService:
         outbound_subject = EmailReplyService._response_subject(reply.subject, subject)
         message_id = build_outbound_message_id(product_id=product_id)
         warning = await EmailReplyService._reply_warning(db, reply, recipient)
+        sender_account = await resolve_smtp_account(db, user_id=user_id)
+        sender_email = sender_account.smtp_from or settings.smtp_from
 
         message = MIMEMultipart()
-        message["From"] = settings.smtp_from
+        message["From"] = sender_email
         message["To"] = recipient
         message["Subject"] = outbound_subject
         message["Message-ID"] = message_id
@@ -166,7 +169,7 @@ class EmailReplyService:
 
         sent_at = datetime.now(UTC)
         try:
-            await EmailService._send_message(message, [recipient])
+            await EmailService._send_message(message, [recipient], smtp_account=sender_account)
         except Exception as exc:
             error = format_smtp_send_error(exc)
             await EmailService.create_outreach_email_log(
@@ -180,7 +183,10 @@ class EmailReplyService:
                 product_id=product_id,
                 user_id=user_id,
                 product_influencer_id=reply.product_influencer_id,
-                sender_email=settings.smtp_from or None,
+                sender_user_id=sender_account.sender_user_id,
+                smtp_account_id=sender_account.account_id,
+                sender_source=sender_account.source,
+                sender_email=sender_email or None,
                 generated_by_ai=use_ai_draft,
                 ai_provider="template" if use_ai_draft else None,
                 message_id=message_id,
@@ -207,7 +213,10 @@ class EmailReplyService:
             product_id=product_id,
             user_id=user_id,
             product_influencer_id=reply.product_influencer_id,
-            sender_email=settings.smtp_from or None,
+            sender_user_id=sender_account.sender_user_id,
+            smtp_account_id=sender_account.account_id,
+            sender_source=sender_account.source,
+            sender_email=sender_email or None,
             generated_by_ai=use_ai_draft,
             ai_provider="template" if use_ai_draft else None,
             message_id=message_id,
@@ -578,6 +587,71 @@ class EmailReplyService:
         return updated
 
     @staticmethod
+    async def rematch_reply(
+        db: AsyncSession,
+        *,
+        product_id: int,
+        reply_id: int,
+    ) -> EmailReplyRead:
+        reply = await db.get(EmailReply, reply_id)
+        if not reply or reply.product_id != product_id:
+            raise ValueError("reply_not_found")
+
+        raw_headers = reply.raw_headers or {}
+        references = parse_references(raw_headers.get("References") or raw_headers.get("references"))
+        match = await EmailReplyMatcher.match(
+            db,
+            from_address=reply.from_address,
+            to_address=reply.to_address,
+            subject=reply.subject,
+            snippet=reply.snippet,
+            body=reply.body,
+            in_reply_to=reply.in_reply_to,
+            references=references,
+            product_id_hint=reply.product_id,
+        )
+        if match and match.product_influencer_id:
+            reply.product_id = match.product_id
+            reply.product_influencer_id = match.product_influencer_id
+            reply.email_log_id = match.email_log_id
+            reply.campaign_id = match.campaign_id
+            reply.match_method = match.match_method
+            reply.intent_status = "unprocessed" if reply.intent_status == "unmatched" else reply.intent_status
+            reply.raw_headers = with_reply_match_meta(
+                reply.raw_headers,
+                {
+                    **reply_match_meta(match),
+                    "matched_at": datetime.now(UTC).isoformat(),
+                    "rematched": True,
+                },
+            )
+            if match.email_log_id:
+                await mark_record_replied(
+                    db,
+                    outreach_record_id=match.email_log_id,
+                    product_id=match.product_id,
+                    reply_id=reply.id,
+                    replied_at=reply.received_at,
+                    reply_summary=reply.snippet,
+                )
+        else:
+            reply.raw_headers = with_reply_match_meta(
+                reply.raw_headers,
+                await EmailReplyMatcher.candidate_meta(
+                    db,
+                    from_address=reply.from_address,
+                    subject=reply.subject,
+                    snippet=reply.snippet,
+                    body=reply.body,
+                    product_id_hint=reply.product_id,
+                ),
+            )
+
+        await db.commit()
+        await db.refresh(reply)
+        return EmailReplyRead.model_validate(reply)
+
+    @staticmethod
     async def ingest_batch(
         db: AsyncSession,
         payloads: list[InboundEmailPayload],
@@ -613,8 +687,10 @@ class EmailReplyService:
         *,
         mark_seen: bool = False,
         product_id_hint: int | None = None,
+        user_id: int | None = None,
     ) -> EmailReplyIngestBatchResponse:
-        messages = await asyncio.to_thread(fetch_unread_imap_messages, mark_seen=mark_seen)
+        imap_account = await resolve_imap_account(db, user_id=user_id)
+        messages = await asyncio.to_thread(fetch_unread_imap_messages, mark_seen=mark_seen, account=imap_account)
         if product_id_hint is not None:
             messages = [message.model_copy(update={"product_id": product_id_hint}) for message in messages]
         return await EmailReplyService.ingest_batch(db, messages, source="imap")

@@ -127,6 +127,71 @@ test("AI batch email workbench has its own scroll container", () => {
   assert.match(css, /\.campaign-workbench\s*{[\S\s]*?min-height:\s*100%;/);
 });
 
+test("AI batch email review renders paginated editable drafts instead of first five only", () => {
+  const source = readFileSync(
+    new URL("../src/components/outreach-campaigns/outreach-campaigns-panel.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.doesNotMatch(source, /preview\?\.items\.slice\(0,\s*5\)/);
+  assert.match(source, /DRAFT_PAGE_SIZE/);
+  assert.match(source, /draftFilter/);
+  assert.match(source, /paginatedPreviewItems/);
+  assert.match(source, /expandedDraftIds/);
+  assert.match(source, /updateOutreachCampaignDraft/);
+  assert.match(source, /regenerateOutreachCampaignDraft/);
+  assert.match(source, /approveOutreachCampaignDraft/);
+});
+
+test("AI batch email draft body preview wraps long generated copy", () => {
+  const source = readFileSync(
+    new URL("../src/components/outreach-campaigns/outreach-campaigns-panel.tsx", import.meta.url),
+    "utf8",
+  );
+  const styles = readFileSync(new URL("../src/app/globals.css", import.meta.url), "utf8");
+
+  assert.match(source, /function DraftBodyPreview/);
+  assert.match(source, /formatDraftPreviewText/);
+  assert.match(source, /Product Link/);
+  assert.match(source, /campaign-email-body/);
+  assert.match(styles, /\.campaign-email-body/);
+  assert.match(styles, /overflow-wrap:\s*anywhere/);
+  assert.match(styles, /-webkit-line-clamp:\s*3/);
+});
+
+test("AI batch email requires and manages a reusable generation template", () => {
+  const source = readFileSync(
+    new URL("../src/components/outreach-campaigns/outreach-campaigns-panel.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /copyMode === "template" \|\| copyMode === "ai"/);
+  assert.match(source, /AI 话术模板/);
+  assert.doesNotMatch(source, /parseMessageTemplateUpload/);
+  assert.doesNotMatch(source, /type="file"/);
+  assert.doesNotMatch(source, /accept="\.txt,\.md,\.docx"/);
+  assert.match(source, /templateDraft/);
+  assert.match(source, /handleSaveTemplateAsNew/);
+  assert.match(source, /handleUpdateCurrentTemplate/);
+  assert.match(source, /handleClearTemplateNote/);
+  assert.match(source, /建议不少于 800 字/);
+  assert.match(source, /设为默认/);
+  assert.match(source, /generation_rules/);
+});
+
+test("link knowledge editor exposes human selling points and advanced source data", () => {
+  const source = readFileSync(
+    new URL("../src/components/link-knowledge-bases/link-knowledge-panels.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /产品卖点 \/ 核心优势/);
+  assert.match(source, /manualSellingPoints/);
+  assert.match(source, /自动提取卖点/);
+  assert.match(source, /高级信息/);
+  assert.match(source, /message_template_id/);
+});
+
 test("AI batch email ignores selected ids from another product", () => {
   const source = readFileSync(
     new URL("../src/components/outreach-campaigns/outreach-campaigns-panel.tsx", import.meta.url),
@@ -436,6 +501,21 @@ test("one click AI send no longer requires approved drafts", () => {
   assert.doesNotMatch(source, /没有已批准草稿/);
   assert.doesNotMatch(source, /draft_status === "approved" && item\.can_queue/);
   assert.match(source, /\.filter\(\(item\) => item\.can_queue\)/);
+});
+
+test("campaign send notifies influencer library to refresh sent status", () => {
+  const campaignSource = readFileSync(
+    new URL("../src/components/outreach-campaigns/outreach-campaigns-panel.tsx", import.meta.url),
+    "utf8",
+  );
+  const influencerSource = readFileSync(
+    new URL("../src/components/influencers/influencers-panel.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(campaignSource, /notifyInfluencerEmailSent/);
+  assert.match(influencerSource, /INFLUENCER_EMAIL_SENT_EVENT/);
+  assert.match(influencerSource, /window\.addEventListener\("focus"/);
 });
 
 test("one click workbench builds exact local scheduled datetime", () => {

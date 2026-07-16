@@ -83,7 +83,50 @@ class Settings(BaseSettings):
     collection_profile_concurrency: int = 8
     collection_profile_enrich_concurrency: int = 3
     collection_profile_request_timeout_seconds: int = 20
-    collection_max_running_tasks: int = 2
+    collection_max_running_tasks: int = Field(
+        default=10,
+        validation_alias=AliasChoices(
+            "COLLECTION_MAX_CONCURRENCY",
+            "COLLECTION_MAX_RUNNING_TASKS",
+            "collection_max_concurrency",
+            "collection_max_running_tasks",
+        ),
+    )
+    collection_max_concurrency_per_user: int = Field(
+        default=3,
+        validation_alias=AliasChoices(
+            "COLLECTION_MAX_CONCURRENCY_PER_USER",
+            "collection_max_concurrency_per_user",
+        ),
+    )
+    collection_max_concurrency_per_platform: int = Field(
+        default=3,
+        validation_alias=AliasChoices(
+            "COLLECTION_MAX_CONCURRENCY_PER_PLATFORM",
+            "collection_max_concurrency_per_platform",
+        ),
+    )
+    collection_worker_count: int = Field(
+        default=4,
+        validation_alias=AliasChoices(
+            "COLLECTION_WORKER_COUNT",
+            "collection_worker_count",
+        ),
+    )
+    collection_worker_poll_interval_seconds: float = Field(
+        default=1.0,
+        validation_alias=AliasChoices(
+            "COLLECTION_WORKER_POLL_INTERVAL_SECONDS",
+            "collection_worker_poll_interval_seconds",
+        ),
+    )
+    collection_heartbeat_interval_seconds: int = Field(
+        default=30,
+        validation_alias=AliasChoices(
+            "COLLECTION_HEARTBEAT_INTERVAL_SECONDS",
+            "collection_heartbeat_interval_seconds",
+        ),
+    )
     collection_contact_concurrency: int = 2
     collection_ai_concurrency: int = 1
     collection_batch_commit_size: int = 20
@@ -92,6 +135,7 @@ class Settings(BaseSettings):
     collection_running_stale_seconds: int = Field(
         default=180,
         validation_alias=AliasChoices(
+            "COLLECTION_RUNNING_STALE_SECONDS",
             "collection_running_stale_seconds",
             "collection_task_stale_after_seconds",
         ),

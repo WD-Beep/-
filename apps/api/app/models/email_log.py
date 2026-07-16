@@ -23,6 +23,10 @@ class EmailLog(Base):
         ForeignKey("product_influencers.id", ondelete="SET NULL"),
         index=True,
     )
+    sender_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    smtp_account_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("user_smtp_accounts.id", ondelete="SET NULL"), index=True)
+    sender_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    follow_up_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sender_email: Mapped[str | None] = mapped_column(String(320))
     influencer_username: Mapped[str | None] = mapped_column(String(255))
     recipients: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)

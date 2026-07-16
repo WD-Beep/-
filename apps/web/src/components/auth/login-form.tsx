@@ -50,7 +50,6 @@ export function LoginForm() {
     }
 
     setSubmitting(true);
-    await new Promise((resolve) => setTimeout(resolve, 280));
 
     try {
       const session = await loginWithCredentials(trimmedUsername, password);
@@ -62,7 +61,6 @@ export function LoginForm() {
       setSubmitting(false);
       return;
     }
-    router.refresh();
   }
 
   return (

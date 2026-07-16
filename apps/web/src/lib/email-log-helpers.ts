@@ -109,6 +109,9 @@ export function translateEmailFailureReason(message: string | null | undefined):
   if (/smtp rejected/i.test(message)) {
     return "邮件服务器拒绝发送，邮件没有发出去。请检查收件邮箱、发件邮箱权限或发送频率限制。";
   }
+  if (/收件人|recipient|email_recipients/i.test(message)) {
+    return "收件人未配置，邮件没有发出去。请先为该任务或外联记录设置有效收件人。";
+  }
   if (/not configured|未配置/i.test(message)) {
     return "发件邮箱未配置，邮件没有发出去。请先到系统设置完成 SMTP 配置。";
   }

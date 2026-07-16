@@ -12,6 +12,10 @@ class EmailLogRead(ORMModel):
     id: int
     task_id: int | None
     product_influencer_id: int | None = None
+    sender_user_id: int | None = None
+    smtp_account_id: int | None = None
+    sender_source: str | None = None
+    follow_up_index: int | None = None
     sender_email: str | None = None
     influencer_username: str | None = None
     recipients: list[str]
@@ -85,3 +89,16 @@ class ScheduleFollowUpRequest(BaseModel):
 
 class StopFollowUpRequest(BaseModel):
     reason: str = Field(default="manually_stopped", max_length=64)
+
+
+class BulkFollowUpRequest(BaseModel):
+    record_ids: list[int] = Field(min_length=1, max_length=500)
+
+
+class BulkFollowUpResponse(BaseModel):
+    requested_count: int
+    created_count: int
+    skipped_count: int
+    created_record_ids: list[int]
+    queue_item_ids: list[int]
+    skip_reasons: dict[int, str]

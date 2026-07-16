@@ -13,6 +13,7 @@ import { EmptyState, ErrorAlert, LoadingState, SuccessAlert } from "@/components
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  bulkSecondFollowUpOutreachRecords,
   deleteEmailLogs,
   deleteEmailLogsByStatus,
   fetchCollectionTasks,
@@ -216,6 +217,7 @@ export function EmailLogsPanel({
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [selectedLogIds, setSelectedLogIds] = useState<Set<number>>(new Set());
   const [deleting, setDeleting] = useState(false);
+  const [bulkFollowingUp, setBulkFollowingUp] = useState(false);
   const [recordActionId, setRecordActionId] = useState<number | null>(null);
   const [replyDetail, setReplyDetail] = useState<{ reply: EmailReply; log: LogWithReply } | null>(null);
   const [responseBody, setResponseBody] = useState("");
@@ -357,6 +359,27 @@ export function EmailLogsPanel({
       setError(translateErrorMessage(err instanceof Error ? err.message : "外联记录操作失败"));
     } finally {
       setRecordActionId(null);
+    }
+  }
+
+  async function handleBulkSecondFollowUp() {
+    const recordIds = Array.from(selectedLogIds);
+    if (recordIds.length === 0) return;
+    const confirmed = window.confirm(`确认给已选 ${recordIds.length} 条发送记录创建第二次跟进？已回复、已停止、失败或不可发的记录会由后端跳过。`);
+    if (!confirmed) return;
+
+    setBulkFollowingUp(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const result = await bulkSecondFollowUpOutreachRecords(recordIds);
+      setSelectedLogIds(new Set());
+      await loadData();
+      setSuccess(`已创建 ${result.created_count} 条第二次跟进，跳过 ${result.skipped_count} 条。`);
+    } catch (err) {
+      setError(translateErrorMessage(err instanceof Error ? err.message : "批量创建第二次跟进失败"));
+    } finally {
+      setBulkFollowingUp(false);
     }
   }
 
@@ -675,6 +698,16 @@ export function EmailLogsPanel({
                     </span>
                     <Button type="button" variant="outline" size="sm" onClick={toggleAllVisibleLogs} disabled={pagedLogs.length === 0 || deleting}>
                       {allVisibleSelected ? "取消本页选择" : "选择本页"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={selectedLogIds.size === 0 || deleting || bulkFollowingUp}
+                      onClick={() => void handleBulkSecondFollowUp()}
+                    >
+                      {bulkFollowingUp ? <Loader2 className="h-4 w-4 animate-spin" /> : <Reply className="h-4 w-4" />}
+                      批量第二次跟进
                     </Button>
                     <Button
                       type="button"

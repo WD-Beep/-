@@ -474,19 +474,19 @@ export function humanizeOutreachFailureReason(message: string | null | undefined
   if (/insufficient balance|exceeded_current_quota|quota|account suspended|额度|余额不足|充值/i.test(text)) {
     return "AI 账户余额不足或额度受限，请充值 DeepSeek/API 账户或更换可用密钥后重试。";
   }
+  if (/AI 生成失败|GPT|标题.*正文.*空|OPENAI|生成.*失败/i.test(text)) {
+    return "GPT 没有生成可用标题或正文";
+  }
   if (/timed out|timeout|10060|无法连接邮件服务器|smtp\.gmail\.com/i.test(text)) {
     return "连不上邮件服务器（Gmail SMTP 超时）。请改用 QQ/企业邮 SMTP，或打通网络后再发";
   }
   if (/SMTP|535|authentication|auth|认证失败/i.test(text)) {
-    return "发件授权码或 SMTP 配置不对，邮件没有发出去";
+    return "邮箱授权码或 SMTP 配置不对，邮件没有发出去";
   }
   if (/缺少邮箱|没有可用邮箱/.test(text)) return "该红人没有可用邮箱";
   if (/已.*成功.*发信|已发送过|重复发送|成功发信记录/.test(text)) return "为避免重复骚扰，系统跳过";
   if (/已回复|跟进中|replied|interested/i.test(text)) return "该红人已回复，进入跟进，不重复发送";
   if (/邮箱格式无效|域名|测试邮箱|invalid email|format/i.test(text)) return "邮箱格式或域名不符合规则";
-  if (/AI 生成失败|GPT|标题.*正文.*空|OPENAI|生成.*失败/i.test(text)) {
-    return "GPT 没有生成可用标题或正文";
-  }
   if (/黑名单/.test(text)) return "该红人在黑名单中，系统跳过";
   if (/无效/.test(text)) return "该红人状态无效，系统跳过";
   if (/发件邮箱相同/.test(text)) return "收件邮箱和发件邮箱相同，系统跳过";

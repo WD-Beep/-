@@ -10,6 +10,7 @@ import {
   collectionTaskDiscoveryContext,
   collectionTaskFunnelLine,
   collectionTaskProgressSummary,
+  collectionTaskStatusDisplay,
   collectionTaskRunningHint,
   COLLECTION_TASK_SLOW_FALLBACK_MS,
   collectionTaskSlowApiHintLabel,
@@ -143,6 +144,15 @@ test("candidate dialog avoids opening jitter from filter reset and loading layou
   assert.doesNotMatch(dialogSource, /task\?\.updated_at/);
   assert.doesNotMatch(dialogSource, /task\?\.inserted_count,\s*\n\s*buildCandidateQuery/);
   assert.doesNotMatch(dialogSource, /queueMicrotask\(\(\) => \{\s*setExportError/);
+});
+
+test("paused candidate dialog keeps polling until persisted rows become visible", () => {
+  const source = readFileSync(
+    new URL("../src/components/collection-tasks/task-candidates-dialog.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /isCollectionTaskRunning\(activeTask\)\s*\|\|\s*activeTask\.status === "paused"/);
 });
 
 test("progress summary prioritizes structured progress fields", () => {
@@ -421,6 +431,30 @@ test("task result breakdown exposes structured funnel metrics", () => {
   assert.equal(lines.highValue, true);
 });
 
+test("task result breakdown ignores corrupted question-mark summary", () => {
+  const lines = buildTaskResultBreakdown(
+    task({
+      status: "completed_with_results",
+      inserted_count: 6,
+      result_count: 0,
+      discovery_limit: 10,
+      discovered_count: 406,
+      deduped_count: 319,
+      profile_fetched_count: 128,
+      filtered_out_count: 5,
+      email_count: 0,
+      missing_contact_count: 0,
+      profile_failed_count: 0,
+      status_summary: "??????????????? 11 ????? 6 ???? 5 ????? 0 ???? 0 ?",
+    }),
+  );
+
+  assert.equal(lines.reason, null);
+  assert.deepEqual(lines.primary, ["已入库 6 / 目标 10"]);
+  assert.deepEqual(lines.funnel, ["发现 406", "去重 319", "主页 128", "过滤 5"]);
+  assert.deepEqual(lines.contacts, ["邮箱 0", "缺联系方式 0"]);
+});
+
 test("zero-result diagnostics explain strict contact and quality filters", () => {
   const lines = formatCollectionResultLines(
     task({
@@ -454,9 +488,62 @@ test("zero-result diagnostics explain strict contact and quality filters", () =>
 test("table layout classes keep status and actions readable", () => {
   assert.match(COLLECTION_TASK_TABLE_LAYOUT.statusCell, /min-w-\[88px\]/);
   assert.match(COLLECTION_TASK_TABLE_LAYOUT.statusBadge, /whitespace-nowrap/);
-  assert.match(COLLECTION_TASK_TABLE_LAYOUT.actionsCell, /w-\[180px\]/);
+  assert.match(COLLECTION_TASK_TABLE_LAYOUT.actionsCell, /min-w-\[(20[0-9]|2[1-9][0-9])px\]/);
   assert.match(COLLECTION_TASK_TABLE_LAYOUT.actionsGroup, /flex-nowrap/);
   assert.match(COLLECTION_TASK_TABLE_LAYOUT.actionButton, /shrink-0/);
+});
+
+test("stale recoverable running tasks display as interrupted instead of actively running", () => {
+  const display = collectionTaskStatusDisplay(
+    task({
+      status: "running",
+      stale: true,
+      recoverable: true,
+    }),
+  );
+
+  assert.equal(display.kind, "interrupted");
+  assert.notEqual(display.label, "采集中");
+  assert.equal(display.canPause, false);
+  assert.equal(display.canContinue, true);
+});
+
+test("batch inserted label separates cumulative hits from unique library count", () => {
+  const lines = formatCollectionResultLines(
+    task({
+      status: "running",
+      batch_round_count: 20,
+      inserted_count: 220,
+      result_count: 220,
+      discovery_limit: 1000,
+      run_checkpoint: {
+        unique_inserted_count: 66,
+      },
+    }),
+  );
+
+  assert.match(lines.primary, /66/);
+  assert.match(lines.primary, /220/);
+});
+
+test("batch inserted label prefers current product library count when available", () => {
+  const lines = formatCollectionResultLines(
+    task({
+      status: "running",
+      batch_round_count: 20,
+      inserted_count: 220,
+      result_count: 220,
+      discovery_limit: 1000,
+      run_checkpoint: {
+        unique_inserted_count: 44,
+        product_library_inserted_count: 66,
+      },
+    }),
+  );
+
+  assert.match(lines.primary, /红人库当前 66/);
+  assert.match(lines.primary, /本批次去重 44/);
+  assert.match(lines.primary, /累计命中 220/);
 });
 
 test("high value export URL passes backend filter flag", () => {

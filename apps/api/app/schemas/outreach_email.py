@@ -175,7 +175,7 @@ class OutreachQueueRescheduleRequest(BaseModel):
 class OutreachSendQueueRead(BaseModel):
     id: int
     product_id: int
-    user_id: int
+    user_id: int | None
     product_influencer_id: int
     recipient: str
     sender_email: str | None

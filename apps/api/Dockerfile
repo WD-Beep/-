@@ -4,10 +4,11 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple
-ENV PIP_TRUSTED_HOST=mirrors.cloud.tencent.com
 
-RUN sed -i 's|http://deb.debian.org/debian|http://mirrors.tencentyun.com/debian|g; s|http://deb.debian.org/debian-security|http://mirrors.tencentyun.com/debian-security|g' /etc/apt/sources.list.d/debian.sources || true
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_TRUSTED_HOST=
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
+ENV PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libpq-dev \

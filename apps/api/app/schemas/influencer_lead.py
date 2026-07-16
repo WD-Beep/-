@@ -25,7 +25,8 @@ class FollowupCreate(BaseModel):
 
 class FollowupRead(ORMModel):
     id: int
-    influencer_id: int
+    influencer_id: int | None = None
+    product_influencer_id: int | None = None
     action_type: str
     old_status: str | None
     new_status: str | None

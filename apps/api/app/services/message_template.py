@@ -1,7 +1,7 @@
 import math
 from datetime import UTC, datetime
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps.tenant import TenantContext, require_write_product_id
@@ -40,6 +40,29 @@ class MessageTemplateService:
         return out
 
     @staticmethod
+    def _normalize_rules(rules: object | None) -> dict:
+        if rules is None:
+            return {}
+        if hasattr(rules, "model_dump"):
+            return rules.model_dump(exclude_none=True)
+        return {key: value for key, value in dict(rules).items() if value is not None} if isinstance(rules, dict) else {}
+
+    @staticmethod
+    async def _clear_default_for_product(
+        db: AsyncSession,
+        *,
+        product_id: int,
+        exclude_id: int | None = None,
+    ) -> None:
+        statement = update(MessageTemplate).where(
+            MessageTemplate.product_id == product_id,
+            MessageTemplate.is_default.is_(True),
+        )
+        if exclude_id is not None:
+            statement = statement.where(MessageTemplate.id != exclude_id)
+        await db.execute(statement.values(is_default=False))
+
+    @staticmethod
     def _apply_filters(query, filters: MessageTemplateFilter):
         query = query.where(MessageTemplate.product_id == filters.product_id)
         if filters.scenario:
@@ -72,7 +95,7 @@ class MessageTemplateService:
         base = MessageTemplateService._apply_filters(base, filters)
         total = await db.scalar(select(func.count()).select_from(base.subquery())) or 0
         result = await db.execute(
-            base.order_by(MessageTemplate.updated_at.desc())
+            base.order_by(MessageTemplate.is_default.desc(), MessageTemplate.updated_at.desc())
             .offset((page - 1) * page_size)
             .limit(page_size)
         )
@@ -107,10 +130,13 @@ class MessageTemplateService:
         *,
         ctx: TenantContext,
     ) -> MessageTemplate:
+        product_id = require_write_product_id(ctx)
+        if data.is_default:
+            await MessageTemplateService._clear_default_for_product(db, product_id=product_id)
         row = MessageTemplate(
             user_id=ctx.user_id,
             workspace_id=ctx.workspace_id,
-            product_id=require_write_product_id(ctx),
+            product_id=product_id,
             title=data.title.strip(),
             scenario=data.scenario.strip(),
             platform=(data.platform or "").strip() or None,
@@ -118,6 +144,9 @@ class MessageTemplateService:
             tags=MessageTemplateService._normalize_tags(data.tags),
             content=data.content.strip(),
             note=(data.note or "").strip() or None,
+            generation_rules=MessageTemplateService._normalize_rules(data.generation_rules),
+            is_default=data.is_default,
+            source_filename=(data.source_filename or "").strip() or None,
         )
         db.add(row)
         await db.commit()
@@ -131,6 +160,12 @@ class MessageTemplateService:
         data: MessageTemplateUpdate,
     ) -> MessageTemplate:
         payload = data.model_dump(exclude_unset=True)
+        if payload.get("is_default") is True:
+            await MessageTemplateService._clear_default_for_product(
+                db,
+                product_id=row.product_id,
+                exclude_id=row.id,
+            )
         if "title" in payload and payload["title"] is not None:
             row.title = payload["title"].strip()
         if "scenario" in payload and payload["scenario"] is not None:
@@ -145,6 +180,12 @@ class MessageTemplateService:
             row.content = payload["content"].strip()
         if "note" in payload:
             row.note = (payload["note"] or "").strip() or None
+        if "generation_rules" in payload and payload["generation_rules"] is not None:
+            row.generation_rules = MessageTemplateService._normalize_rules(payload["generation_rules"])
+        if "is_default" in payload and payload["is_default"] is not None:
+            row.is_default = bool(payload["is_default"])
+        if "source_filename" in payload:
+            row.source_filename = (payload["source_filename"] or "").strip() or None
         await db.commit()
         await db.refresh(row)
         return row
@@ -180,6 +221,9 @@ class MessageTemplateService:
             tags=list(row.tags or []),
             content=row.content,
             note=row.note,
+            generation_rules=dict(row.generation_rules or {}),
+            is_default=False,
+            source_filename=row.source_filename,
         )
         db.add(copy)
         await db.commit()

@@ -189,10 +189,23 @@ async def get_platform_capabilities() -> PlatformCapabilitiesResponse:
         tiktok_data_provider=settings.active_tiktok_provider,
         facebook_data_provider=settings.active_facebook_provider,
         collection_max_running_tasks=max(1, settings.collection_max_running_tasks),
+        collection_max_concurrency_per_user=max(1, settings.collection_max_concurrency_per_user),
+        collection_max_concurrency_per_platform=max(1, settings.collection_max_concurrency_per_platform),
+        collection_worker_count=max(0, settings.collection_worker_count),
         collection_profile_enrich_concurrency=settings.effective_profile_enrich_concurrency,
         collection_profile_request_timeout_seconds=max(5, settings.collection_profile_request_timeout_seconds),
         collection_running_stale_seconds=max(30, settings.collection_running_stale_seconds),
     )
+
+
+@router.get("/concurrency-status")
+async def get_collection_concurrency_status(
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> dict:
+    await CollectionTaskService.reconcile_stale_running_tasks(db)
+    overview = await CollectionQueueService.concurrency_overview(db, current_user_id=ctx.user_id)
+    return overview
 
 
 @router.get("", response_model=PaginatedResponse[CollectionTaskRead])
@@ -773,12 +786,16 @@ async def run_collection_task(
     if task.status == CollectionTaskStatus.RUNNING.value and not stale_running:
         return _run_result_snapshot(task, message=task.status_summary or "Task is already running")
     if task.status == CollectionTaskStatus.QUEUED.value:
+        await CollectionQueueService.dispatch_queued_tasks()
+        await db.refresh(task)
         return _run_result_snapshot(task, message=task.status_summary or "Task is already queued")
 
     resume = task.status == CollectionTaskStatus.RUNNING.value and stale_running
     result_status = await CollectionQueueService.queue_or_start(db, task, resume=resume)
     if result_status == CollectionTaskStatus.RUNNING:
         background_tasks.add_task(_run_collection_task_in_background, task.id, resume=resume)
+    elif result_status == CollectionTaskStatus.QUEUED:
+        await CollectionQueueService.dispatch_queued_tasks()
     return _run_result_snapshot(task, message=task.status_summary)
 
 
@@ -798,6 +815,7 @@ async def pause_collection_task(
         parent = await CollectionTaskService.get_task(db, parent_task_id)
         if parent:
             await CollectionTaskService.refresh_batch_parent_state(db, parent)
+    await CollectionQueueService.dispatch_queued_tasks()
     return CollectionTaskService.task_read(paused)
 
 

@@ -10,7 +10,16 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { fetchSettingsStatus, pollImapInbox, sendTestEmail, type SettingsStatus } from "@/lib/api";
+import {
+  fetchMySmtpAccount,
+  fetchSettingsStatus,
+  pollImapInbox,
+  saveMySmtpAccount,
+  sendTestEmail,
+  testMySmtpAccount,
+  type SettingsStatus,
+  type UserSmtpAccountStatus,
+} from "@/lib/api";
 import { aiModeLabel, collectorModeLabel, translateBackendMessage } from "@/lib/labels";
 
 const SMTP_NOT_CONFIGURED = "邮件服务未配置，请先在环境变量中配置 SMTP。";
@@ -91,9 +100,18 @@ function SectionHeader({
 
 export function SettingsPanel() {
   const [status, setStatus] = useState<SettingsStatus | null>(null);
+  const [smtpAccount, setSmtpAccount] = useState<UserSmtpAccountStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [testEmail, setTestEmail] = useState("");
+  const [personalEmail, setPersonalEmail] = useState("");
+  const [personalSmtpPassword, setPersonalSmtpPassword] = useState("");
+  const [personalImapPassword, setPersonalImapPassword] = useState("");
+  const [imapSameAsSmtp, setImapSameAsSmtp] = useState(true);
+  const [personalSenderName, setPersonalSenderName] = useState("");
+  const [personalEnabled, setPersonalEnabled] = useState(true);
   const [sending, setSending] = useState(false);
+  const [savingPersonalEmail, setSavingPersonalEmail] = useState(false);
+  const [testingPersonalEmail, setTestingPersonalEmail] = useState(false);
   const [polling, setPolling] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -102,8 +120,15 @@ export function SettingsPanel() {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchSettingsStatus();
+      const [data, personal] = await Promise.all([fetchSettingsStatus(), fetchMySmtpAccount()]);
       setStatus(data);
+      setSmtpAccount(personal);
+      if (personal.account) {
+        setPersonalEmail(personal.account.smtp_user);
+        setPersonalSenderName(personal.account.smtp_from_name ?? "");
+        setPersonalEnabled(personal.account.enabled);
+        setImapSameAsSmtp(personal.account.has_imap_password);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载配置状态失败");
     } finally {
@@ -159,6 +184,62 @@ export function SettingsPanel() {
       setError(err instanceof Error ? err.message : "IMAP 轮询失败");
     } finally {
       setPolling(false);
+    }
+  }
+
+  async function handleSaveMySmtpAccount() {
+    setMessage(null);
+    setError(null);
+    if (!personalEmail.trim()) {
+      setError("请输入邮箱地址");
+      return;
+    }
+    if (!smtpAccount?.account && !personalSmtpPassword.trim()) {
+      setError("首次配置需要填写发信授权码");
+      return;
+    }
+    setSavingPersonalEmail(true);
+    try {
+      const account = await saveMySmtpAccount({
+        provider: "gmail",
+        smtp_user: personalEmail.trim(),
+        smtp_password: personalSmtpPassword.trim() || null,
+        imap_password: imapSameAsSmtp ? null : personalImapPassword.trim() || null,
+        imap_same_as_smtp: imapSameAsSmtp,
+        smtp_from_name: personalSenderName.trim() || null,
+        enabled: personalEnabled,
+      });
+      setSmtpAccount({
+        configured: account.enabled,
+        source: account.enabled ? "user" : "system",
+        sender_email: account.smtp_from,
+        account,
+      });
+      setPersonalSmtpPassword("");
+      setPersonalImapPassword("");
+      setMessage("我的发件邮箱已保存。系统邮箱仍保留，业务员配置自己的邮箱后可用于自己发信和收取回复。");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存我的发件邮箱失败");
+    } finally {
+      setSavingPersonalEmail(false);
+    }
+  }
+
+  async function handleTestMySmtpAccount() {
+    setMessage(null);
+    setError(null);
+    setTestingPersonalEmail(true);
+    try {
+      const result = await testMySmtpAccount(personalEmail.trim() || undefined);
+      if (result.success) {
+        setMessage(result.message || "我的发件邮箱测试成功");
+      } else {
+        setError(result.message || "我的发件邮箱测试失败");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "我的发件邮箱测试失败");
+    } finally {
+      setTestingPersonalEmail(false);
     }
   }
 
@@ -349,6 +430,95 @@ export function SettingsPanel() {
               </div>
 
               <div className="space-y-4">
+                <Card>
+                  <CardHeader className="py-3">
+                    <CardTitle className="text-base">我的发件邮箱</CardTitle>
+                    <CardDescription>
+                      可选备选方案：系统邮箱能用时不用配置；如果系统 Gmail 被限制，业务员可填写自己的邮箱授权码发信和收取回复。
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground">
+                      当前使用：{smtpAccount?.sender_email || status.smtp.from_address || "-"}
+                      {smtpAccount?.source === "user" ? "（我的邮箱）" : "（系统邮箱）"}
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="personal_email">邮箱地址</Label>
+                      <Input
+                        id="personal_email"
+                        type="email"
+                        value={personalEmail}
+                        onChange={(event) => setPersonalEmail(event.target.value)}
+                        placeholder="sales@gmail.com"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="personal_smtp_password">发信授权码</Label>
+                      <Input
+                        id="personal_smtp_password"
+                        type="password"
+                        value={personalSmtpPassword}
+                        onChange={(event) => setPersonalSmtpPassword(event.target.value)}
+                        placeholder={smtpAccount?.account?.has_password ? "已保存，留空则不修改" : "Gmail 应用专用密码"}
+                      />
+                    </div>
+                    <label className="flex items-center gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={imapSameAsSmtp}
+                        onChange={(event) => setImapSameAsSmtp(event.target.checked)}
+                      />
+                      收信授权码与发信授权码相同
+                    </label>
+                    {!imapSameAsSmtp ? (
+                      <div className="space-y-2">
+                        <Label htmlFor="personal_imap_password">收信授权码</Label>
+                        <Input
+                          id="personal_imap_password"
+                          type="password"
+                          value={personalImapPassword}
+                          onChange={(event) => setPersonalImapPassword(event.target.value)}
+                          placeholder={smtpAccount?.account?.has_imap_password ? "已保存，留空则不修改" : "用于 IMAP 收取红人回复"}
+                        />
+                      </div>
+                    ) : null}
+                    <div className="space-y-2">
+                      <Label htmlFor="personal_sender_name">发件人名称</Label>
+                      <Input
+                        id="personal_sender_name"
+                        value={personalSenderName}
+                        onChange={(event) => setPersonalSenderName(event.target.value)}
+                        placeholder="品牌或业务员英文名"
+                      />
+                    </div>
+                    <label className="flex items-center gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={personalEnabled}
+                        onChange={(event) => setPersonalEnabled(event.target.checked)}
+                      />
+                      启用我的发件邮箱
+                    </label>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <Button onClick={() => void handleSaveMySmtpAccount()} disabled={savingPersonalEmail}>
+                        {savingPersonalEmail ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
+                        保存我的邮箱
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => void handleTestMySmtpAccount()}
+                        disabled={testingPersonalEmail || !smtpAccount?.account}
+                      >
+                        {testingPersonalEmail ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                        测试我的邮箱
+                      </Button>
+                    </div>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      只保存授权码，不显示明文；未配置或关闭时继续使用系统邮箱。
+                    </p>
+                  </CardContent>
+                </Card>
+
                 <Card>
                   <CardHeader className="py-3">
                     <CardTitle className="text-base">测试邮件</CardTitle>

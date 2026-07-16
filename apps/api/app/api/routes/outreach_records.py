@@ -5,8 +5,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.deps.tenant import TenantContext, get_tenant_context
 from app.models.email_log import EmailLog
-from app.schemas.email_log import EmailLogRead, ScheduleFollowUpRequest, StopFollowUpRequest
+from app.schemas.email_log import (
+    BulkFollowUpRequest,
+    BulkFollowUpResponse,
+    EmailLogRead,
+    ScheduleFollowUpRequest,
+    StopFollowUpRequest,
+)
 from app.services.follow_up_scheduler import (
+    bulk_create_second_follow_ups,
     mark_record_replied,
     mark_record_unreplied,
     schedule_follow_up_check,
@@ -118,3 +125,26 @@ async def list_due_follow_up_records(
         )
     ).all()
     return [EmailLogRead.model_validate(row) for row in rows]
+
+
+@router.post("/bulk-second-follow-up", response_model=BulkFollowUpResponse)
+async def bulk_second_follow_up(
+    payload: BulkFollowUpRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> BulkFollowUpResponse:
+    product_id = _require_product_scope(ctx)
+    result = await bulk_create_second_follow_ups(
+        db,
+        product_id=product_id,
+        user_id=ctx.user_id,
+        record_ids=payload.record_ids,
+    )
+    return BulkFollowUpResponse(
+        requested_count=result.requested_count,
+        created_count=result.created_count,
+        skipped_count=result.skipped_count,
+        created_record_ids=result.created_record_ids,
+        queue_item_ids=result.queue_item_ids,
+        skip_reasons=result.skip_reasons,
+    )

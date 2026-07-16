@@ -21,6 +21,7 @@ from app.schemas.email_log import EmailLogRead
 from app.services.export import build_influencer_excel
 from app.services.influencer_lead import InfluencerLeadService
 from app.services.outreach_recipient import normalize_email_address, outreach_recipient_skip_reason
+from app.services.smtp_account import ResolvedSmtpAccount, system_smtp_account
 from app.services.task_influencer import TaskInfluencerService
 
 logger = logging.getLogger(__name__)
@@ -256,19 +257,26 @@ class EmailService:
             raise EmailNotConfiguredError()
 
     @staticmethod
-    async def _send_message(message: MIMEMultipart, recipients: list[str]) -> None:
+    async def _send_message(
+        message: MIMEMultipart,
+        recipients: list[str],
+        smtp_account: ResolvedSmtpAccount | None = None,
+    ) -> None:
+        account = smtp_account or system_smtp_account()
+        if not account.configured:
+            raise EmailNotConfiguredError()
         send_kwargs: dict = {
-            "hostname": settings.smtp_host,
-            "port": settings.smtp_port,
-            "username": settings.smtp_user,
-            "password": settings.smtp_password,
+            "hostname": account.smtp_host,
+            "port": account.smtp_port,
+            "username": account.smtp_user,
+            "password": account.smtp_password,
             "recipients": recipients,
             "timeout": 20,
         }
 
-        if settings.smtp_port == 465:
+        if account.smtp_port == 465:
             send_kwargs["use_tls"] = True
-        elif settings.smtp_use_tls:
+        elif account.use_tls:
             send_kwargs["start_tls"] = True
 
         proxy_url = (settings.smtp_proxy_url or "").strip()
@@ -282,8 +290,8 @@ class EmailService:
                 ) from exc
             proxy = Proxy.from_url(proxy_url)
             sock = await proxy.connect(
-                dest_host=settings.smtp_host.strip(),
-                dest_port=int(settings.smtp_port),
+                dest_host=account.smtp_host.strip(),
+                dest_port=int(account.smtp_port),
             )
             send_kwargs["sock"] = sock
             # When using an existing socket, hostname/port are not used for connect.
@@ -328,6 +336,10 @@ class EmailService:
         product_id: int | None = None,
         user_id: int | None = None,
         product_influencer_id: int | None = None,
+        sender_user_id: int | None = None,
+        smtp_account_id: int | None = None,
+        sender_source: str | None = None,
+        follow_up_index: int | None = None,
         sender_email: str | None = None,
         influencer_username: str | None = None,
         generated_by_ai: bool = False,
@@ -343,6 +355,10 @@ class EmailService:
             product_id=product_id,
             user_id=user_id,
             product_influencer_id=product_influencer_id,
+            sender_user_id=sender_user_id,
+            smtp_account_id=smtp_account_id,
+            sender_source=sender_source,
+            follow_up_index=follow_up_index,
             sender_email=sender_email or settings.smtp_from or None,
             influencer_username=influencer_username,
             recipients=recipients,
@@ -378,6 +394,10 @@ class EmailService:
         product_id: int | None = None,
         user_id: int | None = None,
         product_influencer_id: int | None = None,
+        sender_user_id: int | None = None,
+        smtp_account_id: int | None = None,
+        sender_source: str | None = None,
+        follow_up_index: int | None = None,
         sender_email: str | None = None,
         influencer_username: str | None = None,
         body: str | None = None,
@@ -401,6 +421,10 @@ class EmailService:
             product_id=product_id,
             user_id=user_id,
             product_influencer_id=product_influencer_id,
+            sender_user_id=sender_user_id,
+            smtp_account_id=smtp_account_id,
+            sender_source=sender_source,
+            follow_up_index=follow_up_index,
             sender_email=sender_email,
             influencer_username=influencer_username,
             generated_by_ai=generated_by_ai,

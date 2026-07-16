@@ -21,12 +21,86 @@ export const COLLECTION_TASK_TABLE_LAYOUT = {
   statusCell: "min-w-[88px] w-[88px] shrink-0 align-middle",
   statusBadge: "inline-flex whitespace-nowrap shrink-0 text-xs",
   actionsCell:
-    "ops-sticky-actions w-[180px] min-w-[180px] shrink-0 whitespace-nowrap",
+    "ops-sticky-actions w-[220px] min-w-[220px] shrink-0 whitespace-nowrap",
   actionsHead:
-    "ops-sticky-actions w-[180px] min-w-[180px] shrink-0 whitespace-nowrap text-right",
+    "ops-sticky-actions w-[220px] min-w-[220px] shrink-0 whitespace-nowrap text-right",
   actionsGroup: "flex flex-nowrap items-center justify-end gap-0.5",
   actionButton: "ops-icon-button shrink-0",
 } as const;
+
+export type CollectionTaskStatusDisplay = {
+  label: string;
+  variant: "default" | "secondary" | "destructive" | "outline" | "success" | "warning";
+  kind: "normal" | "running" | "queued" | "paused" | "interrupted" | "settled";
+  canPause: boolean;
+  canContinue: boolean;
+};
+
+export function collectionTaskStatusDisplay(
+  task: Pick<CollectionTask, "status" | "stale" | "recoverable">,
+): CollectionTaskStatusDisplay {
+  if (task.status === "running" && task.stale && task.recoverable) {
+    return {
+      label: "已中断",
+      variant: "warning",
+      kind: "interrupted",
+      canPause: false,
+      canContinue: true,
+    };
+  }
+  if (task.status === "paused") {
+    return {
+      label: "已暂停",
+      variant: "secondary",
+      kind: "paused",
+      canPause: false,
+      canContinue: true,
+    };
+  }
+  if (task.status === "queued") {
+    return {
+      label: "排队中",
+      variant: "secondary",
+      kind: "queued",
+      canPause: false,
+      canContinue: false,
+    };
+  }
+  if (task.status === "running" || task.status === "rate_limited" || task.status === "stopping") {
+    return {
+      label: task.status === "rate_limited" ? "限流等待" : task.status === "stopping" ? "停止中" : "采集中",
+      variant: task.status === "rate_limited" ? "warning" : "default",
+      kind: "running",
+      canPause: task.status === "running",
+      canContinue: false,
+    };
+  }
+  if (["completed", "completed_with_results", "completed_no_results"].includes(task.status)) {
+    return {
+      label: "已完成",
+      variant: "success",
+      kind: "settled",
+      canPause: false,
+      canContinue: false,
+    };
+  }
+  if (["failed", "partial_failed", "timeout", "stale"].includes(task.status)) {
+    return {
+      label: task.status === "timeout" ? "已超时" : task.status === "stale" ? "已回收" : "失败",
+      variant: "destructive",
+      kind: "settled",
+      canPause: false,
+      canContinue: task.status === "stale",
+    };
+  }
+  return {
+    label: "未运行",
+    variant: "outline",
+    kind: "normal",
+    canPause: false,
+    canContinue: true,
+  };
+}
 
 export type CollectionTaskProgressSummary = {
   stageLabel: string;
@@ -70,6 +144,21 @@ const PLATFORM_LABELS: Record<string, string> = {
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function isCorruptedQuestionText(value: string | null | undefined): boolean {
+  const text = value?.trim();
+  if (!text) return false;
+  const compactLength = text.replace(/\s/g, "").length;
+  if (compactLength === 0) return false;
+  const questionCount = (text.match(/\?/g) ?? []).length;
+  return questionCount >= 5 && questionCount / compactLength >= 0.25;
+}
+
+function readableStatusSummary(value: string | null | undefined): string | null {
+  const text = value?.trim();
+  if (!text || isCorruptedQuestionText(text)) return null;
+  return text;
 }
 
 function providerReasonText(reason: string, label: string, message: string | null): string {
@@ -155,7 +244,7 @@ export function collectionTaskProviderDiagnosticHint(task: CollectionTask): stri
 
   if (parts.length > 0) return parts.join("；");
 
-  const text = `${task.status_summary ?? ""} ${task.error_message ?? ""} ${task.last_error ?? ""}`;
+  const text = `${readableStatusSummary(task.status_summary) ?? ""} ${task.error_message ?? ""} ${task.last_error ?? ""}`;
   if (/post_author_missing/.test(text)) return "找到帖子但未解析到作者，已记录 raw 字段诊断";
   if (/no same-product results|同款过滤后|no_same_product_match/i.test(text)) {
     return "找到相关类目红人但无同款证据，未入库";
@@ -209,7 +298,7 @@ export function collectionTaskInterruptedHint(task: CollectionTask): string {
       ? collectionTaskStageLabel(checkpoint.interrupted_stage)
       : collectionTaskStageLabel(task.current_stage);
   const updated = formatProgressUpdatedAt(task.updated_at);
-  const err = task.last_error || task.error_message || task.status_summary;
+  const err = task.last_error || task.error_message || readableStatusSummary(task.status_summary);
   const parts = [`阶段：${stage}`];
   if (updated) parts.push(`最后更新 ${updated}`);
   if (err) parts.push(err);
@@ -243,9 +332,33 @@ export function formatTargetLabel(task: Pick<CollectionTask, "discovery_limit">)
   return target == null ? "目标未设置" : `目标 ${target}`;
 }
 
-export function formatInsertedVsTarget(task: Pick<CollectionTask, "inserted_count" | "result_count" | "discovery_limit">): string {
+export function formatInsertedVsTarget(
+  task: Pick<CollectionTask, "inserted_count" | "result_count" | "discovery_limit"> &
+    Partial<Pick<CollectionTask, "run_checkpoint">>,
+): string {
   const inserted = task.inserted_count ?? task.result_count ?? 0;
   const target = collectionTaskTargetCount(task);
+  const checkpoint = task.run_checkpoint ?? {};
+  const productLibraryInserted =
+    typeof checkpoint.product_library_inserted_count === "number"
+      ? checkpoint.product_library_inserted_count
+      : null;
+  const uniqueInserted =
+    typeof checkpoint.unique_inserted_count === "number" ? checkpoint.unique_inserted_count : null;
+
+  if (productLibraryInserted != null) {
+    const targetText = target == null ? "目标未设置" : `目标 ${target}`;
+    const details = [];
+    if (uniqueInserted != null) details.push(`本批次去重 ${uniqueInserted}`);
+    if (inserted !== productLibraryInserted) details.push(`累计命中 ${inserted}`);
+    const suffix = details.length > 0 ? `（${details.join("，")}）` : "";
+    return `红人库当前 ${productLibraryInserted} / ${targetText}${suffix}`;
+  }
+
+  if (uniqueInserted != null && inserted > uniqueInserted) {
+    const targetText = target == null ? "目标未设置" : `目标 ${target}`;
+    return `红人库去重入库 ${uniqueInserted} / ${targetText}（累计命中 ${inserted}）`;
+  }
   if (target == null) return `已入库 ${inserted} / 目标未设置`;
   return `已入库 ${inserted} / 目标 ${target}`;
 }
@@ -351,7 +464,12 @@ export function buildTaskResultBreakdown(task: CollectionTask): TaskResultBreakd
   const providerDiagnostic = collectionTaskProviderDiagnosticHint(task);
   const keywordDiagnostic = keywordExpansionDiagnosticHint(task);
   const reasonSource =
-    diagnostic || providerDiagnostic || task.error_message || task.last_error || task.status_summary || keywordDiagnostic;
+    diagnostic ||
+    providerDiagnostic ||
+    task.error_message ||
+    task.last_error ||
+    readableStatusSummary(task.status_summary) ||
+    keywordDiagnostic;
   return {
     primary,
     funnel,
@@ -376,7 +494,7 @@ function zeroResultDiagnosticHint(task: CollectionTask): string | null {
   const excluded = task.filtered_excluded_keyword_count ?? 0;
   const missingContact = task.missing_contact_count ?? 0;
   const checkpoint = task.run_checkpoint ?? {};
-  if (/主页外链|涓婚〉澶栭摼|Amazon storefront|ShopMy|Linktree/i.test(task.status_summary ?? "")) {
+  if (/主页外链|涓婚〉澶栭摼|Amazon storefront|ShopMy|Linktree/i.test(readableStatusSummary(task.status_summary) ?? "")) {
     return null;
   }
   const contactFiltered =
@@ -427,7 +545,7 @@ function zeroResultDiagnosticHint(task: CollectionTask): string | null {
 export function isCollectionTaskRateLimited(task: CollectionTask): boolean {
   const checkpoint = task.run_checkpoint ?? {};
   if (checkpoint.rate_limited === true) return true;
-  const haystack = `${task.last_error ?? ""} ${task.status_summary ?? ""} ${task.error_message ?? ""}`;
+  const haystack = `${task.last_error ?? ""} ${readableStatusSummary(task.status_summary) ?? ""} ${task.error_message ?? ""}`;
   return /429|限流|rate.?limit/i.test(haystack);
 }
 
@@ -656,7 +774,7 @@ export function collectionTaskRunningHint(
   const checkpoint = task.run_checkpoint ?? {};
   const partialSkipped =
     typeof checkpoint.partial_skip_note === "string" ||
-    /跳过|继续处理/.test(task.status_summary ?? "");
+    /跳过|继续处理/.test(readableStatusSummary(task.status_summary) ?? "");
 
   if (isCollectionTaskRateLimited(task)) {
     return "平台接口响应慢或限流，系统正在降速重试";
@@ -679,8 +797,9 @@ export function collectionTaskRunningHint(
     if (suffixParts.length > 0) {
       return `正在采集：${stage}（${suffixParts.join("，")}）`;
     }
-    if ((task.discovered_count ?? 0) === 0 && (task.inserted_count ?? 0) === 0 && task.status_summary) {
-      return task.status_summary;
+    const statusSummary = readableStatusSummary(task.status_summary);
+    if ((task.discovered_count ?? 0) === 0 && (task.inserted_count ?? 0) === 0 && statusSummary) {
+      return statusSummary;
     }
     return `正在采集：${stage}`;
   }
@@ -704,10 +823,11 @@ export function formatCollectionResultLines(task: CollectionTask): CollectionRes
   }
 
   if (!hint) {
-    if (task.status_summary && task.status !== "running") {
-      hint = task.status_summary;
-    } else if (task.status === "running" && task.status_summary) {
-      hint = task.status_summary;
+    const statusSummary = readableStatusSummary(task.status_summary);
+    if (statusSummary && task.status !== "running") {
+      hint = statusSummary;
+    } else if (task.status === "running" && statusSummary) {
+      hint = statusSummary;
     }
   }
 

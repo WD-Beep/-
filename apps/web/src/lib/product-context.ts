@@ -63,9 +63,23 @@ function readStoredToken(): string | null {
   }
 }
 
+function readStoredSessionUserId(): number | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(AUTH_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { userId?: unknown };
+    const userId = Number(parsed.userId);
+    return Number.isFinite(userId) && userId > 0 ? userId : null;
+  } catch {
+    return null;
+  }
+}
+
 export function tenantHeaders(): Record<string, string> {
+  const userId = readStoredSessionUserId() ?? getStoredUserId();
   const headers: Record<string, string> = {
-    "X-User-Id": String(getStoredUserId()),
+    "X-User-Id": String(userId),
     "X-Product-Id": String(getActiveProductId()),
   };
   const token = readStoredToken();

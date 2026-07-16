@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import delete, select
@@ -17,7 +18,9 @@ from app.services.influencer_persistence import (
     create_global_profile_from_collected,
     create_product_influencer_from_collected,
 )
+from app.services import link_script_generator
 from app.services.link_script_generator import _fallback_script
+from app.schemas.link_knowledge_base import LinkKnowledgeBaseUpdate, LinkScriptGenerateRequest
 
 
 def _suffix() -> str:
@@ -50,6 +53,220 @@ def test_fallback_link_script_is_complete_enough_to_send():
     assert "Collaboration idea" in email
     assert "Would you be open" in email
     assert "Best," in email
+
+
+def test_manual_selling_points_are_prioritized_and_deduplicated():
+    merge = getattr(link_script_generator, "merge_selling_points", None)
+    assert callable(merge), "link script generator should expose merge_selling_points"
+
+    points = merge(
+        ["Manual benefit", "Shared benefit", "manual benefit"],
+        ["Shared benefit", "Extracted benefit"],
+    )
+
+    assert points == ["Manual benefit", "Shared benefit", "Extracted benefit"]
+
+
+def test_manual_selling_points_schema_trims_and_deduplicates():
+    payload = LinkKnowledgeBaseUpdate(
+        manual_selling_points=["  Manual benefit  ", "", "manual benefit", "Second benefit"]
+    )
+
+    assert payload.manual_selling_points == ["Manual benefit", "Second benefit"]
+
+
+def test_fallback_link_script_prefers_manual_selling_points():
+    snapshot = {
+        "link_knowledge": {
+            "name": "Travel product",
+            "manual_selling_points": ["manual compact design"],
+            "effective_selling_points": ["manual compact design", "automatic durable material"],
+            "extracted_knowledge": {
+                "brand_name": "TravelPro",
+                "product_name": "Packing Cube",
+                "selling_points": ["automatic durable material"],
+                "collaboration_angles": ["packing routine"],
+            },
+        },
+        "influencer": {"display_name": "Mia", "category": "travel"},
+    }
+
+    script = _fallback_script(snapshot)
+
+    assert "manual compact design" in script["email_first_touch"]
+
+
+def test_link_script_enforces_required_english_affiliate_offer_and_product_link():
+    enforce = getattr(link_script_generator, "_enforce_link_script_business_requirements", None)
+    assert callable(enforce)
+    snapshot = {
+        "link_knowledge": {
+            "url": "https://example.com/products/packing-cube",
+            "name": "旅行收纳包",
+            "extracted_knowledge": {
+                "brand_name": "TravelPro",
+                "product_name": "Packing Cube",
+            },
+        },
+        "influencer": {
+            "display_name": "Mia",
+            "username": "mia",
+            "platform": "instagram",
+            "category": "travel",
+            "profile_url": "https://instagram.com/mia",
+        },
+    }
+    generated = {
+        "match_reason": "适合旅行博主",
+        "personalization_points": ["旅行收纳"],
+        "email_subjects": ["旅行收纳合作"],
+        "email_first_touch": "你好 Mia，我们想合作。",
+        "instagram_dm": "你好，想合作吗？",
+        "tiktok_dm": "你好，想合作吗？",
+        "youtube_pitch": "你好 Mia，我们想合作。",
+        "follow_up_1": "你好，跟进一下。",
+        "follow_up_2": "你好，再跟进一下。",
+        "negotiation_reply": "可以沟通报价。",
+        "comment_script": "内容不错。",
+        "notes": "internal note",
+    }
+
+    script = enforce(generated, snapshot)
+    combined = "\n".join(
+        str(value)
+        for key, value in script.items()
+        if key != "notes"
+        for value in (value if isinstance(value, list) else [value])
+    )
+
+    assert "TravelPro" in combined
+    assert "Amazon" in combined
+    assert "Affiliate" in combined
+    assert "10%-30%" in combined
+    assert "https://example.com/products/packing-cube" in combined
+    assert not any("\u4e00" <= char <= "\u9fff" for char in combined)
+
+
+def test_link_script_validation_requires_long_copy_dm_and_supplied_selling_point():
+    validate = getattr(link_script_generator, "_link_script_validation_errors", None)
+    assert callable(validate)
+
+    errors = validate(
+        {
+            "email_first_touch": "Short email without the approved benefit.",
+            "youtube_pitch": "Short pitch.",
+            "instagram_dm": "Too short.",
+            "tiktok_dm": "Too short.",
+        },
+        {
+            "language": "en",
+            "message_template": {"generation_rules": {"min_length": 40, "max_length": 120}},
+            "link_knowledge": {
+                "manual_selling_points": ["manual compact design"],
+                "effective_selling_points": ["manual compact design", "automatic durable material"],
+            },
+        },
+    )
+
+    assert any("email_first_touch length" in item for item in errors)
+    assert any("youtube_pitch length" in item for item in errors)
+    assert any("instagram_dm length" in item for item in errors)
+    assert any("tiktok_dm length" in item for item in errors)
+    assert "missing supplied selling point" in errors
+
+
+def test_link_script_request_keeps_message_template_id():
+    payload = LinkScriptGenerateRequest(influencer_ids=[1], message_template_id=9)
+
+    assert payload.message_template_id == 9
+
+
+def test_link_generator_passes_template_and_effective_selling_points_to_ai():
+    async def _run() -> None:
+        db = AsyncMock()
+        db.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
+        base = SimpleNamespace(
+            id=3,
+            name="Travel product",
+            url="https://example.com/product",
+            domain="example.com",
+            summary="Travel organizer",
+            extracted_knowledge={
+                "brand_name": "TravelPro",
+                "product_name": "Packing Cube",
+                "selling_points": ["automatic durable material"],
+            },
+            manual_selling_points=["manual compact design"],
+        )
+        product_row = SimpleNamespace(
+            id=7,
+            product_fit="high",
+            score=90,
+            ai_summary="travel creator",
+            ai_collaboration_suggestion="packing routine",
+            tags=[],
+        )
+        global_row = SimpleNamespace(
+            platform="instagram",
+            username="mia",
+            display_name="Mia",
+            profile_url="https://instagram.com/mia",
+            bio="travel packing creator",
+            category="travel",
+            niche="packing",
+            followers_count=42000,
+            engagement_rate=3.2,
+            country="US",
+            language="en",
+            recent_post_titles=[],
+            content_topics=[],
+        )
+        ai_payload = {
+            "match_reason": "fit",
+            "personalization_points": ["packing"],
+            "email_subjects": ["TravelPro x Mia"],
+            "email_first_touch": "Hi Mia, manual compact design. Would you be open to details?",
+        }
+        valid_payload = {
+            **ai_payload,
+            "email_first_touch": (
+                "Hi Mia, your practical packing videos make complex travel routines easy to follow. "
+                "TravelPro's manual compact design gives your audience a clear benefit they can understand quickly, "
+                "while the durable material supports repeated trips. We could build a lightweight packing-routine story "
+                "that fits your normal content style. Would you be open to reviewing the details? Best, Brand Team"
+            ),
+        }
+
+        with patch("app.services.link_script_generator.settings") as mock_settings:
+            mock_settings.is_openai_configured = True
+            with patch(
+                "app.services.link_script_generator.chat_completion_json",
+                new_callable=AsyncMock,
+                side_effect=[ai_payload, valid_payload],
+            ) as ai_mock:
+                await link_script_generator.generate_scripts_for_influencer(
+                    db,
+                    base,
+                    product_row,
+                    global_row,
+                    {
+                        "tone": "natural",
+                        "message_template": {
+                            "id": 9,
+                            "title": "Detailed framework",
+                            "content": "Greeting, product value, CTA, signature",
+                            "generation_rules": {"min_length": 50, "required_content": ["Would you be open"]},
+                        },
+                    },
+                )
+
+        prompt = ai_mock.await_args.kwargs["user_prompt"]
+        assert "manual compact design" in prompt
+        assert "Detailed framework" in prompt
+        assert "Greeting, product value, CTA, signature" in prompt
+        assert ai_mock.await_count == 2
+
+    asyncio.run(_run())
 
 
 async def _create_product_influencer(db, suffix: str) -> ProductInfluencer:

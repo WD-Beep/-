@@ -138,7 +138,6 @@ function AdminUserAccountDialogContent({
     event.preventDefault();
     setError(null);
     const trimmedUsername = username.trim();
-    const trimmedEmail = email.trim();
     if (!trimmedUsername) {
       setError("请填写登录账号。");
       return;
@@ -149,10 +148,6 @@ function AdminUserAccountDialogContent({
     }
     if (!/^[A-Za-z0-9_.-]+$/.test(trimmedUsername)) {
       setError("登录账号只能包含字母、数字、下划线、点和短横线。");
-      return;
-    }
-    if (trimmedEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
-      setError("邮箱格式不正确，请输入有效的邮箱地址。");
       return;
     }
     const removed = initialProductIds.filter((id) => !activeProductIds.includes(id));
@@ -229,8 +224,8 @@ function AdminUserAccountDialogContent({
                 <input className={fieldClass} value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="用于后台展示" />
               </label>
               <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
-                邮箱
-                <input className={fieldClass} type="text" inputMode="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@company.com（选填）" />
+                邮箱 / 手机 / 联系方式
+                <input className={fieldClass} type="text" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="邮箱、手机号、微信号或内部账号（选填）" maxLength={255} />
               </label>
               <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
                 账号角色

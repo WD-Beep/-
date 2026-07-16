@@ -47,6 +47,7 @@ from app.services.outreach_recipient import (
 )
 from app.services.product_influencer_service import ProductInfluencerService
 from app.services.single_outreach_email_service import BLOCKED_FOLLOW_STATUSES
+from app.services.smtp_account import resolve_smtp_account
 
 logger = logging.getLogger(__name__)
 
@@ -554,10 +555,13 @@ class OutreachSendQueueService:
             await db.commit()
             return "skipped"
 
-        sender_email = _resolve_sender_email()
+        sender_account = await resolve_smtp_account(db, user_id=row.user_id or user_id)
+        sender_email = sender_account.smtp_from or _resolve_sender_email()
+        row.sender_email = sender_email
+        row.smtp_account_id = sender_account.account_id
         message_id = build_outbound_message_id(product_id=row.product_id)
         message = MIMEMultipart()
-        message["From"] = settings.smtp_from
+        message["From"] = sender_email or settings.smtp_from
         message["To"] = recipient
         message["Subject"] = row.subject
         message["Message-ID"] = message_id
@@ -571,6 +575,10 @@ class OutreachSendQueueService:
             "product_id": row.product_id,
             "user_id": user_id,
             "product_influencer_id": product_row.id,
+            "sender_user_id": sender_account.sender_user_id,
+            "smtp_account_id": sender_account.account_id,
+            "sender_source": sender_account.source,
+            "follow_up_index": row.follow_up_step,
             "sender_email": sender_email,
             "influencer_username": global_row.username,
             "generated_by_ai": row.generated_by_ai,
@@ -581,7 +589,7 @@ class OutreachSendQueueService:
         }
 
         try:
-            await EmailService._send_message(message, [recipient])
+            await EmailService._send_message(message, [recipient], smtp_account=sender_account)
             log = await EmailService.create_outreach_email_log(
                 db,
                 status=EmailLogStatus.SENT,

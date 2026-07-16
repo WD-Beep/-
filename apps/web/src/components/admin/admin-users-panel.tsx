@@ -27,7 +27,8 @@ import {
   type StatusMeta,
 } from "@/components/admin/admin-ui-helpers";
 import { AdminPasswordResetDialog, AdminUserAccountDialog } from "@/components/admin/admin-user-dialogs";
-import { fetchAdminProducts, fetchAdminUsers, updateAdminUser, type AdminProduct, type AdminUser } from "@/lib/api";
+import { SalespersonDeleteDialog } from "@/components/admin/admin-products-management";
+import { deleteAdminUser, fetchAdminProducts, fetchAdminUsers, updateAdminUser, type AdminProduct, type AdminUser } from "@/lib/api";
 import { getStoredAuthSession } from "@/lib/auth";
 
 const activeMeta: Record<string, StatusMeta> = {
@@ -41,19 +42,19 @@ export function AdminUsersPanel() {
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [productsLoading, setProductsLoading] = useState(false);
   const [filters, setFilters] = useState({ search: "", owner: "", status: "" });
   const [accountDialogOpen, setAccountDialogOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
   const [passwordUser, setPasswordUser] = useState<AdminUser | null>(null);
+  const [deleteUser, setDeleteUser] = useState<AdminUser | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
 
   useEffect(() => {
     let active = true;
-    Promise.all([fetchAdminUsers(), fetchAdminProducts()])
-      .then(([users, productItems]) => {
-        if (active) {
-          setItems(users);
-          setProducts(productItems);
-        }
+    fetchAdminUsers()
+      .then((users) => {
+        if (active) setItems(users);
       })
       .catch((err) => {
         if (active) setError(err instanceof Error ? err.message : "业务员列表加载失败。");
@@ -69,8 +70,26 @@ export function AdminUsersPanel() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   async function reloadAll() {
-    const [users, productItems] = await Promise.all([fetchAdminUsers(), fetchAdminProducts()]);
+    const users = await fetchAdminUsers();
     setItems(users);
+  }
+
+  async function ensureProductsLoaded() {
+    if (products.length > 0 || productsLoading) return;
+    setProductsLoading(true);
+    setActionError(null);
+    try {
+      const productItems = await fetchAdminProducts();
+      setProducts(productItems);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "品牌权限加载失败，请稍后重试。");
+    } finally {
+      setProductsLoading(false);
+    }
+  }
+
+  async function reloadProducts() {
+    const productItems = await fetchAdminProducts();
     setProducts(productItems);
   }
 
@@ -87,6 +106,25 @@ export function AdminUsersPanel() {
       replaceUser(await updateAdminUser(user.id, { is_active: !user.is_active }));
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "账号状态更新失败。");
+    }
+  }
+
+  async function confirmDeleteUser() {
+    if (!deleteUser) return;
+    setDeleteLoading(true);
+    setActionError(null);
+    try {
+      const username = deleteUser.username;
+      const result = await deleteAdminUser(deleteUser.id);
+      setDeleteUser(null);
+      await reloadAll();
+      setSuccessMessage(
+        `已删除 ${username}，释放 ${result.released_products} 个品牌和 ${result.released_tasks} 个任务，历史数据已保留。`,
+      );
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "删除业务员失败，请稍后重试。");
+    } finally {
+      setDeleteLoading(false);
     }
   }
 
@@ -119,7 +157,13 @@ export function AdminUsersPanel() {
         backFallback="/admin/dashboard"
         actions={
           <>
-            <AdminActionButton onClick={() => { setEditingUser(null); setAccountDialogOpen(true); }}>
+            <AdminActionButton
+              onClick={() => {
+                setEditingUser(null);
+                setAccountDialogOpen(true);
+                void ensureProductsLoaded();
+              }}
+            >
               <UserCheck className="h-3.5 w-3.5" />
               创建业务员
             </AdminActionButton>
@@ -178,6 +222,7 @@ export function AdminUsersPanel() {
                 onClick={() => {
                   setEditingUser(null);
                   setAccountDialogOpen(true);
+                  void ensureProductsLoaded();
                 }}
               >
                 <UserCheck className="h-3.5 w-3.5" />
@@ -209,12 +254,16 @@ export function AdminUsersPanel() {
                 primaryOnClick={() => {
                   setEditingUser(item);
                   setAccountDialogOpen(true);
+                  void ensureProductsLoaded();
                 }}
                 primaryLabel="编辑"
                 items={[
                   { label: "查看详情", href: `/admin/users/${item.id}` },
                   { label: item.is_active ? "禁用账号" : "启用账号", onClick: () => void toggleUser(item), danger: item.is_active },
                   { label: "重置密码", onClick: () => setPasswordUser(item) },
+                  ...(item.role === "sales"
+                    ? [{ label: "删除", onClick: () => setDeleteUser(item), danger: true }]
+                    : []),
                 ]}
               />,
             ])}
@@ -230,7 +279,7 @@ export function AdminUsersPanel() {
         users={items}
         currentUserId={getStoredAuthSession()?.userId ?? null}
         onClose={() => setAccountDialogOpen(false)}
-        onProductsChanged={reloadAll}
+        onProductsChanged={reloadProducts}
         onSaved={async (saved) => {
           replaceUser(saved);
           await reloadAll();
@@ -238,6 +287,23 @@ export function AdminUsersPanel() {
         }}
       />
       <AdminPasswordResetDialog user={passwordUser} onClose={() => setPasswordUser(null)} />
+      <SalespersonDeleteDialog
+        open={Boolean(deleteUser)}
+        userName={deleteUser?.display_name?.trim() || deleteUser?.username || ""}
+        username={deleteUser?.username || ""}
+        productCount={deleteUser?.product_count ?? 0}
+        taskCount={deleteUser?.collection_task_count ?? 0}
+        influencerCount={deleteUser?.influencer_count ?? 0}
+        emailCount={deleteUser?.email_count ?? 0}
+        replyCount={deleteUser?.reply_count ?? 0}
+        error={deleteUser ? actionError : null}
+        loading={deleteLoading}
+        onCancel={() => {
+          setDeleteUser(null);
+          setActionError(null);
+        }}
+        onDelete={() => void confirmDeleteUser()}
+      />
     </div>
   );
 }

@@ -28,10 +28,18 @@ import {
 } from "lucide-react";
 
 import { ProductCreateDialog } from "@/components/layout/product-create-dialog";
-import { deleteTenantProduct, fetchEmailReplyWorkCount, fetchTenantProducts, type TenantProduct } from "@/lib/api";
+import {
+  deleteTenantProduct,
+  fetchEmailReplyWorkCount,
+  fetchMySmtpAccount,
+  fetchTenantProducts,
+  type TenantProduct,
+  type UserSmtpAccountStatus,
+} from "@/lib/api";
 import { clearAuthSession, getStoredAuthSession, setAuthSession, type AuthSession } from "@/lib/auth";
 import { formatTenantProductLabel } from "@/lib/brand-products";
 import {
+  clearCachedTenantProducts,
   readCachedTenantProducts,
   writeCachedTenantProducts,
 } from "@/lib/product-options-cache";
@@ -117,6 +125,17 @@ let productOptionsMemoryCache: ProductOptionsMemoryCache | null = null;
 let productOptionsInflight: Promise<TenantProduct[]> | null = null;
 let productOptionsInflightUserId: number | null = null;
 
+type SmtpAccountMemoryCache = {
+  userId?: number | null;
+  status: UserSmtpAccountStatus;
+  loadedAt: number;
+};
+
+const SMTP_ACCOUNT_MEMORY_CACHE_TTL_MS = 5 * 60 * 1000;
+let smtpAccountMemoryCache: SmtpAccountMemoryCache | null = null;
+let smtpAccountInflight: Promise<UserSmtpAccountStatus> | null = null;
+let smtpAccountInflightUserId: number | null = null;
+
 function isSameProductCacheUser(left?: number | null, right?: number | null) {
   return (left ?? null) === (right ?? null);
 }
@@ -126,6 +145,13 @@ function readFreshProductOptionsMemoryCache(userId?: number | null): TenantProdu
   if (!isSameProductCacheUser(productOptionsMemoryCache.userId, userId)) return null;
   if (Date.now() - productOptionsMemoryCache.loadedAt > PRODUCT_OPTIONS_MEMORY_CACHE_TTL_MS) return null;
   return productOptionsMemoryCache.items;
+}
+
+function clearProductOptionsMemoryCache(userId?: number | null) {
+  if (!productOptionsMemoryCache) return;
+  if (userId === undefined || isSameProductCacheUser(productOptionsMemoryCache.userId, userId)) {
+    productOptionsMemoryCache = null;
+  }
 }
 
 async function fetchTenantProductsShared(userId?: number | null, force = false) {
@@ -147,6 +173,33 @@ async function fetchTenantProductsShared(userId?: number | null, force = false) 
       productOptionsInflightUserId = null;
     });
   return productOptionsInflight;
+}
+
+function readFreshSmtpAccountMemoryCache(userId?: number | null): UserSmtpAccountStatus | null {
+  if (!smtpAccountMemoryCache) return null;
+  if (!isSameProductCacheUser(smtpAccountMemoryCache.userId, userId)) return null;
+  if (Date.now() - smtpAccountMemoryCache.loadedAt > SMTP_ACCOUNT_MEMORY_CACHE_TTL_MS) return null;
+  return smtpAccountMemoryCache.status;
+}
+
+async function fetchMySmtpAccountShared(userId?: number | null, force = false) {
+  const cachedStatus = force ? null : readFreshSmtpAccountMemoryCache(userId);
+  if (cachedStatus) return cachedStatus;
+  if (!force && smtpAccountInflight && isSameProductCacheUser(smtpAccountInflightUserId, userId)) {
+    return smtpAccountInflight;
+  }
+
+  smtpAccountInflightUserId = userId ?? null;
+  smtpAccountInflight = fetchMySmtpAccount()
+    .then((status) => {
+      smtpAccountMemoryCache = { userId, status, loadedAt: Date.now() };
+      return status;
+    })
+    .finally(() => {
+      smtpAccountInflight = null;
+      smtpAccountInflightUserId = null;
+    });
+  return smtpAccountInflight;
 }
 
 function wait(ms: number) {
@@ -182,6 +235,7 @@ export function Sidebar() {
   const [expanded, setExpanded] = useState(false);
   const [productMenuOpen, setProductMenuOpen] = useState(false);
   const [unprocessedReplyCount, setUnprocessedReplyCount] = useState(0);
+  const [smtpAccount, setSmtpAccount] = useState<UserSmtpAccountStatus | null>(null);
   const collapseTimer = useRef<number | null>(null);
   const productMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -204,7 +258,7 @@ export function Sidebar() {
               ...group,
               items: group.items.filter((item) => item.href !== "/settings"),
             }))
-            .filter((group) => group.items.length > 0 && group.title !== "绯荤粺"),
+            .filter((group) => group.items.length > 0 && group.title !== "系统"),
     [isAdmin],
   );
   const visibleMiniItems = useMemo(
@@ -231,6 +285,8 @@ export function Sidebar() {
     () => scopedProducts.find((product) => product.id === productId) ?? null,
     [productId, scopedProducts],
   );
+  const senderEmailLabel = smtpAccount?.sender_email || "未配置发件邮箱";
+  const senderSourceLabel = smtpAccount?.source === "user" ? "个人发件" : "系统发件";
 
   const loadProducts = useCallback(async (
     sessionForCache: AuthSession | null = getStoredAuthSession(),
@@ -300,6 +356,33 @@ export function Sidebar() {
       if (collapseTimer.current) window.clearTimeout(collapseTimer.current);
     };
   }, []);
+
+  useEffect(() => {
+    const userId = session?.userId;
+    let cancelled = false;
+    if (!userId) {
+      queueMicrotask(() => {
+        if (!cancelled) setSmtpAccount(null);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    queueMicrotask(() => {
+      const cachedStatus = readFreshSmtpAccountMemoryCache(userId);
+      if (cachedStatus && !cancelled) setSmtpAccount(cachedStatus);
+      void fetchMySmtpAccountShared(userId)
+        .then((status) => {
+          if (!cancelled) setSmtpAccount(status);
+        })
+        .catch(() => {
+          if (!cancelled) setSmtpAccount(null);
+        });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.userId]);
 
   useEffect(() => {
     function handlePointerDown(event: PointerEvent) {
@@ -376,7 +459,6 @@ export function Sidebar() {
   function handleLogout() {
     clearAuthSession();
     router.replace("/login");
-    router.refresh();
   }
 
   function selectProduct(next: number) {
@@ -384,13 +466,11 @@ export function Sidebar() {
     if (next === ALL_PRODUCTS_ID && !canSelectAllProducts(effectiveSession)) return;
     setActiveProductId(next);
     setProductMenuOpen(false);
-    router.refresh();
   }
 
   async function handleProductCreated(product: TenantProduct) {
     await loadProducts(getStoredAuthSession(), { force: true });
     setActiveProductId(product.id);
-    router.refresh();
     showToast("已创建并切换到新产品/品牌");
   }
 
@@ -400,10 +480,14 @@ export function Sidebar() {
     if (!confirmed) return;
 
     setDeletingProduct(true);
+    const deletedProductId = activeProduct.id;
     try {
-      await deleteTenantProduct(activeProduct.id);
       const currentSession = getStoredAuthSession();
-      const remainingProducts = scopedProducts.filter((product) => product.id !== activeProduct.id);
+      await deleteTenantProduct(deletedProductId);
+      clearCachedTenantProducts(currentSession?.userId);
+      clearProductOptionsMemoryCache(currentSession?.userId);
+      const freshProducts = await loadProducts(currentSession, { force: true });
+      const remainingProducts = freshProducts.filter((product) => product.id !== deletedProductId);
       if (currentSession) {
         const nextSession = { ...currentSession, accessibleProducts: remainingProducts };
         setAuthSession(nextSession);
@@ -413,7 +497,6 @@ export function Sidebar() {
       setProducts(remainingProducts);
       setActiveProductId(remainingProducts[0]?.id ?? ALL_PRODUCTS_ID);
       setProductMenuOpen(false);
-      router.refresh();
       showToast("已删除品牌");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "删除品牌失败");
@@ -588,15 +671,19 @@ export function Sidebar() {
                           key={product.id}
                           type="button"
                           role="option"
+                          title={`ID #${product.id} · ${product.slug}`}
                           aria-selected={selected}
                           className={cn(
-                            "flex min-h-9 w-full items-center px-3 text-left text-slate-200 transition hover:bg-[#1D2942] hover:text-white",
+                            "flex min-h-10 w-full items-center gap-2 px-3 text-left text-slate-200 transition hover:bg-[#1D2942] hover:text-white",
                             selected ? "bg-[#263A66] text-white" : "",
                           )}
                           onClick={() => selectProduct(product.id)}
                         >
-                          <span className="truncate">
+                          <span className="min-w-0 flex-1 truncate">
                             {formatTenantProductLabel(product.name, product.brand)}
+                          </span>
+                          <span className="shrink-0 rounded bg-white/8 px-1.5 py-0.5 text-[10px] text-slate-400">
+                            ID #{product.id}
                           </span>
                         </button>
                       );
@@ -698,6 +785,18 @@ export function Sidebar() {
           </nav>
 
           <div className="border-t border-white/8 px-4 py-3">
+            <Link
+              href="/settings"
+              className="mb-3 block rounded-lg border border-white/8 bg-white/[0.04] px-3 py-2 transition hover:bg-white/[0.08]"
+              title="邮箱配置"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[12px] font-semibold text-slate-200">邮箱配置</span>
+                <Mail className="h-3.5 w-3.5 text-slate-400" />
+              </div>
+              <p className="mt-1 truncate text-[11px] text-slate-400">当前发件：{senderSourceLabel}</p>
+              <p className="mt-0.5 truncate text-[11px] text-slate-500">{senderEmailLabel}</p>
+            </Link>
             <div className="flex items-center gap-2.5">
               <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-200 text-xs font-bold text-[#101632] ring-1 ring-white/20">
                 13
@@ -727,3 +826,4 @@ export function Sidebar() {
     </>
   );
 }
+

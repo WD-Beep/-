@@ -1,5 +1,6 @@
 import "./register-path-aliases.ts";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -127,6 +128,13 @@ test("translateEmailFailureReason turns SMTP errors into readable business copy"
   assert.equal(translateEmailFailureReason(null), "-");
 });
 
+test("translateEmailFailureReason does not mislabel missing recipients as SMTP not configured", () => {
+  const message = translateEmailFailureReason("任务未配置收件人，请在 email_recipients 中设置。");
+
+  assert.match(message, /收件人/);
+  assert.doesNotMatch(message, /发件邮箱未配置|SMTP 配置/);
+});
+
 test("parseEmailLogView supports direct links to record views", () => {
   assert.equal(parseEmailLogView("sent"), "sent");
   assert.equal(parseEmailLogView("failed"), "failed");
@@ -142,4 +150,16 @@ test("buildOutreachRecordsUrl creates direct links for business record views", (
   assert.equal(buildOutreachRecordsUrl("replied"), "/outreach-records?view=replied");
   assert.equal(buildOutreachRecordsUrl("unreplied"), "/outreach-records?view=unreplied");
   assert.equal(buildOutreachRecordsUrl("all"), "/outreach-records");
+});
+
+test("outreach records page exposes real bulk second follow-up action", async () => {
+  const [apiSource, panelSource] = await Promise.all([
+    fs.readFile(new URL("../src/lib/api.ts", import.meta.url), "utf8"),
+    fs.readFile(new URL("../src/components/email-logs/email-logs-panel.tsx", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(apiSource, /bulk-second-follow-up/);
+  assert.match(apiSource, /bulkSecondFollowUpOutreachRecords/);
+  assert.match(panelSource, /批量第二次跟进/);
+  assert.match(panelSource, /bulkSecondFollowUpOutreachRecords\(recordIds\)/);
 });

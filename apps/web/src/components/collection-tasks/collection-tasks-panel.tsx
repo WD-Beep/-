@@ -19,7 +19,9 @@ import {
   buildTaskResultBreakdown,
   collectionTaskInterruptedHint,
   collectionTaskRunningHint,
+  collectionTaskStatusDisplay,
   formatCollectionResultLines,
+  formatInsertedVsTarget,
   formatTargetLabel,
   isCollectionTaskRateLimited,
   isCollectionTaskSlowApi,
@@ -35,7 +37,9 @@ import {
   COLLECTION_TASK_SLOW_HINT_MS,
   createCollectionTask,
   deleteLinkImportBatch,
+  type CollectionConcurrencyStatus,
   fetchCollectionTasks,
+  fetchCollectionConcurrencyStatus,
   fetchLinkImportBatches,
   fetchPlatformCapabilities,
   getCollectionTaskRunningElapsedMs,
@@ -145,10 +149,9 @@ function batchProgressLines(task: CollectionTask): { headline: string; counts: s
   ).length;
   const failedRounds = children.filter((child) => child.status === "failed" || child.status === "partial_failed").length;
   const skippedRounds = children.reduce((sum, child) => sum + (child.skipped_count ?? 0), task.skipped_count ?? 0);
-  const inserted = task.inserted_count ?? task.result_count ?? 0;
-  const total = task.discovery_limit ?? 0;
+  const insertedLine = formatInsertedVsTarget(task);
   return {
-    headline: `多轮采集 · 第 ${currentRound}/${roundCount} 轮 · 已入库 ${inserted} / ${total}`,
+    headline: `多轮采集 · 第 ${currentRound}/${roundCount} 轮 · ${insertedLine}`,
     counts: `成功 ${successRounds} 轮 / 失败 ${failedRounds} 轮 / 跳过 ${skippedRounds}`,
   };
 }
@@ -182,17 +185,24 @@ function formatCollectionResultCell(
   }
 
   if (isCollectionTaskQueued(task)) {
-    const reasonLabels = Array.isArray(task.run_checkpoint?.queue_reason_labels)
-      ? task.run_checkpoint.queue_reason_labels.filter((item): item is string => typeof item === "string")
-      : [];
+    const reasonLabels = Array.isArray(task.queue_reason_labels) && task.queue_reason_labels.length > 0
+      ? task.queue_reason_labels
+      : Array.isArray(task.run_checkpoint?.queue_reason_labels)
+        ? task.run_checkpoint.queue_reason_labels.filter((item): item is string => typeof item === "string")
+        : [];
     const queuedText = task.status_summary ?? "任务已排队，等待空位";
     const reasonText = reasonLabels.length > 0 ? reasonLabels.join("；") : null;
+    const position = task.queue_position;
+    const staleRecovered = Boolean(task.run_checkpoint?.stale_recovered);
     return (
       <>
         <span className="inline-flex items-center gap-1.5 text-amber-700 dark:text-amber-400">
           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
-          {queuedText}
+          {staleRecovered ? "stale 回收后排队" : queuedText}
         </span>
+        {position ? (
+          <span className="mt-0.5 block text-xs text-muted-foreground">排队位置：第 {position} 位</span>
+        ) : null}
         {reasonText ? (
           <span className="mt-0.5 block text-xs text-muted-foreground">排队原因：{reasonText}</span>
         ) : null}
@@ -204,6 +214,9 @@ function formatCollectionResultCell(
   if (isCollectionTaskRunning(task)) {
     const rateLimited = isCollectionTaskRateLimited(task);
     const slowApi = isCollectionTaskSlowApi(task, elapsedMs, slowThresholdMs);
+    const heartbeat = task.heartbeat_at
+      ? new Date(task.heartbeat_at).toLocaleString()
+      : null;
     return (
       <>
         <span
@@ -212,10 +225,20 @@ function formatCollectionResultCell(
           }`}
         >
           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
-          {runningHint ?? lines.primary}
+          {rateLimited
+            ? "平台限流等待"
+            : task.status === "stopping"
+              ? "停止中"
+              : (runningHint ?? lines.primary)}
         </span>
         <span className="mt-0.5 block text-xs text-muted-foreground">{lines.primary}</span>
         <span className="mt-0.5 block text-xs text-muted-foreground">{lines.funnel}</span>
+        {heartbeat ? (
+          <span className="mt-0.5 block text-xs text-muted-foreground">
+            最近心跳：{heartbeat}
+            {task.worker_id ? ` · ${task.worker_id}` : ""}
+          </span>
+        ) : null}
         {lines.hint ? (
           <span className="mt-0.5 block line-clamp-2 text-xs text-muted-foreground" title={lines.hint}>
             {lines.hint}
@@ -390,7 +413,9 @@ export function CollectionTasksPanel() {
     bulkAction?: CollectionTaskBulkManageAction;
   } | null>(null);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
-  const [maxRunningTasks, setMaxRunningTasks] = useState(2);
+  const [maxRunningTasks, setMaxRunningTasks] = useState(10);
+  const [maxPerUser, setMaxPerUser] = useState(3);
+  const [concurrencyStatus, setConcurrencyStatus] = useState<CollectionConcurrencyStatus | null>(null);
   const [staleAfterSeconds, setStaleAfterSeconds] = useState(180);
   const [bulkRunSubmitting, setBulkRunSubmitting] = useState(false);
   const [expandedBatchIds, setExpandedBatchIds] = useState<number[]>([]);
@@ -413,16 +438,37 @@ export function CollectionTasksPanel() {
     void fetchPlatformCapabilities()
       .then((caps) => {
         if (!active) return;
-        setMaxRunningTasks(Math.max(1, caps.collection_max_running_tasks ?? 2));
+        setMaxRunningTasks(Math.max(1, caps.collection_max_running_tasks ?? 10));
+        setMaxPerUser(Math.max(1, caps.collection_max_concurrency_per_user ?? 3));
         setStaleAfterSeconds(Math.max(30, caps.collection_running_stale_seconds ?? 180));
       })
       .catch(() => {
         if (!active) return;
-        setMaxRunningTasks(2);
+        setMaxRunningTasks(10);
+        setMaxPerUser(3);
         setStaleAfterSeconds(180);
       });
     return () => {
       active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const loadConcurrency = () => {
+      void fetchCollectionConcurrencyStatus()
+        .then((status) => {
+          if (active) setConcurrencyStatus(status);
+        })
+        .catch(() => {
+          /* keep last known */
+        });
+    };
+    loadConcurrency();
+    const timer = setInterval(loadConcurrency, COLLECTION_TASK_POLL_INTERVAL_MS);
+    return () => {
+      active = false;
+      clearInterval(timer);
     };
   }, []);
 
@@ -555,7 +601,6 @@ export function CollectionTasksPanel() {
   const activeRunningTasks = tasks.filter(
     (t) => isCollectionTaskRunning(t) && !isCollectionTaskRunningStale(t),
   );
-  const activeRunningTask = activeRunningTasks[0];
   const createDisabledReason = collectionTaskCreateDisabledReason(productId);
 
   useEffect(() => {
@@ -1114,7 +1159,7 @@ export function CollectionTasksPanel() {
         <div className="flex items-center gap-2">
           <Button
             onClick={() => openCreateDialog("keyword_discovery")}
-            disabled={!canCreateCollectionTaskForProduct(productId)}
+            aria-disabled={!canCreateCollectionTaskForProduct(productId)}
             title={createDisabledReason ?? undefined}
           >
             <Plus className="h-4 w-4" />
@@ -1123,7 +1168,7 @@ export function CollectionTasksPanel() {
           <Button
             variant="outline"
             onClick={() => openCreateDialog("link_import")}
-            disabled={!canCreateCollectionTaskForProduct(productId)}
+            aria-disabled={!canCreateCollectionTaskForProduct(productId)}
             title={createDisabledReason ?? undefined}
           >
             链接导入
@@ -1208,18 +1253,26 @@ export function CollectionTasksPanel() {
       </div>
       </div>
 
-      {activeRunningTasks.length > 0 ? (
+      {concurrencyStatus || activeRunningTasks.length > 0 ? (
         <div className="mb-4 rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
           <span className="inline-flex items-center gap-2 font-medium">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            {activeRunningTasks.length === 1
-              ? `「${activeRunningTask?.name ?? "采集中"}」正在采集中`
-              : `${activeRunningTasks.length} 个任务正在采集中（上限 ${maxRunningTasks}）`}
+            {(concurrencyStatus?.global_running ?? activeRunningTasks.length) > 0 ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : null}
+            运行中 {concurrencyStatus?.global_running ?? activeRunningTasks.length}/
+            {concurrencyStatus?.global_capacity ?? maxRunningTasks}
+            <span className="font-normal text-muted-foreground">
+              · 排队 {concurrencyStatus?.queued_count ?? tasks.filter((t) => isCollectionTaskQueued(t)).length}
+              · 我的 {concurrencyStatus?.user_running ?? 0}/{concurrencyStatus?.user_capacity ?? maxPerUser}
+              {concurrencyStatus?.worker_count != null
+                ? ` · workers ${concurrencyStatus.worker_count}`
+                : ""}
+            </span>
           </span>
           <p className="mt-1 text-muted-foreground">
-            {maxRunningTasks <= 1
-              ? "当前配置为单任务串行运行，其他任务的「运行」按钮已禁用。请等待状态变为有结果/无结果后再启动下一个。"
-              : `当前最多同时运行 ${maxRunningTasks} 个任务；已达上限时其余任务需等待空位。`}
+            全局最多 {concurrencyStatus?.global_capacity ?? maxRunningTasks} 个任务同时运行；
+            每位业务员最多 {concurrencyStatus?.user_capacity ?? maxPerUser} 个；
+            超出后进入排队，任务结束后自动启动下一个。
           </p>
         </div>
       ) : null}
@@ -1434,12 +1487,13 @@ export function CollectionTasksPanel() {
                     }
 
                     const task = row.task;
-                    const status = statusMeta(task.status);
                     const isBusy = actionTaskId === task.id;
                     const isRunning = isCollectionTaskRunning(task);
                     const isPaused = isCollectionTaskPaused(task);
                     const isQueued = isCollectionTaskQueued(task);
                     const isStaleRunning = isRunning && isCollectionTaskRunningStale(task);
+                    const statusDisplay = collectionTaskStatusDisplay(task);
+                    const status = isStaleRunning ? statusDisplay : statusMeta(task.status);
                     const runningElapsedMs = isRunning ? getCollectionTaskRunningElapsedMs(task, nowMs) : 0;
                     const runBlocked = isRunning && !isStaleRunning;
                     const mode = task.collection_mode ?? "keyword";
@@ -1672,7 +1726,7 @@ export function CollectionTasksPanel() {
                                 <Play className="h-4 w-4" />
                               )}
                             </Button>
-                            {(isRunning || isQueued) && !isBatchParent ? (
+                            {(statusDisplay.canPause || isQueued) && !isBatchParent ? (
                               <Button
                                 size="sm"
                                 variant="ghost"

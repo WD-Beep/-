@@ -34,6 +34,7 @@ import {
   fetchLinkScriptJob,
   fetchLinkScriptJobs,
   fetchLinkScriptResults,
+  fetchMessageTemplates,
   generateLinkScripts,
   regenerateLinkScript,
   refreshLinkKnowledgeBase,
@@ -43,6 +44,7 @@ import {
   type LinkKnowledgeBase,
   type LinkScriptJob,
   type LinkScriptResult,
+  type MessageTemplate,
 } from "@/lib/api";
 import { translateErrorMessage } from "@/lib/labels";
 import { ALL_PRODUCTS_ID } from "@/lib/product-context";
@@ -105,6 +107,19 @@ function firstString(value: unknown): string {
   if (Array.isArray(value)) return value.map((item) => String(item)).join("\n");
   if (value == null) return "";
   return JSON.stringify(value, null, 2);
+}
+
+function parseSellingPoints(text: string): string[] {
+  const seen = new Set<string>();
+  return text
+    .split(/\r?\n/)
+    .map((item) => item.replace(/^[-•*]\s*/, "").trim())
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (!item || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
 function getPlatformScriptKeys(platform: string | null | undefined): string[] {
@@ -533,6 +548,7 @@ export function EditLinkKnowledgeBasePanel({ baseId }: { baseId: number }) {
   const [name, setName] = useState("");
   const [tags, setTags] = useState("");
   const [summary, setSummary] = useState("");
+  const [manualSellingPoints, setManualSellingPoints] = useState("");
   const [reparse, setReparse] = useState(false);
 
   const load = useCallback(async () => {
@@ -548,6 +564,7 @@ export function EditLinkKnowledgeBasePanel({ baseId }: { baseId: number }) {
       setName(data.name);
       setTags(tagsText(data.tags));
       setSummary(data.summary ?? "");
+      setManualSellingPoints((data.manual_selling_points ?? []).join("\n"));
     } catch (err) {
       setError(translateErrorMessage(err instanceof Error ? err.message : "加载链接失败"));
     } finally {
@@ -571,6 +588,7 @@ export function EditLinkKnowledgeBasePanel({ baseId }: { baseId: number }) {
         name: name || null,
         tags: parseTags(tags),
         summary: summary || null,
+        manual_selling_points: parseSellingPoints(manualSellingPoints),
         reparse,
       });
       router.push(`/link-knowledge-bases/${baseId}`);
@@ -613,9 +631,16 @@ export function EditLinkKnowledgeBasePanel({ baseId }: { baseId: number }) {
                 <Input id="edit-link-tags" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="skincare, amazon, serum" />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium" htmlFor="edit-link-summary">摘要</label>
-                <Textarea id="edit-link-summary" value={summary} onChange={(event) => setSummary(event.target.value)} rows={4} />
+                <label className="text-sm font-medium" htmlFor="edit-link-selling-points">产品卖点 / 核心优势</label>
+                <Textarea id="edit-link-selling-points" value={manualSellingPoints} onChange={(event) => setManualSellingPoints(event.target.value)} rows={6} placeholder="每行一条卖点；人工填写内容优先用于 AI 生成" />
               </div>
+              <details className="rounded-md border p-3">
+                <summary className="cursor-pointer text-sm font-medium">高级信息</summary>
+                <div className="mt-3 space-y-2">
+                  <label className="text-sm font-medium" htmlFor="edit-link-summary">原摘要</label>
+                  <Textarea id="edit-link-summary" value={summary} onChange={(event) => setSummary(event.target.value)} rows={4} />
+                </div>
+              </details>
               <label className="flex items-center gap-2 text-sm">
                 <input
                   type="checkbox"
@@ -653,7 +678,10 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [knowledgeText, setKnowledgeText] = useState("{}");
   const [summary, setSummary] = useState("");
+  const [manualSellingPoints, setManualSellingPoints] = useState("");
   const [tags, setTags] = useState("");
+  const [templates, setTemplates] = useState<MessageTemplate[]>([]);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<number | null>(null);
   const [tone, setTone] = useState("friendly");
   const [collaborationType, setCollaborationType] = useState("gifted_collab");
   const [extraInstruction, setExtraInstruction] = useState("");
@@ -666,15 +694,23 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
     setLoading(true);
     setError(null);
     try {
-      const [baseData, influencerData] = await Promise.all([
+      const [baseData, influencerData, templateResult] = await Promise.all([
         fetchLinkKnowledgeBase(baseId),
         fetchInfluencers(1, 50),
+        fetchMessageTemplates({ pageSize: 100 }).catch(() => null),
       ]);
+      const templateItems = templateResult?.items ?? [];
       setBase(baseData);
       setKnowledgeText(stringifyJson(baseData.extracted_knowledge));
       setSummary(baseData.summary ?? "");
+      setManualSellingPoints((baseData.manual_selling_points ?? []).join("\n"));
       setTags(tagsText(baseData.tags));
       setInfluencers(influencerData.items);
+      setTemplates(templateItems);
+      setSelectedTemplateId((current) => {
+        if (current && templateItems.some((item) => item.id === current)) return current;
+        return templateItems.find((item) => item.is_default)?.id ?? templateItems[0]?.id ?? null;
+      });
       const jobData = await fetchLinkScriptJobs({ linkKnowledgeBaseId: baseId, pageSize: 20 });
       setJobs(jobData.items);
     } catch (err) {
@@ -698,12 +734,14 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
       const updated = await updateLinkKnowledgeBase(baseId, {
         name: base?.name ?? null,
         summary,
+        manual_selling_points: parseSellingPoints(manualSellingPoints),
         tags: parseTags(tags),
         extracted_knowledge: extracted,
       });
       setBase(updated);
       setKnowledgeText(stringifyJson(updated.extracted_knowledge));
       setSummary(updated.summary ?? "");
+      setManualSellingPoints((updated.manual_selling_points ?? []).join("\n"));
       setTags(tagsText(updated.tags));
     } catch (err) {
       setError(translateErrorMessage(err instanceof Error ? err.message : "保存失败"));
@@ -720,6 +758,7 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
       setBase(refreshed);
       setKnowledgeText(stringifyJson(refreshed.extracted_knowledge));
       setSummary(refreshed.summary ?? "");
+      setManualSellingPoints((refreshed.manual_selling_points ?? []).join("\n"));
       setTags(tagsText(refreshed.tags));
     } catch (err) {
       setError(translateErrorMessage(err instanceof Error ? err.message : "重新解析失败"));
@@ -733,6 +772,10 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
       setError("请至少选择一个红人");
       return;
     }
+    if (!selectedTemplateId) {
+      setError("请先选择 AI 话术模板");
+      return;
+    }
     setGenerating(true);
     setError(null);
     try {
@@ -744,6 +787,7 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
         return;
       }
       const hasManualKnowledge =
+        parseSellingPoints(manualSellingPoints).length > 0 ||
         Boolean(summary.trim()) ||
         Object.keys(extracted).some((key) => {
           const value = extracted[key];
@@ -755,19 +799,21 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
         });
       if ((base?.status === "failed" || base?.status === "pending") && !hasManualKnowledge) {
         setError(
-          "当前链接尚未解析出品牌知识（常见于 Amazon 限流）。请先手动填写摘要或结构化知识并点保存，或换链接后重新解析，再生成话术。",
+          "当前链接尚未解析出品牌知识。请先填写产品卖点，或修正高级信息中的摘要/结构化知识，再生成话术。",
         );
         return;
       }
       const updated = await updateLinkKnowledgeBase(baseId, {
         name: base?.name ?? null,
         summary: summary || null,
+        manual_selling_points: parseSellingPoints(manualSellingPoints),
         tags: parseTags(tags),
         extracted_knowledge: extracted,
       });
       setBase(updated);
       setKnowledgeText(stringifyJson(updated.extracted_knowledge));
       setSummary(updated.summary ?? "");
+      setManualSellingPoints((updated.manual_selling_points ?? []).join("\n"));
       setTags(tagsText(updated.tags));
 
       const job = await generateLinkScripts(baseId, {
@@ -777,6 +823,7 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
         language: "en",
         script_types: SCRIPT_TYPES,
         extra_instruction: extraInstruction || null,
+        message_template_id: selectedTemplateId,
       });
       router.push(`/link-script-jobs/${job.id}`);
     } catch (err) {
@@ -787,6 +834,10 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
   }
 
   const knowledge = base?.extracted_knowledge ?? {};
+  const extractedSellingPoints = Array.isArray(knowledge.selling_points)
+    ? knowledge.selling_points.map((item) => String(item).trim()).filter(Boolean)
+    : [];
+  const selectedTemplate = templates.find((item) => item.id === selectedTemplateId) ?? null;
 
   return (
     <AdminShell title="链接库详情" description="查看、编辑链接知识，并选择红人生成外联话术">
@@ -833,21 +884,37 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">摘要</label>
-                  <Textarea value={summary} onChange={(event) => setSummary(event.target.value)} rows={4} />
+                  <label className="text-sm font-medium">产品卖点 / 核心优势</label>
+                  <Textarea value={manualSellingPoints} onChange={(event) => setManualSellingPoints(event.target.value)} rows={7} placeholder="每行一条。人工卖点优先，AI 只会从你填写和链接提取的卖点中选择。" />
+                  <p className="text-xs text-muted-foreground">人工填写卖点优先于链接自动提取内容，重新解析不会覆盖。</p>
+                </div>
+                <div className="space-y-2 rounded-md border bg-muted/20 p-3">
+                  <div className="text-sm font-medium">自动提取卖点</div>
+                  {extractedSellingPoints.length ? (
+                    <div className="flex flex-wrap gap-2">
+                      {extractedSellingPoints.map((item) => <Badge key={item} variant="outline">{item}</Badge>)}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">链接暂未提取到卖点，可先人工填写。</p>
+                  )}
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium">标签</label>
                   <Input value={tags} onChange={(event) => setTags(event.target.value)} />
                 </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">结构化知识 JSON</label>
-                  <Textarea
-                    value={knowledgeText}
-                    onChange={(event) => setKnowledgeText(event.target.value)}
-                    className="min-h-[360px] font-mono text-xs"
-                  />
-                </div>
+                <details className="rounded-md border p-3">
+                  <summary className="cursor-pointer text-sm font-medium">高级信息</summary>
+                  <div className="mt-3 space-y-3">
+                    <label className="block space-y-2 text-sm">
+                      <span className="font-medium">原摘要</span>
+                      <Textarea value={summary} onChange={(event) => setSummary(event.target.value)} rows={4} />
+                    </label>
+                    <label className="block space-y-2 text-sm">
+                      <span className="font-medium">结构化知识 JSON</span>
+                      <Textarea value={knowledgeText} onChange={(event) => setKnowledgeText(event.target.value)} className="min-h-[300px] font-mono text-xs" />
+                    </label>
+                  </div>
+                </details>
                 <div className="flex flex-wrap gap-2">
                   <Button disabled={saving} onClick={() => void handleSave()}>
                     {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
@@ -908,6 +975,14 @@ export function LinkKnowledgeBaseDetailPanel({ baseId }: { baseId: number }) {
                         {["gifted_collab", "paid_collab", "affiliate", "ambassador", "ugc", "review"].map((item) => <option key={item}>{item}</option>)}
                       </select>
                     </div>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-medium">AI 话术模板</label>
+                    <select className="h-9 w-full rounded-md border bg-background px-3 text-sm" value={selectedTemplateId ?? ""} onChange={(event) => setSelectedTemplateId(Number(event.target.value) || null)}>
+                      {templates.length === 0 ? <option value="">暂无模板，请先到话术库创建</option> : null}
+                      {templates.map((template) => <option key={template.id} value={template.id}>{template.is_default ? "[默认] " : ""}{template.title}</option>)}
+                    </select>
+                    {selectedTemplate ? <p className="text-xs text-muted-foreground line-clamp-2">{selectedTemplate.content}</p> : null}
                   </div>
                   <Textarea value={extraInstruction} onChange={(event) => setExtraInstruction(event.target.value)} placeholder="额外要求，可选" />
                   <Button className="w-full" disabled={generating} onClick={() => void handleGenerate()}>

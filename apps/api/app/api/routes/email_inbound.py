@@ -76,6 +76,7 @@ async def poll_imap_inbox(
             db,
             mark_seen=mark_seen,
             product_id_hint=product_id,
+            user_id=ctx.user_id,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -154,6 +155,19 @@ async def update_email_reply(
             manual_note=payload.manual_note,
             mark_viewed=payload.mark_viewed,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/replies/{reply_id}/rematch", response_model=EmailReplyRead)
+async def rematch_email_reply(
+    reply_id: int,
+    db: AsyncSession = Depends(get_db),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> EmailReplyRead:
+    product_id = _require_product_scope(ctx)
+    try:
+        return await EmailReplyService.rematch_reply(db, product_id=product_id, reply_id=reply_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

@@ -360,16 +360,18 @@ def test_running_stale_uses_backend_threshold(monkeypatch):
 
 
 def test_collection_stability_defaults_are_conservative():
-    assert settings.collection_max_running_tasks == 2
-    assert settings.apify_youtube_timeout_seconds == 90
-    assert settings.youtube_discovery_keyword_timeout_seconds == 90
-    assert settings.youtube_apify_keyword_concurrency == 2
-    assert settings.apify_tiktok_timeout_seconds == 90
-    assert settings.tiktok_apify_keyword_concurrency == 2
-    assert settings.apify_facebook_timeout_seconds == 90
-    assert settings.facebook_discovery_keyword_timeout_seconds == 90
-    assert settings.facebook_apify_keyword_concurrency == 1
-    assert settings.facebook_apify_profile_concurrency == 1
+    assert settings.collection_max_running_tasks == 10
+    assert settings.collection_max_concurrency_per_user == 3
+    assert settings.collection_max_concurrency_per_platform == 3
+    assert settings.apify_youtube_timeout_seconds >= 90
+    assert settings.youtube_discovery_keyword_timeout_seconds >= 90
+    assert settings.youtube_apify_keyword_concurrency >= 1
+    assert settings.apify_tiktok_timeout_seconds >= 90
+    assert settings.tiktok_apify_keyword_concurrency >= 1
+    assert settings.apify_facebook_timeout_seconds >= 90
+    assert settings.facebook_discovery_keyword_timeout_seconds >= 90
+    assert settings.facebook_apify_keyword_concurrency >= 1
+    assert settings.facebook_apify_profile_concurrency >= 1
     assert settings.collection_profile_enrich_concurrency == 3
     assert settings.collection_contact_concurrency == 2
     assert settings.collection_ai_concurrency == 1
@@ -613,6 +615,7 @@ def test_run_rejects_when_in_process_collection_active(monkeypatch):
 
 
 def test_run_rejects_when_other_task_running(monkeypatch):
+    monkeypatch.setattr(settings, "collection_max_concurrency_per_user", 1)
     task = _task(id=2, status=CollectionTaskStatus.DRAFT.value)
     blocking = _task(id=1, name="TikTok 类目采集", status=CollectionTaskStatus.RUNNING.value)
     db = AsyncMock()
@@ -635,11 +638,13 @@ def test_run_rejects_when_other_task_running(monkeypatch):
 
     anyio.run(_run)
     assert task.status == CollectionTaskStatus.QUEUED.value
-    assert task.run_checkpoint["queue_reasons"] == ["user_already_running"]
+    assert task.run_checkpoint["queue_reasons"] == ["user_concurrency_full"]
 
 
 def test_queue_allows_first_ten_and_queues_eleventh(monkeypatch):
     monkeypatch.setattr(settings, "collection_max_running_tasks", 10)
+    monkeypatch.setattr(settings, "collection_max_concurrency_per_user", 10)
+    monkeypatch.setattr(settings, "collection_max_concurrency_per_platform", 10)
     tasks: list[SimpleNamespace] = []
     monkeypatch.setattr(
         CollectionRunnerService,
@@ -673,6 +678,7 @@ def test_queue_allows_first_ten_and_queues_eleventh(monkeypatch):
 
 def test_queue_same_salesperson_repeated_start(monkeypatch):
     monkeypatch.setattr(settings, "collection_max_running_tasks", 10)
+    monkeypatch.setattr(settings, "collection_max_concurrency_per_user", 1)
     running = [_task(id=1, user_id=7, status=CollectionTaskStatus.RUNNING.value)]
     new_task = _task(id=2, user_id=7, status=CollectionTaskStatus.DRAFT.value)
     monkeypatch.setattr(
@@ -691,7 +697,38 @@ def test_queue_same_salesperson_repeated_start(monkeypatch):
     anyio.run(_run)
 
     assert new_task.status == CollectionTaskStatus.QUEUED.value
-    assert new_task.run_checkpoint["queue_reasons"] == ["user_already_running"]
+    assert new_task.run_checkpoint["queue_reasons"] == ["user_concurrency_full"]
+
+
+def test_queue_same_user_allows_three_then_queues_fourth(monkeypatch):
+    monkeypatch.setattr(settings, "collection_max_running_tasks", 10)
+    monkeypatch.setattr(settings, "collection_max_concurrency_per_user", 3)
+    monkeypatch.setattr(settings, "collection_max_concurrency_per_platform", 10)
+    tasks: list[SimpleNamespace] = []
+    monkeypatch.setattr(
+        CollectionRunnerService,
+        "reconcile_in_process_runs",
+        AsyncMock(return_value=0),
+    )
+
+    async def _run():
+        db = AsyncMock()
+        result = MagicMock()
+        result.scalars.side_effect = lambda: iter(
+            [task for task in tasks if task.status == CollectionTaskStatus.RUNNING.value]
+        )
+        db.execute = AsyncMock(return_value=result)
+        statuses = []
+        for task_id in range(1, 6):
+            task = _task(id=task_id, user_id=42, status=CollectionTaskStatus.DRAFT.value)
+            statuses.append(await CollectionQueueService.queue_or_start(db, task, resume=False))
+            tasks.append(task)
+        return statuses
+
+    statuses = anyio.run(_run)
+    assert statuses[:3] == [CollectionTaskStatus.RUNNING] * 3
+    assert statuses[3:] == [CollectionTaskStatus.QUEUED, CollectionTaskStatus.QUEUED]
+    assert tasks[3].run_checkpoint["queue_reasons"] == ["user_concurrency_full"]
 
 
 def test_dispatch_releases_slot_and_starts_next(monkeypatch):

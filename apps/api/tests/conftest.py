@@ -25,3 +25,17 @@ from app.db.session import engine
 def reset_async_engine():
     yield
     asyncio.run(engine.dispose())
+
+
+@pytest.fixture(autouse=True)
+def _disable_embedded_collection_workers(monkeypatch):
+    """Tests drive the queue via dispatch/starters; keep worker pool off."""
+    from app.core.config import settings
+    from app.services import collection_runner as collection_runner_module
+
+    monkeypatch.setattr(settings, "collection_worker_count", 0)
+    collection_runner_module._active_collection_task_ids.clear()
+    collection_runner_module._active_collection_async_tasks.clear()
+    yield
+    collection_runner_module._active_collection_task_ids.clear()
+    collection_runner_module._active_collection_async_tasks.clear()

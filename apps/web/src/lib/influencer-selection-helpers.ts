@@ -1,8 +1,30 @@
-import type { InfluencerListFilters, OutreachCampaignCreatePayload } from "./api.ts";
+import type { Influencer, InfluencerListFilters, OutreachCampaignCreatePayload } from "./api.ts";
 
 export const INFLUENCER_ONE_CLICK_EMAIL_BUTTON_LABEL = "AI一键发邮件";
 
 export type InfluencerSelectionMode = "none" | "page" | "filter_all";
+
+type InfluencerEmailFields = Pick<Influencer, "id" | "final_email" | "business_email" | "public_email" | "email">;
+
+export function resolveInfluencerSelectableEmail(item: InfluencerEmailFields): string | null {
+  return item.final_email || item.business_email || item.public_email || item.email || null;
+}
+
+export function filterEmailableInfluencerIds(
+  selectedIds: number[],
+  items: InfluencerEmailFields[],
+): number[] {
+  const selected = new Set(selectedIds);
+  return items
+    .filter((item) => selected.has(item.id) && Boolean(resolveInfluencerSelectableEmail(item)))
+    .map((item) => item.id);
+}
+
+export function withRequiredOutreachEmailFilter(
+  filters: Omit<InfluencerListFilters, "page" | "pageSize">,
+): Omit<InfluencerListFilters, "page" | "pageSize"> {
+  return { ...filters, hasEmail: true };
+}
 
 export function resolveBulkOutreachSelection(input: {
   mode: InfluencerSelectionMode;
@@ -19,7 +41,7 @@ export function resolveBulkOutreachSelection(input: {
     return {
       count: input.total,
       selectAll: true,
-      filters: input.filters,
+      filters: withRequiredOutreachEmailFilter(input.filters),
     };
   }
   return {
@@ -174,7 +196,7 @@ export function buildOneClickCampaignPayload(options: {
   };
   if (options.selectAll && options.filters) {
     payload.select_all_by_filters = true;
-    payload.influencer_filters = encodeFiltersForCampaign(options.filters);
+    payload.influencer_filters = encodeFiltersForCampaign(withRequiredOutreachEmailFilter(options.filters));
   } else if (options.ids?.length) {
     payload.influencer_ids = options.ids;
   }

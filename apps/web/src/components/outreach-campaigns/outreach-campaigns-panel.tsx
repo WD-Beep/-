@@ -12,6 +12,7 @@ import {
   Send,
   Settings,
   Sparkles,
+  Trash2,
   Users,
 } from "lucide-react";
 
@@ -25,20 +26,31 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   createOutreachCampaign,
+  createMessageTemplate,
+  deleteMessageTemplate,
   fetchOutreachWorkbench,
   fetchMessageTemplates,
+  approveOutreachCampaignDraft,
+  openOutreachCampaignDraft,
   previewOutreachCampaign,
   queueOutreachCampaign,
+  regenerateOutreachCampaignDraft,
   scheduleOutreachSendQueue,
   sendOutreachCampaignNow,
   sendManualOutreachEmail,
+  skipOutreachCampaignDraft,
+  updateOutreachCampaignDraft,
+  updateMessageTemplate,
   type MessageTemplate,
+  type MessageTemplatePayload,
   type ManualOutreachSendMode,
   type OutreachCampaignCreatePayload,
+  type OutreachCampaignPreviewItem,
   type OutreachCampaignPreviewResponse,
   type OutreachOneClickWorkbench,
 } from "@/lib/api";
 import { decodeFiltersFromSearchParams } from "@/lib/influencer-selection-helpers";
+import { notifyInfluencerEmailSent } from "@/lib/influencer-email-sync";
 import { translateErrorMessage } from "@/lib/labels";
 import { setStoredProductId } from "@/lib/product-context";
 import {
@@ -77,8 +89,33 @@ type SourceMode = "filters" | "selected";
 type SendMode = "now" | "scheduled";
 type CopyMode = OneClickContentSource;
 type ActionKind = "preview" | "send" | "queue" | "save";
+type DraftFilter = "all" | "needs_review" | "edited" | "failed" | "sent";
+type TemplateDraft = {
+  title: string;
+  content: string;
+  note: string;
+  language: string;
+  tone: string;
+  minLength: string;
+  maxLength: string;
+  bodyStructure: string;
+  requiredContent: string;
+  forbiddenContent: string;
+  cta: string;
+  isDefault: boolean;
+};
 
 const TIMEZONE = "Asia/Shanghai";
+const DRAFT_PAGE_SIZE = 10;
+const TEMPLATE_RECOMMENDED_MIN_LENGTH = 800;
+const TEMPLATE_NOTE_MAX_LENGTH = 500;
+const DRAFT_FILTER_LABELS: Record<DraftFilter, string> = {
+  all: "全部",
+  needs_review: "待审核",
+  edited: "已修改",
+  failed: "失败",
+  sent: "已发送",
+};
 function todayInputValue(): string {
   const now = new Date();
   const year = now.getFullYear();
@@ -110,6 +147,113 @@ function primaryIcon(action: OneClickPrimaryActionKind | "save") {
   if (action === "queue") return CalendarClock;
   if (action === "retry") return AlertTriangle;
   return RefreshCw;
+}
+
+function formatDraftPreviewText(value: string): string {
+  return value
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/([,;:])(?=\S)/g, "$1 ")
+    .replace(/([.!?])(?=[A-Z][a-z])/g, "$1 ")
+    .replace(/\s*(👉\s*Product Link:\s*)/gi, "\n\n$1")
+    .replace(/\s*(Product Link:\s*)/gi, "\n\n$1")
+    .replace(/([^\s])\s*(Looking forward\b)/gi, "$1\n\n$2")
+    .trim();
+}
+
+function countTemplateCharacters(value: string): number {
+  return Array.from(value).length;
+}
+
+function emptyTemplateDraft(): TemplateDraft {
+  return {
+    title: "",
+    content: "",
+    note: "",
+    language: "",
+    tone: "natural",
+    minLength: "180",
+    maxLength: "300",
+    bodyStructure: "greeting → creator fit → product value → collaboration idea → soft CTA → signature",
+    requiredContent: "",
+    forbiddenContent: "",
+    cta: "Would you be open to reviewing the details?",
+    isDefault: false,
+  };
+}
+
+function templateToDraft(template: MessageTemplate): TemplateDraft {
+  return {
+    title: template.title,
+    content: template.content,
+    note: template.note ?? "",
+    language: template.generation_rules.language ?? template.language ?? "",
+    tone: template.generation_rules.tone ?? "natural",
+    minLength: String(template.generation_rules.min_length ?? 180),
+    maxLength: String(template.generation_rules.max_length ?? 300),
+    bodyStructure: template.generation_rules.body_structure ?? "",
+    requiredContent: (template.generation_rules.required_content ?? []).join("\n"),
+    forbiddenContent: (template.generation_rules.forbidden_content ?? []).join("\n"),
+    cta: template.generation_rules.cta ?? "",
+    isDefault: template.is_default,
+  };
+}
+
+function splitTemplateRuleLines(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function buildTemplatePayload(draft: TemplateDraft): MessageTemplatePayload {
+  return {
+    title: draft.title.trim(),
+    scenario: "first_contact",
+    platform: null,
+    language: draft.language || null,
+    tags: ["ai", "outreach"],
+    content: draft.content.trim(),
+    note: draft.note.trim() || null,
+    generation_rules: {
+      tone: draft.tone || null,
+      language: draft.language || null,
+      min_length: Number(draft.minLength) || null,
+      max_length: Number(draft.maxLength) || null,
+      body_structure: draft.bodyStructure.trim() || null,
+      required_content: splitTemplateRuleLines(draft.requiredContent),
+      forbidden_content: splitTemplateRuleLines(draft.forbiddenContent),
+      cta: draft.cta.trim() || null,
+    },
+    is_default: draft.isDefault,
+    source_filename: null,
+  };
+}
+
+function validateTemplateDraft(draft: TemplateDraft): string | null {
+  if (!draft.title.trim()) return "请填写模板名称";
+  if (!draft.content.trim()) return "请粘贴话术模板正文";
+  if (countTemplateCharacters(draft.note) > TEMPLATE_NOTE_MAX_LENGTH) {
+    return `模板备注不能超过 ${TEMPLATE_NOTE_MAX_LENGTH} 字`;
+  }
+  if (Number(draft.minLength) > Number(draft.maxLength)) return "最短长度不能大于最长长度";
+  return null;
+}
+
+function DraftBodyPreview({ value, compact = false }: { value: string; compact?: boolean }) {
+  const formatted = formatDraftPreviewText(value);
+  if (compact) {
+    return <p className="campaign-email-body campaign-email-body-compact mt-2 text-sm leading-6 text-slate-600">{formatted}</p>;
+  }
+  const paragraphs = formatted.split(/\n{2,}/).filter(Boolean);
+  return (
+    <div className="campaign-email-body space-y-3 text-sm leading-6 text-slate-700">
+      {paragraphs.length > 0 ? paragraphs.map((paragraph, index) => (
+        <p key={`${index}-${paragraph.slice(0, 12)}`}>{paragraph}</p>
+      )) : <p>{formatted}</p>}
+    </div>
+  );
 }
 
 function isCrossProductSelectionError(message: string): boolean {
@@ -181,6 +325,12 @@ export function OutreachCampaignsPanel() {
   const [templates, setTemplates] = useState<MessageTemplate[]>([]);
   const [preview, setPreview] = useState<OutreachCampaignPreviewResponse | null>(null);
   const [previewCampaignId, setPreviewCampaignId] = useState<number | null>(null);
+  const [draftFilter, setDraftFilter] = useState<DraftFilter>("all");
+  const [draftPage, setDraftPage] = useState(1);
+  const [expandedDraftIds, setExpandedDraftIds] = useState<Set<number>>(() => new Set());
+  const [editingDraftId, setEditingDraftId] = useState<number | null>(null);
+  const [draftEdits, setDraftEdits] = useState<Record<number, { subject: string; body: string }>>({});
+  const [draftActionId, setDraftActionId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<ActionKind | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -194,6 +344,8 @@ export function OutreachCampaignsPanel() {
   const [manualSubject, setManualSubject] = useState("");
   const [manualBody, setManualBody] = useState("");
   const [selectedTemplateId, setSelectedTemplateId] = useState<number | null>(null);
+  const [templateDraft, setTemplateDraft] = useState<TemplateDraft>(() => emptyTemplateDraft());
+  const [templateBusy, setTemplateBusy] = useState(false);
   const [sendLimit, setSendLimit] = useState("");
   const [intervalMinutes, setIntervalMinutes] = useState("6");
   const [hourlyLimit, setHourlyLimit] = useState("10");
@@ -260,6 +412,12 @@ export function OutreachCampaignsPanel() {
         })
       : null;
   const hasPreview = Boolean(preview);
+  const templateContentLength = countTemplateCharacters(templateDraft.content);
+  const templateNoteLength = countTemplateCharacters(templateDraft.note);
+  const templateLengthHint =
+    templateContentLength > 0 && templateContentLength < TEMPLATE_RECOMMENDED_MIN_LENGTH
+      ? `建议不少于 800 字，当前 ${templateContentLength} 字。系统不限制保存，但较短模板可能导致 AI 生成内容偏短。`
+      : `当前 ${templateContentLength} 字，建议不少于 800 字。`;
   const latestCampaignHasSendResult = Boolean(
     workbench?.latest_campaign &&
       ((workbench.latest_campaign.sent_count ?? 0) > 0 || (workbench.latest_campaign.failed_count ?? 0) > 0),
@@ -315,35 +473,154 @@ export function OutreachCampaignsPanel() {
     });
   }, [load]);
 
-  useEffect(() => {
+  const loadTemplates = useCallback(async (preferredId?: number | null) => {
     if (requiresProduct) {
-      queueMicrotask(() => {
-        setTemplates([]);
-        setSelectedTemplateId(null);
-      });
+      setTemplates([]);
+      setSelectedTemplateId(null);
+      setTemplateDraft(emptyTemplateDraft());
       return;
     }
+    const data = await fetchMessageTemplates({ pageSize: 100 });
+    setTemplates(data.items);
+    const nextId =
+      preferredId && data.items.some((item) => item.id === preferredId)
+        ? preferredId
+        : data.items.find((item) => item.is_default)?.id ?? data.items[0]?.id ?? null;
+    const nextTemplate = data.items.find((item) => item.id === nextId) ?? null;
+    setSelectedTemplateId(nextTemplate?.id ?? null);
+    setTemplateDraft(nextTemplate ? templateToDraft(nextTemplate) : emptyTemplateDraft());
+  }, [requiresProduct]);
+
+  useEffect(() => {
     let cancelled = false;
-    fetchMessageTemplates({ pageSize: 50 })
-      .then((data) => {
-        if (cancelled) return;
-        setTemplates(data.items);
-        setSelectedTemplateId((current) => current ?? data.items[0]?.id ?? null);
-      })
-      .catch(() => {
+    queueMicrotask(() => {
+      if (cancelled) return;
+      void loadTemplates().catch(() => {
         if (!cancelled) setTemplates([]);
       });
+    });
     return () => {
       cancelled = true;
     };
-  }, [requiresProduct, productId]);
+  }, [loadTemplates]);
 
-  function clearPreview() {
+  function handleSelectTemplate(value: string) {
+    const nextId = Number(value) || null;
+    const nextTemplate = templates.find((template) => template.id === nextId) ?? null;
+    setSelectedTemplateId(nextTemplate?.id ?? null);
+    setTemplateDraft(nextTemplate ? templateToDraft(nextTemplate) : emptyTemplateDraft());
+    clearPreview();
+  }
+
+  function handleNewTemplateDraft() {
+    setSelectedTemplateId(null);
+    setTemplateDraft(emptyTemplateDraft());
+    clearPreview();
+  }
+
+  async function handleSaveTemplateAsNew() {
+    const validationError = validateTemplateDraft(templateDraft);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    setTemplateBusy(true);
+    setError(null);
+    try {
+      const saved = await createMessageTemplate(buildTemplatePayload(templateDraft));
+      await loadTemplates(saved.id);
+      setMessage("AI 话术模板已保存为新模板。");
+      clearPreview();
+    } catch (err) {
+      setError(translateErrorMessage(err instanceof Error ? err.message : "保存模板失败"));
+    } finally {
+      setTemplateBusy(false);
+    }
+  }
+
+  async function handleUpdateCurrentTemplate() {
+    if (!selectedTemplate) return;
+    const validationError = validateTemplateDraft(templateDraft);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    setTemplateBusy(true);
+    setError(null);
+    try {
+      const saved = await updateMessageTemplate(selectedTemplate.id, buildTemplatePayload(templateDraft));
+      await loadTemplates(saved.id);
+      setMessage("AI 话术模板已更新。");
+      clearPreview();
+    } catch (err) {
+      setError(translateErrorMessage(err instanceof Error ? err.message : "更新模板失败"));
+    } finally {
+      setTemplateBusy(false);
+    }
+  }
+
+  function handleClearTemplateNote() {
+    setTemplateDraft((current) => ({ ...current, note: "" }));
+  }
+
+  async function handleSetDefaultTemplate() {
+    if (!selectedTemplate) return;
+    setTemplateBusy(true);
+    try {
+      const saved = await updateMessageTemplate(selectedTemplate.id, { is_default: true });
+      await loadTemplates(saved.id);
+      setMessage("已设为当前品牌默认 AI 模板。" );
+    } finally {
+      setTemplateBusy(false);
+    }
+  }
+
+  async function handleDeleteTemplate() {
+    if (!selectedTemplate || selectedTemplate.is_system_default) return;
+    if (!window.confirm(`确认删除模板「${selectedTemplate.title}」？`)) return;
+    setTemplateBusy(true);
+    try {
+      await deleteMessageTemplate(selectedTemplate.id);
+      setSelectedTemplateId(null);
+      await loadTemplates(null);
+      setMessage("AI 话术模板已删除。" );
+      clearPreview();
+    } finally {
+      setTemplateBusy(false);
+    }
+  }
+
+  const resetDraftReviewState = useCallback(() => {
+    setDraftFilter("all");
+    setDraftPage(1);
+    setExpandedDraftIds(new Set());
+    setEditingDraftId(null);
+    setDraftEdits({});
+    setDraftActionId(null);
+  }, []);
+
+  const replacePreviewItem = useCallback((item: OutreachCampaignPreviewItem) => {
+    setPreview((current) => {
+      if (!current) return current;
+      const items = current.items.map((row) =>
+        row.influencer_id === item.influencer_id ? item : row,
+      );
+      return {
+        ...current,
+        items,
+        can_queue_count: items.filter((row) => row.can_queue).length,
+        skip_count: items.filter((row) => !row.can_queue).length,
+      };
+    });
+  }, []);
+
+  const clearPreview = useCallback(() => {
     setPreview(null);
     setPreviewCampaignId(null);
     setQueueStatus("not_queued");
     setLastFailureReason(null);
-  }
+    resetDraftReviewState();
+  }, [resetDraftReviewState]);
 
   function chooseSource(next: SourceMode) {
     setSourceMode(next);
@@ -358,7 +635,7 @@ export function OutreachCampaignsPanel() {
         setMessage("已切换到当前品牌的可发送邮箱；上一个品牌选中的红人不会用于本次发送。");
       });
     }
-  }, [selectionMatchesCurrentProduct, sourceMode]);
+  }, [clearPreview, selectionMatchesCurrentProduct, sourceMode]);
 
   function buildSourcePayload() {
     return buildOutreachCampaignPayload({
@@ -385,7 +662,7 @@ export function OutreachCampaignsPanel() {
             }
           : undefined,
       dailyLimit: effectiveDailyLimit || effectiveSendLimit || 1,
-      messageTemplateId: copyMode === "template" ? selectedTemplateId : undefined,
+      messageTemplateId: copyMode === "template" || copyMode === "ai" ? selectedTemplateId : undefined,
       sendWindowStart: skipNight ? windowStart : "00:00",
       sendWindowEnd: skipNight ? windowEnd : "23:59",
       skipSent: true,
@@ -440,6 +717,9 @@ export function OutreachCampaignsPanel() {
     }
     if (copyMode === "template" && (action === "send" || action === "queue" || action === "preview" || action === "save")) {
       if (!selectedTemplateId) return "请先选择话术库模板";
+    }
+    if (copyMode === "ai" && (action === "send" || action === "queue" || action === "preview" || action === "save")) {
+      if (!selectedTemplateId) return "请先选择或创建 AI 话术模板";
     }
     if (copyMode === "ai" && (action === "send" || action === "queue") && !hasPreview) {
       return "请先生成话术并检查，确认预览后再发送";
@@ -639,6 +919,7 @@ export function OutreachCampaignsPanel() {
             setError(resultMessage);
             setLastFailureReason(resultMessage);
           } else {
+            if (processed.sent > 0) notifyInfluencerEmailSent();
             setMessage(resultMessage);
             if (processed.failed > 0) setLastFailureReason(resultMessage);
           }
@@ -730,7 +1011,172 @@ export function OutreachCampaignsPanel() {
     }
   }
 
-  const previewItems = preview?.items.slice(0, 5) ?? [];
+  const draftFilterCounts = useMemo(() => {
+    const items = preview?.items ?? [];
+    return {
+      all: items.length,
+      needs_review: items.filter((item) => item.draft_status === "pending_review").length,
+      edited: items.filter((item) => item.draft_status === "modified").length,
+      failed: items.filter((item) => !item.can_queue || item.draft_status === "failed" || item.draft_status === "skipped").length,
+      sent: items.filter((item) => item.draft_status === "sent").length,
+    };
+  }, [preview]);
+
+  const filteredPreviewItems = useMemo(() => {
+    const items = preview?.items ?? [];
+    if (draftFilter === "needs_review") return items.filter((item) => item.draft_status === "pending_review");
+    if (draftFilter === "edited") return items.filter((item) => item.draft_status === "modified");
+    if (draftFilter === "failed") {
+      return items.filter((item) => !item.can_queue || item.draft_status === "failed" || item.draft_status === "skipped");
+    }
+    if (draftFilter === "sent") return items.filter((item) => item.draft_status === "sent");
+    return items;
+  }, [draftFilter, preview]);
+
+  const draftPageCount = Math.max(1, Math.ceil(filteredPreviewItems.length / DRAFT_PAGE_SIZE));
+  const safeDraftPage = Math.min(draftPage, draftPageCount);
+  const paginatedPreviewItems = useMemo(() => {
+    const offset = (safeDraftPage - 1) * DRAFT_PAGE_SIZE;
+    return filteredPreviewItems.slice(offset, offset + DRAFT_PAGE_SIZE);
+  }, [filteredPreviewItems, safeDraftPage]);
+  const draftPageStart = filteredPreviewItems.length === 0 ? 0 : (safeDraftPage - 1) * DRAFT_PAGE_SIZE + 1;
+  const draftPageEnd = Math.min(filteredPreviewItems.length, safeDraftPage * DRAFT_PAGE_SIZE);
+
+  function setDraftFilterAndResetPage(next: DraftFilter) {
+    setDraftFilter(next);
+    setDraftPage(1);
+  }
+
+  function toggleDraftExpanded(influencerId: number) {
+    setExpandedDraftIds((current) => {
+      const next = new Set(current);
+      if (next.has(influencerId)) {
+        next.delete(influencerId);
+      } else {
+        next.add(influencerId);
+      }
+      return next;
+    });
+  }
+
+  function updateDraftEditField(influencerId: number, field: "subject" | "body", value: string) {
+    setDraftEdits((current) => ({
+      ...current,
+      [influencerId]: {
+        subject: current[influencerId]?.subject ?? "",
+        body: current[influencerId]?.body ?? "",
+        [field]: value,
+      },
+    }));
+  }
+
+  function startDraftEdit(item: OutreachCampaignPreviewItem) {
+    setEditingDraftId(item.influencer_id);
+    setDraftEdits((current) => ({
+      ...current,
+      [item.influencer_id]: {
+        subject: item.subject ?? "",
+        body: item.body ?? "",
+      },
+    }));
+    setExpandedDraftIds((current) => new Set(current).add(item.influencer_id));
+  }
+
+  function cancelDraftEdit(influencerId: number) {
+    setEditingDraftId(null);
+    setDraftEdits((current) => {
+      const next = { ...current };
+      delete next[influencerId];
+      return next;
+    });
+  }
+
+  async function saveDraftEdit(item: OutreachCampaignPreviewItem) {
+    if (!previewCampaignId) return;
+    const edit = draftEdits[item.influencer_id];
+    if (!edit) return;
+    setDraftActionId(item.influencer_id);
+    setError(null);
+    try {
+      const updated = await updateOutreachCampaignDraft(previewCampaignId, item.influencer_id, {
+        subject: edit.subject,
+        body: edit.body,
+      });
+      replacePreviewItem(updated);
+      setEditingDraftId(null);
+      setDraftEdits((current) => {
+        const next = { ...current };
+        delete next[item.influencer_id];
+        return next;
+      });
+      setMessage("已保存当前收件人的邮件修改，发送时会使用修改后的内容。");
+    } catch (err) {
+      setError(translateErrorMessage(err instanceof Error ? err.message : "保存邮件草稿失败"));
+    } finally {
+      setDraftActionId(null);
+    }
+  }
+
+  async function regenerateDraft(item: OutreachCampaignPreviewItem) {
+    if (!previewCampaignId) return;
+    if (item.draft_status === "modified" && !window.confirm("重新生成会覆盖这封邮件的人工修改，确认继续？")) {
+      return;
+    }
+    setDraftActionId(item.influencer_id);
+    setError(null);
+    try {
+      const regenerated = await regenerateOutreachCampaignDraft(previewCampaignId, item.influencer_id);
+      replacePreviewItem(regenerated);
+      setEditingDraftId(null);
+      setDraftEdits((current) => {
+        const next = { ...current };
+        delete next[item.influencer_id];
+        return next;
+      });
+      setMessage("已重新生成当前收件人的 AI 邮件。");
+    } catch (err) {
+      setError(translateErrorMessage(err instanceof Error ? err.message : "重新生成 AI 邮件失败"));
+    } finally {
+      setDraftActionId(null);
+    }
+  }
+
+  async function approveDraft(item: OutreachCampaignPreviewItem) {
+    if (!previewCampaignId) return;
+    setDraftActionId(item.influencer_id);
+    setError(null);
+    try {
+      const opened = item.opened_at
+        ? item
+        : await openOutreachCampaignDraft(previewCampaignId, item.influencer_id);
+      const approved = await approveOutreachCampaignDraft(previewCampaignId, opened.influencer_id);
+      replacePreviewItem(approved);
+      setMessage("已标记当前邮件为已审核。");
+    } catch (err) {
+      setError(translateErrorMessage(err instanceof Error ? err.message : "审核邮件草稿失败"));
+    } finally {
+      setDraftActionId(null);
+    }
+  }
+
+  async function skipDraft(item: OutreachCampaignPreviewItem) {
+    if (!previewCampaignId) return;
+    if (!window.confirm("确认跳过这封邮件？跳过后本次发送不会发给该收件人。")) {
+      return;
+    }
+    setDraftActionId(item.influencer_id);
+    setError(null);
+    try {
+      const skipped = await skipOutreachCampaignDraft(previewCampaignId, item.influencer_id);
+      replacePreviewItem(skipped);
+      setMessage("已跳过当前收件人。");
+    } catch (err) {
+      setError(translateErrorMessage(err instanceof Error ? err.message : "跳过邮件草稿失败"));
+    } finally {
+      setDraftActionId(null);
+    }
+  }
+
   const isFullySkippedPreview = Boolean(
     preview &&
       preview.total > 0 &&
@@ -1087,6 +1533,171 @@ export function OutreachCampaignsPanel() {
                     </div>
                   </div>
                 ) : null}
+                {copyMode === "ai" ? (
+                  <div className="campaign-manual-copy space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">AI 话术模板</div>
+                        <p className="text-xs text-slate-500">直接粘贴话术模板，AI 会结合每位红人资料按模板结构生成不同邮件。</p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button type="button" size="sm" variant="outline" onClick={handleNewTemplateDraft} disabled={templateBusy}>
+                          新建模板
+                        </Button>
+                        <Button type="button" size="sm" variant="outline" onClick={() => void handleSetDefaultTemplate()} disabled={!selectedTemplate || selectedTemplate.is_default || templateBusy}>
+                          设为默认
+                        </Button>
+                        <Button type="button" size="sm" variant="outline" onClick={() => void handleDeleteTemplate()} disabled={!selectedTemplate || Boolean(selectedTemplate.is_system_default) || templateBusy}>
+                          <Trash2 className="h-3.5 w-3.5" />
+                          删除
+                        </Button>
+                      </div>
+                    </div>
+                    <label className="space-y-1">
+                      <span className="text-xs font-medium text-slate-600">模板下拉框</span>
+                      <select
+                        className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                        value={selectedTemplateId ?? ""}
+                        onChange={(event) => handleSelectTemplate(event.target.value)}
+                      >
+                        <option value="">新建模板（不覆盖旧模板）</option>
+                        {templates.map((template) => (
+                          <option key={template.id} value={template.id}>
+                            {template.is_default ? "[默认] " : ""}{template.title}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="space-y-1">
+                        <span className="text-xs font-medium text-slate-600">模板名称</span>
+                        <Input
+                          value={templateDraft.title}
+                          onChange={(event) => setTemplateDraft((current) => ({ ...current, title: event.target.value }))}
+                          placeholder="例如：Second Gentle Touch（副本）"
+                        />
+                      </label>
+                      <label className="space-y-1">
+                        <span className="text-xs font-medium text-slate-600">邮件语言</span>
+                        <Input
+                          value={templateDraft.language}
+                          onChange={(event) => setTemplateDraft((current) => ({ ...current, language: event.target.value }))}
+                          placeholder="例如 en / zh / auto"
+                        />
+                      </label>
+                      <label className="space-y-1">
+                        <span className="text-xs font-medium text-slate-600">语气</span>
+                        <select
+                          className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                          value={templateDraft.tone}
+                          onChange={(event) => setTemplateDraft((current) => ({ ...current, tone: event.target.value }))}
+                        >
+                          <option value="natural">自然</option>
+                          <option value="formal">正式</option>
+                          <option value="concise">简洁</option>
+                          <option value="business">商务</option>
+                          <option value="friendly">友好</option>
+                        </select>
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="space-y-1">
+                          <span className="text-xs font-medium text-slate-600">最短长度</span>
+                          <Input
+                            value={templateDraft.minLength}
+                            onChange={(event) => setTemplateDraft((current) => ({ ...current, minLength: event.target.value }))}
+                            inputMode="numeric"
+                          />
+                        </label>
+                        <label className="space-y-1">
+                          <span className="text-xs font-medium text-slate-600">最长长度</span>
+                          <Input
+                            value={templateDraft.maxLength}
+                            onChange={(event) => setTemplateDraft((current) => ({ ...current, maxLength: event.target.value }))}
+                            inputMode="numeric"
+                          />
+                        </label>
+                      </div>
+                    </div>
+                    <label className="space-y-1">
+                      <span className="text-xs font-medium text-slate-600">模板正文（复制粘贴，保留换行）</span>
+                      <Textarea
+                        value={templateDraft.content}
+                        onChange={(event) => setTemplateDraft((current) => ({ ...current, content: event.target.value }))}
+                        rows={10}
+                        placeholder="请粘贴完整话术模板。支持变量：{红人名称}、{平台}、{粉丝数}、{品牌名称}、{合作方向}、{产品名称}、{产品卖点}、{红人主页}、{业务员名称}"
+                      />
+                      <span className={`text-xs ${templateContentLength < TEMPLATE_RECOMMENDED_MIN_LENGTH ? "text-amber-600" : "text-slate-500"}`}>
+                        {templateLengthHint}
+                      </span>
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-xs font-medium text-slate-600">模板备注（内部说明，不直接发送给红人）</span>
+                      <Textarea
+                        value={templateDraft.note}
+                        onChange={(event) => setTemplateDraft((current) => ({ ...current, note: event.target.value }))}
+                        rows={3}
+                        placeholder="记录适用场景、版本、修改原因、审核注意事项；没有备注时可留空。"
+                      />
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                        <span>{templateDraft.note.trim() ? `${templateNoteLength} / ${TEMPLATE_NOTE_MAX_LENGTH}` : "暂无备注"}</span>
+                        <Button type="button" size="sm" variant="ghost" onClick={handleClearTemplateNote} disabled={!templateDraft.note || templateBusy}>
+                          清空备注
+                        </Button>
+                      </div>
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-xs font-medium text-slate-600">正文结构</span>
+                      <Input
+                        value={templateDraft.bodyStructure}
+                        onChange={(event) => setTemplateDraft((current) => ({ ...current, bodyStructure: event.target.value }))}
+                        placeholder="greeting → creator fit → product value → collaboration idea → soft CTA → signature"
+                      />
+                    </label>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="space-y-1">
+                        <span className="text-xs font-medium text-slate-600">必须包含内容（每行一条）</span>
+                        <Textarea
+                          value={templateDraft.requiredContent}
+                          onChange={(event) => setTemplateDraft((current) => ({ ...current, requiredContent: event.target.value }))}
+                          rows={3}
+                        />
+                      </label>
+                      <label className="space-y-1">
+                        <span className="text-xs font-medium text-slate-600">禁止出现内容（每行一条）</span>
+                        <Textarea
+                          value={templateDraft.forbiddenContent}
+                          onChange={(event) => setTemplateDraft((current) => ({ ...current, forbiddenContent: event.target.value }))}
+                          rows={3}
+                        />
+                      </label>
+                    </div>
+                    <label className="space-y-1">
+                      <span className="text-xs font-medium text-slate-600">CTA / 下一步行动</span>
+                      <Input
+                        value={templateDraft.cta}
+                        onChange={(event) => setTemplateDraft((current) => ({ ...current, cta: event.target.value }))}
+                        placeholder="Would you be open to reviewing the details?"
+                      />
+                    </label>
+                    <label className="inline-flex items-center gap-2 text-sm text-slate-600">
+                      <input
+                        type="checkbox"
+                        checked={templateDraft.isDefault}
+                        onChange={(event) => setTemplateDraft((current) => ({ ...current, isDefault: event.target.checked }))}
+                      />
+                      保存后设为默认模板
+                    </label>
+                    <div className="flex flex-wrap gap-2">
+                      <Button type="button" size="sm" onClick={() => void handleSaveTemplateAsNew()} disabled={templateBusy}>
+                        保存为新模板
+                      </Button>
+                      <Button type="button" size="sm" variant="outline" onClick={() => void handleUpdateCurrentTemplate()} disabled={!selectedTemplate || templateBusy}>
+                        更新当前模板
+                      </Button>
+                      {selectedTemplate?.source_filename ? <Badge variant="outline">旧模板来源：{selectedTemplate.source_filename}</Badge> : null}
+                    </div>
+                  </div>
+                ) : null}
                 {copyMode === "ai" && aiNotConfigured ? (
                   <div className="campaign-inline-warning flex gap-2 text-sm">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -1192,17 +1803,35 @@ export function OutreachCampaignsPanel() {
 
             <Card className="campaign-step-card">
               <CardHeader className="campaign-step-card-header">
-                <StepHeader step="4" title="确认并发送" desc="这里显示前 5 封邮件样例、跳过原因和最终发送结果。" />
+                <StepHeader step="4" title="确认并发送" desc="这里分页显示全部邮件，支持逐封审核、编辑、重生成和跳过。" />
               </CardHeader>
               <CardContent className="campaign-step-content">
-                {previewItems.length > 0 ? (
+                {preview && preview.items.length > 0 ? (
                   <div className="space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
                       <span className="text-slate-600">
                         可发送 {queueableDraftCount} 封。AI 生成后无需审批草稿，点击发送会马上发出并留下发送记录。
                       </span>
                     </div>
-                    {previewItems.map((item) => (
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-sm">
+                      <span className="text-blue-800">
+                        全部 {preview.items.length} 封，当前筛选 {filteredPreviewItems.length} 封；显示第 {draftPageStart}-{draftPageEnd} 封。
+                      </span>
+                      <span className="text-xs text-blue-700">切换筛选和分页不会重新生成 AI 话术。</span>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {(Object.keys(DRAFT_FILTER_LABELS) as DraftFilter[]).map((filter) => (
+                        <Button
+                          key={filter}
+                          type="button"
+                          variant={draftFilter === filter ? "default" : "outline"}
+                          onClick={() => setDraftFilterAndResetPage(filter)}
+                        >
+                          {DRAFT_FILTER_LABELS[filter]} {draftFilterCounts[filter]}
+                        </Button>
+                      ))}
+                    </div>
+                    {paginatedPreviewItems.map((item) => (
                       <div key={item.influencer_id} className="campaign-preview-item">
                         <div className="flex flex-wrap items-start justify-between gap-2">
                           <div>
@@ -1217,11 +1846,89 @@ export function OutreachCampaignsPanel() {
                             <Badge variant={item.draft_status === "approved" ? "success" : item.can_queue ? "secondary" : "warning"}>
                               {getOutreachDraftStatusLabel(item.draft_status)}
                             </Badge>
+                            <Badge variant={item.draft_status === "modified" ? "warning" : "secondary"}>
+                              {item.draft_status === "modified" ? "已人工修改" : "未人工修改"}
+                            </Badge>
+                            <Badge variant={item.can_queue ? "success" : "warning"}>
+                              {item.can_queue ? "AI 已生成" : "生成失败/不可发送"}
+                            </Badge>
+                            <Button type="button" variant="outline" onClick={() => toggleDraftExpanded(item.influencer_id)}>
+                              {expandedDraftIds.has(item.influencer_id) ? "收起" : "展开"}
+                            </Button>
                           </div>
                         </div>
-                        <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-sm leading-6 text-slate-600">
-                          {item.body || humanizeOutreachFailureReason(item.skip_reason || item.reason)}
-                        </p>
+                        <DraftBodyPreview value={item.body || humanizeOutreachFailureReason(item.skip_reason || item.reason)} compact />
+                        {expandedDraftIds.has(item.influencer_id) ? (
+                          <div className="mt-3 space-y-3 rounded-lg border border-slate-200 bg-white p-3">
+                            <div className="grid gap-2 text-xs text-slate-600 md:grid-cols-4">
+                              <span>当前状态：{getOutreachDraftStatusLabel(item.draft_status)}</span>
+                              <span>AI 状态：{item.can_queue ? "generated" : "failed"}</span>
+                              <span>人工修改：{item.draft_status === "modified" ? "是" : "否"}</span>
+                              <span>邮箱：{item.recipient || "无"}</span>
+                            </div>
+                            {editingDraftId === item.influencer_id ? (
+                              <div className="space-y-2">
+                                <Input
+                                  value={draftEdits[item.influencer_id]?.subject ?? item.subject ?? ""}
+                                  onChange={(event) => updateDraftEditField(item.influencer_id, "subject", event.target.value)}
+                                  placeholder="邮件标题"
+                                />
+                                <Textarea
+                                  rows={8}
+                                  value={draftEdits[item.influencer_id]?.body ?? item.body ?? ""}
+                                  onChange={(event) => updateDraftEditField(item.influencer_id, "body", event.target.value)}
+                                  placeholder="邮件正文"
+                                />
+                              </div>
+                            ) : (
+                              <DraftBodyPreview value={item.body || humanizeOutreachFailureReason(item.skip_reason || item.reason)} />
+                            )}
+                            <div className="flex flex-wrap gap-2">
+                              {editingDraftId === item.influencer_id ? (
+                                <>
+                                  <Button type="button" onClick={() => void saveDraftEdit(item)} disabled={draftActionId === item.influencer_id}>
+                                    {draftActionId === item.influencer_id ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                                    保存修改
+                                  </Button>
+                                  <Button type="button" variant="outline" onClick={() => cancelDraftEdit(item.influencer_id)}>
+                                    取消修改
+                                  </Button>
+                                </>
+                              ) : (
+                                <>
+                                  <Button type="button" variant="outline" onClick={() => startDraftEdit(item)}>
+                                    编辑
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    onClick={() => void regenerateDraft(item)}
+                                    disabled={draftActionId === item.influencer_id}
+                                  >
+                                    {draftActionId === item.influencer_id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                                    恢复/重新生成 AI 版本
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    onClick={() => void approveDraft(item)}
+                                    disabled={!item.can_queue || draftActionId === item.influencer_id}
+                                  >
+                                    标记已审核
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    onClick={() => void skipDraft(item)}
+                                    disabled={draftActionId === item.influencer_id}
+                                  >
+                                    跳过
+                                  </Button>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        ) : null}
                         {!item.can_queue ? (
                           <p className="mt-2 text-xs text-amber-700">
                             跳过原因：{humanizeOutreachFailureReason(item.skip_reason || item.reason)}
@@ -1229,11 +1936,22 @@ export function OutreachCampaignsPanel() {
                         ) : null}
                       </div>
                     ))}
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-slate-600">
+                      <span>第 {safeDraftPage} / {draftPageCount} 页，每页 {DRAFT_PAGE_SIZE} 封</span>
+                      <div className="flex gap-2">
+                        <Button type="button" variant="outline" disabled={safeDraftPage <= 1} onClick={() => setDraftPage((page) => Math.max(1, page - 1))}>
+                          上一页
+                        </Button>
+                        <Button type="button" variant="outline" disabled={safeDraftPage >= draftPageCount} onClick={() => setDraftPage((page) => page + 1)}>
+                          下一页
+                        </Button>
+                      </div>
+                    </div>
                   </div>
                 ) : (
                   <div className="campaign-empty-preview">
                     {copyMode === "ai"
-                      ? "点击生成话术并检查后，这里会显示前 5 封邮件样例。"
+                      ? "点击生成话术并检查后，这里会分页显示全部收件人的邮件。"
                       : "点击立即发送或定时发送前，系统会自动检查收件人并生成预览。"}
                   </div>
                 )}

@@ -204,3 +204,40 @@ test("reply panel marks a reply viewed before clearing the navigation badge", as
   assert.match(sidebarSource, /summary\.unviewed_count/);
   assert.match(apiSource, /viewed_at:\s*string \| null/);
 });
+
+test("reply panel keeps replies visible when optional influencer lookup fails", async () => {
+  const source = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/components/email-replies/email-replies-panel.tsx", import.meta.url), "utf8"),
+  );
+
+  assert.match(source, /const replyData = await fetchEmailReplies/);
+  assert.match(source, /fetchInfluencers\(1,\s*100,\s*\{\s*hasEmail:\s*true\s*\}\)\.catch/);
+  assert.match(source, /setReplies\(replyData\.items\)/);
+});
+
+test("reply panel exposes linked influencer detail and social profile actions", async () => {
+  const source = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/components/email-replies/email-replies-panel.tsx", import.meta.url), "utf8"),
+  );
+
+  assert.match(source, /查看红人信息/);
+  assert.match(source, /查看社媒链接/);
+  assert.match(source, /href=\{`\/influencers\/\$\{influencer\.id\}`\}/);
+  assert.match(source, /influencer\.profile_url/);
+});
+
+test("reply panel lets unmatched replies rematch before viewing influencer information", async () => {
+  const source = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/components/email-replies/email-replies-panel.tsx", import.meta.url), "utf8"),
+  );
+  const apiSource = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/lib/api.ts", import.meta.url), "utf8"),
+  );
+
+  assert.match(source, /rematchEmailReply/);
+  assert.match(source, /openInfluencerInfo/);
+  assert.match(source, /openSocialLink/);
+  assert.doesNotMatch(source, /disabled title="当前回复未关联红人"/);
+  assert.match(source, /暂未找到对应红人信息/);
+  assert.match(apiSource, /email-inbound\/replies\/\$\{replyId\}\/rematch/);
+});

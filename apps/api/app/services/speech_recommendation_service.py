@@ -55,6 +55,67 @@ PLATFORM_STYLE = {
 
 class SpeechRecommendationService:
     @staticmethod
+    def _outreach_generation_rules(scripts: list[MessageTemplate]) -> dict:
+        if not scripts:
+            return {}
+        return dict(scripts[0].generation_rules or {})
+
+    @staticmethod
+    def _outreach_body_length(body: str, language: str | None) -> int:
+        normalized_language = (language or "").lower()
+        if normalized_language.startswith("zh") or re.search(r"[\u4e00-\u9fff]", body):
+            return len(re.findall(r"[\u4e00-\u9fff]", body))
+        return len(re.findall(r"\b[\w'-]+\b", body))
+
+    @staticmethod
+    def _normalize_outreach_body_format(body: str) -> str:
+        text = (body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not text:
+            return ""
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"([,;:])(?=\S)", r"\1 ", text)
+        text = re.sub(r"(?<!\b[A-Z])([.!?])(?=[A-Z][a-z])", r"\1 ", text)
+        text = re.sub(r"\s*(👉\s*Product Link:\s*)", r"\n\n\1", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*(Product Link:\s*)", r"\n\n\1", text, flags=re.IGNORECASE)
+        text = re.sub(r"(?<=[^\s])\s*(Looking forward\b)", r"\n\n\1", text, flags=re.IGNORECASE)
+        text = re.sub(r"(?<=[^\s])\s*(Best,\s*)", r"\n\n\1", text, flags=re.IGNORECASE)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    @staticmethod
+    def _validate_outreach_generation(
+        *,
+        subject: str,
+        body: str,
+        rules: dict,
+    ) -> list[str]:
+        errors: list[str] = []
+        if not subject.strip():
+            errors.append("邮件标题为空")
+        if not body.strip():
+            errors.append("邮件正文为空")
+        if UNRESOLVED_PLACEHOLDER_RE.search(subject) or UNRESOLVED_PLACEHOLDER_RE.search(body):
+            errors.append("仍包含未替换的模板变量")
+        length = SpeechRecommendationService._outreach_body_length(body, str(rules.get("language") or ""))
+        min_length = int(rules.get("min_length") or 0)
+        max_length = int(rules.get("max_length") or 0)
+        # Length rules are guidance for the AI prompt, not hard blockers for sales review.
+        # A usable AI draft should still be shown so the salesperson can edit/approve it.
+        combined = f"{subject}\n{body}".casefold()
+        required = [str(item).strip() for item in rules.get("required_content") or [] if str(item).strip()]
+        cta = str(rules.get("cta") or "").strip()
+        if cta:
+            required.append(cta)
+        for item in required:
+            if item.casefold() not in combined:
+                errors.append(f"缺少必须内容：{item}")
+        for item in rules.get("forbidden_content") or []:
+            text = str(item).strip()
+            if text and text.casefold() in combined:
+                errors.append(f"包含禁止内容：{text}")
+        return errors
+
+    @staticmethod
     def _build_search_query(
         *,
         global_row: GlobalInfluencerProfile,
@@ -254,6 +315,9 @@ class SpeechRecommendationService:
                 "language": row.language,
                 "tags": row.tags or [],
                 "content": row.content[:1200],
+                "note": (row.note or "")[:500],
+                "generation_rules": row.generation_rules or {},
+                "is_default": bool(row.is_default),
             }
             for row in scripts
         ]
@@ -373,6 +437,7 @@ class SpeechRecommendationService:
             "followers": str(global_row.followers_count or 0),
             "category": global_row.category or "",
         }
+
         values.update({key: value for key, value in (extra_tokens or {}).items() if value})
         result = text
         for key, value in values.items():
@@ -406,6 +471,65 @@ class SpeechRecommendationService:
             global_row=global_row,
             extra_tokens=SpeechRecommendationService._brand_template_tokens(brand_profile),
         )
+
+    @staticmethod
+    def _remove_cjk_text(text: str) -> str:
+        replacements = {
+            "＊": "'",
+            "＇": "'",
+            "’": "'",
+            "‘": "'",
+            "“": '"',
+            "”": '"',
+            "〞": " - ",
+            "—": " - ",
+            "–": " - ",
+            "每": " - ",
+            "，": ", ",
+            "。": ". ",
+            "：": ": ",
+            "；": "; ",
+            "（": "(",
+            "）": ")",
+        }
+        cleaned = text or ""
+        for source, target in replacements.items():
+            cleaned = cleaned.replace(source, target)
+        cleaned = re.sub(r"[\u4e00-\u9fff]+", "-", cleaned)
+        cleaned = re.sub(r"[^\x09\x0a\x0d\x20-\x7e]", "", cleaned)
+        cleaned = re.sub(r"\s+-\s+", " - ", cleaned)
+        cleaned = re.sub(r"-{2,}", "-", cleaned)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+        return cleaned.strip(" -")
+
+    @staticmethod
+    def _enforce_outreach_business_requirements(
+        *,
+        subject: str,
+        body: str,
+        brand_profile: object | None,
+    ) -> tuple[str, str]:
+        brand_name = str(getattr(brand_profile, "brand_name", "") or "our brand").strip()
+        product_links = [str(url).strip() for url in (getattr(brand_profile, "product_links", []) or []) if str(url).strip()]
+        subject = SpeechRecommendationService._remove_cjk_text(subject).replace("our brand", brand_name)
+        body = SpeechRecommendationService._remove_cjk_text(body).replace("our brand", brand_name)
+        lower_body = body.lower()
+        additions: list[str] = []
+        if "video" not in lower_body or "amazon" not in lower_body:
+            additions.append(
+                "We would love to invite you to create a short product video and post it on Amazon and/or your social media channels in your own authentic style."
+            )
+        if product_links and not any(link.lower() in lower_body for link in product_links):
+            additions.append(f"Product link: {product_links[0]}")
+        if "affiliate" not in lower_body or "10%-30%" not in lower_body:
+            additions.append(
+                "You can also join our Amazon Affiliate Program and earn 10%-30% commission on qualified sales."
+            )
+        if additions:
+            body = f"{body.rstrip()}\n\n" + "\n\n".join(additions)
+        if brand_name and brand_name != "our brand":
+            body = re.sub(r"\bBrand Team\b", f"{brand_name} Team", body)
+        return subject, body
 
     @staticmethod
     def _fallback_outreach_email(
@@ -564,6 +688,9 @@ class SpeechRecommendationService:
                 "language": row.language,
                 "tags": row.tags or [],
                 "content": row.content[:1200],
+                "note": (row.note or "")[:500],
+                "generation_rules": row.generation_rules or {},
+                "is_default": bool(row.is_default),
             }
             for row in scripts
         ]
@@ -581,6 +708,7 @@ class SpeechRecommendationService:
             "platform": global_row.platform,
             "username": global_row.username,
             "display_name": global_row.display_name,
+            "profile_url": global_row.profile_url,
             "country": global_row.country,
             "language": global_row.language or language,
             "category": global_row.category,
@@ -599,6 +727,7 @@ class SpeechRecommendationService:
             "has_email": has_email,
             "product_id": product_id,
         }
+        generation_rules = SpeechRecommendationService._outreach_generation_rules(scripts)
 
         user_prompt = f"""请为以下红人生成一封独立的合作邀约邮件（含标题和正文）。
 
@@ -615,8 +744,24 @@ class SpeechRecommendationService:
 候选话术库（可从中选择或融合改写，每个红人应个性化）：
 {json.dumps(script_payload, ensure_ascii=False, indent=2)}
 
+模板备注是内部生成指导和业务员审核说明；可以用于理解场景，但不要把模板备注原文写入邮件标题或正文。
+
+当前指定模板的生成规则（必须遵守；为空时按常规安全规则）：
+{json.dumps(generation_rules, ensure_ascii=False, indent=2)}
+
 相关知识库片段（只能引用这些内容，不得编造品牌信息）：
 {json.dumps(knowledge_payload, ensure_ascii=False, indent=2)}
+
+硬性写作要求：
+1. Final email must be pure English. Do not output Chinese characters in subject, body, or signature.
+2. Use the English brand name from Brand/Profile only. Never use a Chinese product/project name as the brand name.
+3. Open by introducing yourself/our brand first, then explain why this creator's homepage/profile style is a fit.
+4. Personalize using the creator profile URL, platform, bio, niche, category, content style, and fit signals. Do not copy the template verbatim.
+5. Ask the creator to make a video and upload/post it to Amazon and/or their relevant social media platform.
+6. Include one product link from Brand/Profile if provided. If no product link is provided, ask whether they would like the product link instead of inventing one.
+7. Mention they can join our Amazon Affiliate Program and earn 10%-30% commission. Keep this as an invitation, not a guaranteed income claim.
+8. Keep the structure: greeting → brand introduction → creator-style fit → product/video collaboration request → product link → affiliate commission option → soft CTA → English signature.
+9. Generate a customized email for this creator; the final body must not be identical to any template content.
 
 请返回 JSON：
 {{
@@ -668,36 +813,63 @@ class SpeechRecommendationService:
         if script_id is not None:
             script_id = str(script_id)
 
-        subject = SpeechRecommendationService._fill_outreach_placeholders(
-            str(parsed.get("subject", "")).strip(),
-            global_row=global_row,
-            brand_profile=brand_profile,
-        )
-        body = SpeechRecommendationService._fill_outreach_placeholders(
-            str(parsed.get("body", "")).strip(),
-            global_row=global_row,
-            brand_profile=brand_profile,
-        )
-        if not subject or not body:
-            return SpeechRecommendationService._fallback_outreach_email(
-                reason="AI 返回缺少 subject/body，已降级为话术库模板",
+        def render_output(payload: dict) -> tuple[str, str]:
+            raw_body = SpeechRecommendationService._fill_outreach_placeholders(
+                str(payload.get("body", "")).strip(),
                 global_row=global_row,
-                product_row=product_row,
-                scripts=scripts,
-                knowledge_hits=knowledge_hits,
-                error_message="empty subject or body from AI",
-                tone=str(parsed.get("tone", preferred_tone)),
                 brand_profile=brand_profile,
             )
-        if UNRESOLVED_PLACEHOLDER_RE.search(subject) or UNRESOLVED_PLACEHOLDER_RE.search(body):
+            subject = SpeechRecommendationService._fill_outreach_placeholders(
+                str(payload.get("subject", "")).strip(),
+                global_row=global_row,
+                brand_profile=brand_profile,
+            )
+            body = SpeechRecommendationService._normalize_outreach_body_format(raw_body)
+            return SpeechRecommendationService._enforce_outreach_business_requirements(
+                subject=subject,
+                body=body,
+                brand_profile=brand_profile,
+            )
+
+        subject, body = render_output(parsed)
+        validation_errors = SpeechRecommendationService._validate_outreach_generation(
+            subject=subject,
+            body=body,
+            rules=generation_rules,
+        )
+        if validation_errors:
+            retry_prompt = f"""{user_prompt}
+
+上一次输出校验失败，请重新生成完整 JSON，不要解释。
+校验失败原因：
+- {chr(10).join(validation_errors)}
+请严格满足模板长度、必须内容、禁止内容、结构和 CTA 约束。"""
+            try:
+                parsed = await chat_completion_json(
+                    system_prompt=SYSTEM_PROMPT,
+                    user_prompt=retry_prompt,
+                    temperature=0.45,
+                    max_tokens=3072,
+                )
+                subject, body = render_output(parsed)
+                validation_errors = SpeechRecommendationService._validate_outreach_generation(
+                    subject=subject,
+                    body=body,
+                    rules=generation_rules,
+                )
+            except Exception as exc:
+                validation_errors = [str(exc).strip() or exc.__class__.__name__]
+
+        if validation_errors:
             return SpeechRecommendationService._fallback_outreach_email(
-                reason="AI 返回了未替换的模板占位符，已阻止发送",
+                reason="AI 输出未通过话术模板校验，已阻止发送",
                 global_row=global_row,
                 product_row=product_row,
                 scripts=scripts,
                 knowledge_hits=knowledge_hits,
-                error_message="AI 返回了未替换的模板占位符",
+                error_message="；".join(validation_errors),
                 tone=str(parsed.get("tone", preferred_tone)),
+                brand_profile=brand_profile,
             )
 
         return OutreachEmailGenerationResult(
@@ -843,6 +1015,7 @@ class SpeechRecommendationService:
             "platform": global_row.platform,
             "username": global_row.username,
             "display_name": global_row.display_name,
+            "profile_url": global_row.profile_url,
             "followers_count": global_row.followers_count,
             "engagement_rate": global_row.engagement_rate,
             "category": global_row.category,
@@ -880,13 +1053,19 @@ class SpeechRecommendationService:
 知识库片段（只能引用这些内容，不得编造）：
 {json.dumps(knowledge_payload, ensure_ascii=False, indent=2)}
 
+品牌资料（英文品牌名、产品链接、签名等必须优先遵守）：
+{brand_profile.to_prompt_block()}
+
 写作要求：
-1. 语气自然简洁，像真实品牌合作邀约，不要生硬翻译腔。
-2. 不要虚假说“我一直关注你很久”，除非 bio/ai_summary 支持。
-3. 可引用平台、类别、bio 中的真实信息。
-4. 结构：greeting → why reaching out → product relevance → collaboration idea → soft CTA → signature
-5. 正文长度控制在 120-220 个英文词（中文则 180-320 字）。
-6. 不要承诺价格、佣金、免费样品，除非知识库明确写了。
+1. Final email must be pure English. Do not output Chinese characters in subject, body, or signature.
+2. Use the English brand name from Brand/Profile only. Never use a Chinese product/project name as the brand name.
+3. Open by introducing yourself/our brand first, then explain why this creator's homepage/profile style is a fit.
+4. Personalize using the creator profile URL, platform, bio, niche, category, content style, and fit signals. Do not copy the template verbatim.
+5. Ask the creator to make a video and upload/post it to Amazon and/or their relevant social media platform.
+6. Include one product link from Brand/Profile if provided. If no product link is provided, ask whether they would like the product link instead of inventing one.
+7. Mention they can join our Amazon Affiliate Program and earn 10%-30% commission. Keep this as an invitation, not a guaranteed income claim.
+8. Keep the structure: greeting → brand introduction → creator-style fit → product/video collaboration request → product link → affiliate commission option → soft CTA → English signature.
+9. Generate a customized email for this creator; the final body must not be identical to any template content.
 
 返回 JSON：
 {{
@@ -919,6 +1098,11 @@ class SpeechRecommendationService:
         body = str(parsed.get("body", "")).strip()
         if not subject or not body:
             raise ValueError("AI 返回缺少 subject 或 body")
+        subject, body = SpeechRecommendationService._enforce_outreach_business_requirements(
+            subject=subject,
+            body=SpeechRecommendationService._normalize_outreach_body_format(body),
+            brand_profile=brand_profile,
+        )
 
         script_title = str(parsed.get("recommended_script_title", "")).strip()
         if not script_title and scripts:

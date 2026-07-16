@@ -10,8 +10,12 @@ from sqlalchemy import select
 from app.api.routes.collection_tasks import _start_next_batch_child, run_collection_task
 from app.core.config import settings
 from app.db.session import async_session_factory
+from app.models.collection_task_candidate import CollectionTaskCandidate
 from app.models.collection_task import CollectionTask
-from app.models.enums import CollectionMode, CollectionTaskStatus
+from app.models.enums import CandidateStatus, CollectionMode, CollectionTaskStatus
+from app.models.global_influencer_profile import GlobalInfluencerProfile
+from app.models.product_influencer import ProductInfluencer
+from app.models.tenant import Product
 from app.schemas.collection_task import CollectionTaskCreate, CollectionTaskUpdate
 from app.services import collection_runner as collection_runner_module
 from app.services.collection_queue import CollectionQueueService
@@ -378,6 +382,197 @@ async def test_stale_running_batch_round_is_failed_before_next_round(monkeypatch
         assert parent.status == CollectionTaskStatus.RUNNING.value
         assert parent.run_checkpoint["batch_current_round"] == 3
     await _cleanup_tasks(created_ids)
+
+
+@pytest.mark.anyio
+async def test_batch_parent_read_exposes_unique_inserted_count_from_child_candidates():
+    data = _batch_payload(batch_total_limit=30, batch_round_size=10, batch_round_count=3)
+    created_ids: list[int] = []
+
+    async with async_session_factory() as db:
+        parent = await CollectionTaskService.create_task(db, data, user_id=11, workspace_id=1, product_id=1)
+        created_ids.append(parent.id)
+        children = await CollectionTaskService.get_batch_children(db, parent.id)
+        created_ids.extend(child.id for child in children)
+
+        children[0].inserted_count = 100
+        children[0].result_count = 100
+        children[1].inserted_count = 120
+        children[1].result_count = 120
+        db.add_all(
+            [
+                CollectionTaskCandidate(
+                    task_id=children[0].id,
+                    product_id=1,
+                    product_influencer_id=66,
+                    username="same-a",
+                    profile_url="https://example.com/a",
+                    platform="youtube",
+                    status=CandidateStatus.INSERTED.value,
+                ),
+                CollectionTaskCandidate(
+                    task_id=children[1].id,
+                    product_id=1,
+                    product_influencer_id=66,
+                    username="same-a-duplicate",
+                    profile_url="https://example.com/a2",
+                    platform="youtube",
+                    status=CandidateStatus.INSERTED.value,
+                ),
+                CollectionTaskCandidate(
+                    task_id=children[1].id,
+                    product_id=1,
+                    product_influencer_id=67,
+                    username="unique-b",
+                    profile_url="https://example.com/b",
+                    platform="youtube",
+                    status=CandidateStatus.INSERTED.value,
+                ),
+            ]
+        )
+        await db.commit()
+
+        page = await CollectionTaskService.list_tasks(
+            db,
+            filters=type(
+                "Filters",
+                (),
+                {
+                    "product_id": 1,
+                    "owner_user_id": 11,
+                    "owner_scope": "mine",
+                    "owner_is_admin": False,
+                    "status": None,
+                    "source_method": None,
+                    "effectiveness": None,
+                    "include_archived": True,
+                },
+            )(),
+            page=1,
+            page_size=20,
+        )
+        read_parent = next(item for item in page.items if item.id == parent.id)
+
+        assert read_parent.inserted_count == 220
+        assert read_parent.run_checkpoint["unique_inserted_count"] == 2
+        assert read_parent.run_checkpoint["batch_cumulative_inserted_count"] == 220
+    await _cleanup_tasks(created_ids)
+
+
+@pytest.mark.anyio
+async def test_batch_parent_read_exposes_current_product_library_count():
+    suffix = uuid.uuid4().hex[:8]
+    data = _batch_payload(batch_total_limit=30, batch_round_size=10, batch_round_count=3)
+    created_ids: list[int] = []
+    profile_ids: list[int] = []
+    product_influencer_ids: list[int] = []
+    product_id: int | None = None
+
+    async with async_session_factory() as db:
+        product = Product(
+            workspace_id=1,
+            name=f"Batch Library Count {suffix}",
+            slug=f"batch-library-count-{suffix}",
+            brand="Batch Library Count",
+        )
+        db.add(product)
+        await db.flush()
+        product_id = product.id
+
+        parent = await CollectionTaskService.create_task(db, data, user_id=11, workspace_id=1, product_id=product_id)
+        created_ids.append(parent.id)
+        children = await CollectionTaskService.get_batch_children(db, parent.id)
+        created_ids.extend(child.id for child in children)
+
+        children[0].inserted_count = 100
+        children[0].result_count = 100
+        children[1].inserted_count = 120
+        children[1].result_count = 120
+        product_rows: list[ProductInfluencer] = []
+        for index in range(3):
+            profile = GlobalInfluencerProfile(
+                platform="youtube",
+                username=f"batch_library_{suffix}_{index}",
+                normalized_username=f"batch_library_{suffix}_{index}",
+                profile_url=f"https://example.com/batch-library/{suffix}/{index}",
+                normalized_profile_url=f"https://example.com/batch-library/{suffix}/{index}",
+            )
+            db.add(profile)
+            await db.flush()
+            profile_ids.append(profile.id)
+            product_row = ProductInfluencer(
+                product_id=product_id,
+                global_influencer_id=profile.id,
+                is_inserted=True,
+            )
+            db.add(product_row)
+            product_rows.append(product_row)
+            await db.flush()
+            product_influencer_ids.append(product_row.id)
+        db.add_all(
+            [
+                CollectionTaskCandidate(
+                    task_id=children[0].id,
+                    product_id=product_id,
+                    product_influencer_id=product_rows[0].id,
+                    username="same-a",
+                    profile_url="https://example.com/a",
+                    platform="youtube",
+                    status=CandidateStatus.INSERTED.value,
+                ),
+                CollectionTaskCandidate(
+                    task_id=children[1].id,
+                    product_id=product_id,
+                    product_influencer_id=product_rows[1].id,
+                    username="unique-b",
+                    profile_url="https://example.com/b",
+                    platform="youtube",
+                    status=CandidateStatus.INSERTED.value,
+                ),
+            ]
+        )
+        await db.commit()
+
+        page = await CollectionTaskService.list_tasks(
+            db,
+            filters=type(
+                "Filters",
+                (),
+                {
+                    "product_id": product_id,
+                    "owner_user_id": 11,
+                    "owner_scope": "mine",
+                    "owner_is_admin": False,
+                    "status": None,
+                    "source_method": None,
+                    "effectiveness": None,
+                    "include_archived": True,
+                },
+            )(),
+            page=1,
+            page_size=20,
+        )
+        read_parent = next(item for item in page.items if item.id == parent.id)
+
+        assert read_parent.run_checkpoint["product_library_inserted_count"] == 3
+        assert read_parent.run_checkpoint["unique_inserted_count"] == 2
+        assert read_parent.run_checkpoint["batch_cumulative_inserted_count"] == 220
+
+    await _cleanup_tasks(created_ids)
+    async with async_session_factory() as db:
+        for row_id in product_influencer_ids:
+            row = await db.get(ProductInfluencer, row_id)
+            if row:
+                await db.delete(row)
+        for row_id in profile_ids:
+            row = await db.get(GlobalInfluencerProfile, row_id)
+            if row:
+                await db.delete(row)
+        if product_id is not None:
+            row = await db.get(Product, product_id)
+            if row:
+                await db.delete(row)
+        await db.commit()
 
 
 @pytest.mark.anyio

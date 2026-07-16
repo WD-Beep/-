@@ -54,7 +54,7 @@ class GlobalInfluencerProfile(Base):
     website: Mapped[str | None] = mapped_column(String(1024))
     contact_page: Mapped[str | None] = mapped_column(String(1024))
     linktree_url: Mapped[str | None] = mapped_column(String(1024))
-    whatsapp: Mapped[str | None] = mapped_column(String(50))
+    whatsapp: Mapped[str | None] = mapped_column(String(1024))
     telegram: Mapped[str | None] = mapped_column(String(100))
     other_social_links: Mapped[list | None] = mapped_column(JSONB, default=list)
     contact_discovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

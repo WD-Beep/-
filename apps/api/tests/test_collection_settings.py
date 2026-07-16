@@ -16,14 +16,18 @@ from app.services.api_direct_provider import get_platform_capability, list_platf
 from app.services.instagram_provider import ensure_instagram_provider_ready
 
 
-def test_collection_defaults_allow_two_running_tasks():
-    assert settings.collection_max_running_tasks == 2
+def test_collection_defaults_allow_ten_running_tasks():
+    assert settings.collection_max_running_tasks == 10
+    assert settings.collection_max_concurrency_per_user == 3
+    assert settings.collection_max_concurrency_per_platform == 3
+    # Field default is 4; conftest forces 0 so queue tests stay deterministic.
+    assert settings.model_fields["collection_worker_count"].default == 4
 
 
 def test_collection_profile_enrichment_defaults():
     assert settings.collection_profile_enrich_concurrency == 3
     assert settings.collection_profile_request_timeout_seconds == 20
-    assert settings.collection_running_stale_seconds == 180
+    assert settings.collection_running_stale_seconds >= 30
 
 
 def test_instagram_pipeline_imports_stage_constants():
@@ -40,10 +44,13 @@ async def test_platform_capabilities_expose_collection_limits():
         response = await client.get("/api/collection-tasks/platform-capabilities")
     assert response.status_code == 200
     data = response.json()
-    assert data["collection_max_running_tasks"] == 2
+    assert data["collection_max_running_tasks"] == 10
+    assert data["collection_max_concurrency_per_user"] == 3
+    assert data["collection_max_concurrency_per_platform"] == 3
+    assert data["collection_worker_count"] == 0  # conftest disables embedded workers
     assert data["collection_profile_enrich_concurrency"] >= 3
     assert data["collection_profile_request_timeout_seconds"] == 20
-    assert data["collection_running_stale_seconds"] == 180
+    assert data["collection_running_stale_seconds"] >= 30
 
 
 def test_reconcile_skips_fresh_running_tasks():

@@ -17,6 +17,7 @@ from app.models.enums import EmailLogStatus
 from app.models.global_influencer_profile import GlobalInfluencerProfile
 from app.models.outreach_send_queue import OutreachSendQueueItem
 from app.models.product_influencer import ProductInfluencer
+from app.models.tenant import Product, Workspace
 from app.services.influencer_persistence import (
     create_global_profile_from_collected,
     create_product_influencer_from_collected,
@@ -28,6 +29,7 @@ def _suffix() -> str:
 
 
 async def _create_influencer(db, *, suffix: str, email: str) -> ProductInfluencer:
+    await _ensure_product_one(db)
     run_at = datetime.now(UTC)
     username = f"followup_{suffix}"
     item = CollectedInfluencer(
@@ -53,6 +55,16 @@ async def _create_influencer(db, *, suffix: str, email: str) -> ProductInfluence
     db.add(record)
     await db.flush()
     return record
+
+
+async def _ensure_product_one(db) -> None:
+    if await db.get(Product, 1):
+        return
+    if not await db.get(Workspace, 1):
+        db.add(Workspace(id=1, name="Follow-up Test Workspace", slug=f"followup-test-{_suffix()}"))
+        await db.flush()
+    db.add(Product(id=1, workspace_id=1, name="Follow-up Test Product", slug=f"followup-test-{_suffix()}"))
+    await db.flush()
 
 
 async def _create_email_log(
@@ -287,6 +299,74 @@ def test_follow_up_queue_skips_if_record_replied_before_smtp():
             assert result.status == "skipped"
             assert "replied" in (result.error_message or "").lower()
             mocked_send.assert_not_awaited()
+        finally:
+            async with async_session_factory() as db:
+                await _cleanup(db, influencer_ids=ids, global_ids=global_ids, log_ids=log_ids)
+
+    asyncio.run(_run())
+
+
+def test_bulk_second_follow_up_creates_queue_and_reports_skips():
+    async def _run() -> None:
+        from app.services.follow_up_scheduler import bulk_create_second_follow_ups
+
+        suffix = _suffix()
+        async with async_session_factory() as db:
+            sendable_influencer = await _create_influencer(db, suffix=f"send_{suffix}", email=f"send_{suffix}@example.com")
+            replied_influencer = await _create_influencer(db, suffix=f"replied_{suffix}", email=f"replied_{suffix}@example.com")
+            stopped_influencer = await _create_influencer(db, suffix=f"stopped_{suffix}", email=f"stopped_{suffix}@example.com")
+            failed_influencer = await _create_influencer(db, suffix=f"failed_{suffix}", email=f"failed_{suffix}@example.com")
+
+            sendable = await _create_email_log(db, influencer=sendable_influencer, recipient=f"send_{suffix}@example.com")
+            replied = await _create_email_log(db, influencer=replied_influencer, recipient=f"replied_{suffix}@example.com")
+            stopped = await _create_email_log(db, influencer=stopped_influencer, recipient=f"stopped_{suffix}@example.com")
+            failed = await _create_email_log(db, influencer=failed_influencer, recipient=f"failed_{suffix}@example.com")
+            replied.has_replied = True
+            stopped.stop_follow_up = True
+            stopped.stop_reason = "manual"
+            failed.status = EmailLogStatus.FAILED.value
+            await db.commit()
+
+            ids = [sendable_influencer.id, replied_influencer.id, stopped_influencer.id, failed_influencer.id]
+            global_ids = [
+                sendable_influencer.global_influencer_id,
+                replied_influencer.global_influencer_id,
+                stopped_influencer.global_influencer_id,
+                failed_influencer.global_influencer_id,
+            ]
+            log_ids = [sendable.id, replied.id, stopped.id, failed.id]
+
+        try:
+            async with async_session_factory() as db:
+                result = await bulk_create_second_follow_ups(
+                    db,
+                    product_id=1,
+                    user_id=1,
+                    record_ids=log_ids,
+                )
+                assert result.created_count == 1
+                assert result.skipped_count == 3
+                assert result.created_record_ids == [sendable.id]
+                assert result.skip_reasons[replied.id] == "already_replied"
+                assert result.skip_reasons[stopped.id] == "follow_up_stopped"
+                assert result.skip_reasons[failed.id] == "not_sent"
+
+                queue = await db.scalar(
+                    select(OutreachSendQueueItem).where(
+                        OutreachSendQueueItem.outreach_record_id == sendable.id,
+                        OutreachSendQueueItem.queue_type == "follow_up",
+                    )
+                )
+                assert queue is not None
+                assert queue.follow_up_step == 2
+                assert queue.user_id == 1
+                assert queue.status == "scheduled"
+                assert queue.should_skip_if_replied is True
+
+                updated = await db.get(EmailLog, sendable.id)
+                assert updated is not None
+                assert updated.follow_up_status == "scheduled"
+                assert updated.follow_up_count == 1
         finally:
             async with async_session_factory() as db:
                 await _cleanup(db, influencer_ids=ids, global_ids=global_ids, log_ids=log_ids)

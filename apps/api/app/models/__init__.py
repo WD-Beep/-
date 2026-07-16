@@ -1,3 +1,4 @@
+from app.models.admin_audit_log import AdminAuditLog
 from app.models.collection_task import CollectionTask
 from app.models.collection_task_candidate import CollectionTaskCandidate
 from app.models.email_log import EmailLog
@@ -25,11 +26,13 @@ from app.models.message_template import MessageTemplate
 from app.models.outreach_campaign_recipient import OutreachCampaignRecipient
 from app.models.outreach_email_campaign import OutreachEmailCampaign
 from app.models.outreach_send_queue import OutreachSendQueueItem
+from app.models.user_smtp_account import UserSmtpAccount
 from app.models.product_influencer import ProductInfluencer
 from app.models.product_influencer_source import ProductInfluencerSource
 from app.models.tenant import Product, ProductMember, User, Workspace, WorkspaceMember
 
 __all__ = [
+    "AdminAuditLog",
     "Influencer",
     "GlobalInfluencerProfile",
     "ProductInfluencer",
@@ -41,6 +44,7 @@ __all__ = [
     "LinkImportBatch",
     "MessageTemplate",
     "OutreachSendQueueItem",
+    "UserSmtpAccount",
     "OutreachEmailCampaign",
     "OutreachCampaignRecipient",
     "KnowledgeBase",

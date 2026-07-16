@@ -26,7 +26,10 @@ class PlatformCapabilitiesResponse(BaseModel):
     youtube_data_provider: str
     tiktok_data_provider: str = ""
     facebook_data_provider: str = ""
-    collection_max_running_tasks: int = Field(default=2, ge=1)
+    collection_max_running_tasks: int = Field(default=10, ge=1)
+    collection_max_concurrency_per_user: int = Field(default=3, ge=1)
+    collection_max_concurrency_per_platform: int = Field(default=3, ge=1)
+    collection_worker_count: int = Field(default=4, ge=0)
     collection_profile_enrich_concurrency: int = Field(default=3, ge=1)
     collection_profile_request_timeout_seconds: int = Field(default=20, ge=5)
     collection_running_stale_seconds: int = Field(default=180, ge=30)

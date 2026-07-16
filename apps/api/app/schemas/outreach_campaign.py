@@ -58,7 +58,7 @@ class OutreachCampaignUpdateRequest(BaseModel):
 class OutreachCampaignRead(BaseModel):
     id: int
     product_id: int
-    user_id: int
+    user_id: int | None
     name: str
     status: str
     knowledge_base_id: int | None

@@ -181,12 +181,67 @@ test("auth session stores backend role products and tenant headers include token
   }
 });
 
+test("tenant headers prefer the current auth session user over a stale stored user id", () => {
+  const storage = new Map<string, string>();
+  const originalWindow = globalThis.window;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      localStorage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          storage.set(key, value);
+        },
+        removeItem: (key: string) => {
+          storage.delete(key);
+        },
+      },
+    },
+  });
+  try {
+    const built = buildAuthSession(
+      { username: "admin", password: AUTH_PASSWORD, userId: 1, role: "admin", label: "Admin" },
+      { id: 1, username: "admin", is_admin: true },
+      [product({ id: 5, name: "Assigned", slug: "assigned" })],
+      "admin-token",
+    );
+    setAuthSession(built);
+    window.localStorage.setItem("influencer_intel_user_id", "17");
+    setStoredProductId(0);
+
+    assert.deepEqual(tenantHeaders(), {
+      Authorization: "Bearer admin-token",
+      "X-User-Id": "1",
+      "X-Product-Id": "0",
+    });
+  } finally {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: originalWindow,
+    });
+  }
+});
+
 test("collection task creation is disabled for all-products selection", () => {
   setStoredProductId(ALL_PRODUCTS_ID);
   assert.equal(canCreateCollectionTaskForProduct(ALL_PRODUCTS_ID), false);
   assert.match(collectionTaskCreateDisabledReason(ALL_PRODUCTS_ID) ?? "", /具体产品|具体品牌/);
   assert.throws(() => assertConcreteProductSelected("创建采集任务"), /具体产品|具体品牌/);
   assert.equal(canCreateCollectionTaskForProduct(3), true);
+});
+
+test("collection task create entry remains clickable so it can explain missing product selection", () => {
+  const sourcePath = fileURLToPath(
+    new URL("../src/components/collection-tasks/collection-tasks-panel.tsx", import.meta.url),
+  );
+  const source = readFileSync(sourcePath, "utf8");
+  const createButton = source.match(
+    /<Button\s+onClick=\{\(\) => openCreateDialog\("keyword_discovery"\)\}[\s\S]*?<\/Button>/,
+  )?.[0];
+
+  assert.ok(createButton);
+  assert.doesNotMatch(createButton, /\sdisabled=/);
+  assert.match(createButton, /aria-disabled=\{!canCreateCollectionTaskForProduct\(productId\)\}/);
 });
 
 test("collapsed sidebar uses role-filtered mini navigation", () => {

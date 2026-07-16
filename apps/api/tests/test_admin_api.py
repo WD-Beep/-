@@ -6,13 +6,16 @@ import asyncio
 from datetime import datetime, timezone
 import uuid
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import async_session_factory
 from app.models.collection_task import CollectionTask
 from app.models.email_log import EmailLog
 from app.models.email_reply import EmailReply
 from app.models.global_influencer_profile import GlobalInfluencerProfile
+from app.models.outreach_email_campaign import OutreachEmailCampaign
+from app.models.outreach_send_queue import OutreachSendQueueItem
 from app.models.product_influencer import ProductInfluencer
 from app.models.tenant import Product, ProductMember, User, WorkspaceMember
 
@@ -292,6 +295,347 @@ def test_admin_can_create_single_character_sales_username():
                 else:
                     await db_session.execute(delete(User).where(User.username == username))
                 await db_session.commit()
+
+    asyncio.run(_run())
+
+
+def test_admin_salesperson_contact_accepts_local_account_phone_wechat_and_text():
+    async def _run() -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        from app.main import app
+
+        suffix = uuid.uuid4().hex[:8]
+        username = f"contact-sales-{suffix}"
+        created_id: int | None = None
+        contacts = [
+            "sales1@local",
+            "13800138000",
+            "微信号 wx_sales_01",
+            "内部业务员账号",
+        ]
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                created = await client.post(
+                    "/api/admin/users",
+                    headers={"X-User-Id": "1", "X-Product-Id": "0"},
+                    json={
+                        "username": username,
+                        "password": "1",
+                        "display_name": "Contact Sales",
+                        "email": contacts[0],
+                        "role": "sales",
+                        "is_active": True,
+                        "product_ids": [],
+                    },
+                )
+                assert created.status_code == 201, created.text
+                created_id = created.json()["id"]
+                assert created.json()["email"] == contacts[0]
+
+                for contact in contacts[1:]:
+                    updated = await client.patch(
+                        f"/api/admin/users/{created_id}",
+                        headers={"X-User-Id": "1", "X-Product-Id": "0"},
+                        json={"email": contact},
+                    )
+                    assert updated.status_code == 200, updated.text
+                    assert updated.json()["email"] == contact
+
+                non_admin_update = await client.patch(
+                    f"/api/admin/users/{created_id}",
+                    headers={"X-User-Id": str(created_id), "X-Product-Id": "0"},
+                    json={"email": "unauthorized contact"},
+                )
+                assert non_admin_update.status_code == 403
+
+                blank_username = await client.patch(
+                    f"/api/admin/users/{created_id}",
+                    headers={"X-User-Id": "1", "X-Product-Id": "0"},
+                    json={"username": ""},
+                )
+                assert blank_username.status_code == 422
+        finally:
+            async with async_session_factory() as db_session:
+                if created_id is not None:
+                    await db_session.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == created_id))
+                    await db_session.execute(delete(ProductMember).where(ProductMember.user_id == created_id))
+                    await db_session.execute(delete(User).where(User.id == created_id))
+                else:
+                    await db_session.execute(delete(User).where(User.username == username))
+                await db_session.commit()
+
+    asyncio.run(_run())
+
+
+def test_admin_can_delete_salesperson_and_preserve_historical_business_data():
+    async def _run() -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        from app.main import app
+
+        suffix = uuid.uuid4().hex[:8]
+        username = f"delete-sales-{suffix}"
+        created_ids: dict[str, int] = {}
+        delete_succeeded = False
+        try:
+            async with async_session_factory() as db_session:
+                user = User(username=username, display_name="Delete Sales", is_admin=False)
+                db_session.add(user)
+                await db_session.flush()
+                db_session.add(WorkspaceMember(workspace_id=1, user_id=user.id, role="member"))
+                product = Product(
+                    workspace_id=1,
+                    name=f"Delete Safe Brand {suffix}",
+                    slug=f"delete-safe-brand-{suffix}",
+                )
+                db_session.add(product)
+                await db_session.flush()
+                db_session.add(ProductMember(user_id=user.id, product_id=product.id, role="owner"))
+                task = CollectionTask(
+                    user_id=user.id,
+                    workspace_id=1,
+                    product_id=product.id,
+                    name=f"Delete Safe Task {suffix}",
+                    platform="youtube",
+                    platforms=["youtube"],
+                    keywords=["delete-safe"],
+                    status="completed_with_results",
+                )
+                db_session.add(task)
+                profile = GlobalInfluencerProfile(
+                    platform="youtube",
+                    username=f"delete_safe_{suffix}",
+                    normalized_username=f"delete_safe_{suffix}",
+                    profile_url=f"https://example.com/delete-safe/{suffix}",
+                    normalized_profile_url=f"https://example.com/delete-safe/{suffix}",
+                )
+                db_session.add(profile)
+                await db_session.flush()
+                influencer = ProductInfluencer(product_id=product.id, global_influencer_id=profile.id)
+                db_session.add(influencer)
+                await db_session.flush()
+                email_log = EmailLog(
+                    user_id=user.id,
+                    product_id=product.id,
+                    task_id=task.id,
+                    product_influencer_id=influencer.id,
+                    recipients=["creator@example.com"],
+                    subject="Delete safe email",
+                    status="sent",
+                    sent_at=datetime.now(timezone.utc),
+                )
+                db_session.add(email_log)
+                await db_session.flush()
+                campaign = OutreachEmailCampaign(
+                    product_id=product.id,
+                    user_id=user.id,
+                    name=f"Delete Safe Campaign {suffix}",
+                    status="running",
+                    auto_send_enabled=True,
+                    auto_send_time="10:00",
+                )
+                db_session.add(campaign)
+                await db_session.flush()
+                reply = EmailReply(
+                    user_id=user.id,
+                    product_id=product.id,
+                    email_log_id=email_log.id,
+                    product_influencer_id=influencer.id,
+                    campaign_id=campaign.id,
+                    from_address="creator@example.com",
+                    to_address="brand@example.com",
+                    subject="Re: Delete safe email",
+                    received_at=datetime.now(timezone.utc),
+                )
+                queue = OutreachSendQueueItem(
+                    product_id=product.id,
+                    user_id=user.id,
+                    product_influencer_id=influencer.id,
+                    recipient="creator@example.com",
+                    subject="Queued email",
+                    body="Queued body",
+                    status="queued",
+                    campaign_id=campaign.id,
+                )
+                db_session.add_all([reply, queue])
+                await db_session.commit()
+                created_ids.update(
+                    user=user.id,
+                    product=product.id,
+                    task=task.id,
+                    profile=profile.id,
+                    influencer=influencer.id,
+                    email=email_log.id,
+                    campaign=campaign.id,
+                    reply=reply.id,
+                    queue=queue.id,
+                )
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                blocked = await client.delete(
+                    f"/api/admin/users/{created_ids['user']}",
+                    headers={"X-User-Id": str(created_ids["user"]), "X-Product-Id": "0"},
+                )
+                assert blocked.status_code == 403
+
+                deleted = await client.delete(
+                    f"/api/admin/users/{created_ids['user']}",
+                    headers={"X-User-Id": "1", "X-Product-Id": "0"},
+                )
+                assert deleted.status_code == 200, deleted.text
+                payload = deleted.json()
+                assert payload["success"] is True
+                assert payload["deleted_user_id"] == created_ids["user"]
+                assert payload["released_products"] == 1
+                assert payload["released_tasks"] == 1
+                assert payload["cancelled_campaigns"] == 1
+                assert payload["cancelled_queue_items"] == 1
+                assert payload["preserved_history_records"] is True
+                delete_succeeded = True
+
+            async with async_session_factory() as db_session:
+                assert await db_session.get(User, created_ids["user"]) is None
+                assert await db_session.scalar(
+                    select(ProductMember.id).where(ProductMember.user_id == created_ids["user"])
+                ) is None
+                assert await db_session.scalar(
+                    select(WorkspaceMember.id).where(WorkspaceMember.user_id == created_ids["user"])
+                ) is None
+                assert (await db_session.get(CollectionTask, created_ids["task"])).user_id is None
+                assert (await db_session.get(EmailLog, created_ids["email"])).user_id is None
+                assert (await db_session.get(EmailReply, created_ids["reply"])).user_id is None
+                preserved_campaign = await db_session.get(OutreachEmailCampaign, created_ids["campaign"])
+                assert preserved_campaign is not None
+                assert preserved_campaign.user_id is None
+                assert preserved_campaign.status == "cancelled"
+                assert preserved_campaign.auto_send_enabled is False
+                preserved_queue = await db_session.get(OutreachSendQueueItem, created_ids["queue"])
+                assert preserved_queue is not None
+                assert preserved_queue.user_id is None
+                assert preserved_queue.status == "cancelled"
+                assert await db_session.get(ProductInfluencer, created_ids["influencer"]) is not None
+                audit = (
+                    await db_session.execute(
+                        text(
+                            "SELECT action, actor_user_id, target_user_id, details "
+                            "FROM admin_audit_logs WHERE target_user_id = :target_user_id "
+                            "ORDER BY id DESC LIMIT 1"
+                        ),
+                        {"target_user_id": created_ids["user"]},
+                    )
+                ).mappings().first()
+                assert audit is not None
+                assert audit["action"] == "admin_user_deleted"
+                assert audit["actor_user_id"] == 1
+                assert audit["details"]["released_products"] == 1
+        finally:
+            async with async_session_factory() as db_session:
+                if delete_succeeded:
+                    await db_session.execute(
+                        text("DELETE FROM admin_audit_logs WHERE target_user_id = :target_user_id"),
+                        {"target_user_id": created_ids.get("user")},
+                    )
+                if "reply" in created_ids:
+                    await db_session.execute(delete(EmailReply).where(EmailReply.id == created_ids["reply"]))
+                if "queue" in created_ids:
+                    await db_session.execute(delete(OutreachSendQueueItem).where(OutreachSendQueueItem.id == created_ids["queue"]))
+                if "campaign" in created_ids:
+                    await db_session.execute(delete(OutreachEmailCampaign).where(OutreachEmailCampaign.id == created_ids["campaign"]))
+                if "email" in created_ids:
+                    await db_session.execute(delete(EmailLog).where(EmailLog.id == created_ids["email"]))
+                if "influencer" in created_ids:
+                    await db_session.execute(delete(ProductInfluencer).where(ProductInfluencer.id == created_ids["influencer"]))
+                if "profile" in created_ids:
+                    await db_session.execute(delete(GlobalInfluencerProfile).where(GlobalInfluencerProfile.id == created_ids["profile"]))
+                if "task" in created_ids:
+                    await db_session.execute(delete(CollectionTask).where(CollectionTask.id == created_ids["task"]))
+                if "product" in created_ids:
+                    await db_session.execute(delete(ProductMember).where(ProductMember.product_id == created_ids["product"]))
+                    await db_session.execute(delete(Product).where(Product.id == created_ids["product"]))
+                if "user" in created_ids:
+                    await db_session.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == created_ids["user"]))
+                    await db_session.execute(delete(User).where(User.id == created_ids["user"]))
+                await db_session.commit()
+
+    asyncio.run(_run())
+
+
+def test_admin_user_delete_rolls_back_when_commit_fails():
+    async def _run() -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        from app.main import app
+
+        suffix = uuid.uuid4().hex[:8]
+        username = f"delete-rollback-{suffix}"
+        user_id: int | None = None
+        product_id: int | None = None
+        original_commit = AsyncSession.commit
+        try:
+            async with async_session_factory() as db_session:
+                user = User(username=username, display_name="Rollback Sales", is_admin=False)
+                db_session.add(user)
+                await db_session.flush()
+                db_session.add(WorkspaceMember(workspace_id=1, user_id=user.id, role="member"))
+                product = Product(
+                    workspace_id=1,
+                    name=f"Rollback Brand {suffix}",
+                    slug=f"rollback-brand-{suffix}",
+                )
+                db_session.add(product)
+                await db_session.flush()
+                db_session.add(ProductMember(user_id=user.id, product_id=product.id, role="owner"))
+                await db_session.commit()
+                user_id = user.id
+                product_id = product.id
+
+            async def failing_commit(_session: AsyncSession) -> None:
+                raise RuntimeError("forced commit failure")
+
+            AsyncSession.commit = failing_commit
+            transport = ASGITransport(app=app, raise_app_exceptions=False)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.delete(
+                    f"/api/admin/users/{user_id}",
+                    headers={"X-User-Id": "1", "X-Product-Id": "0"},
+                )
+                assert response.status_code == 500
+                assert "删除业务员失败" in response.text
+        finally:
+            AsyncSession.commit = original_commit
+            async with async_session_factory() as db_session:
+                if user_id is not None:
+                    assert await db_session.get(User, user_id) is not None
+                    assert await db_session.scalar(
+                        select(ProductMember.id).where(ProductMember.user_id == user_id)
+                    ) is not None
+                    await db_session.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == user_id))
+                    await db_session.execute(delete(ProductMember).where(ProductMember.user_id == user_id))
+                    await db_session.execute(delete(User).where(User.id == user_id))
+                if product_id is not None:
+                    await db_session.execute(delete(Product).where(Product.id == product_id))
+                await db_session.commit()
+
+    asyncio.run(_run())
+
+
+def test_admin_cannot_delete_current_logged_in_admin():
+    async def _run() -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        from app.main import app
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.delete(
+                "/api/admin/users/1",
+                headers={"X-User-Id": "1", "X-Product-Id": "0"},
+            )
+            assert response.status_code == 409
+            assert "不能删除当前登录的管理员账号" in response.text
 
     asyncio.run(_run())
 

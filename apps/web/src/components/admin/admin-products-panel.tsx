@@ -29,12 +29,9 @@ import {
   deleteSalespersonSafely,
   disableBrand,
   disableSalesperson,
-  hasSalespersonRelatedData,
-  salespersonHasRelatedData,
   ReassignOwnerDrawer,
   SalespersonDeleteDialog,
   SalespersonFormDrawer,
-  TransferBrandsDrawer,
   useAdminAvatarCache,
 } from "@/components/admin/admin-products-management";
 import { ProductCreateDialog } from "@/components/layout/product-create-dialog";
@@ -59,7 +56,6 @@ type PanelAction =
   | { type: "create-sales" }
   | { type: "edit-sales"; user: AdminUser }
   | { type: "assign-sales"; row: SalespersonProgressRow; user: AdminUser }
-  | { type: "transfer-sales"; user: AdminUser }
   | { type: "delete-sales"; user: AdminUser; row: SalespersonProgressRow }
   | { type: "edit-brand"; brand: EnrichedBrandProduct }
   | { type: "reassign-brand"; brand: EnrichedBrandProduct }
@@ -239,32 +235,14 @@ export function AdminProductsPanel() {
     setDeleteLoading(true);
     setActionError(null);
     try {
-      if (salespersonHasRelatedData(panelAction.user, panelAction.row)) {
-        setActionError("该业务员仍有关联品牌或业务数据，请先转移品牌，或选择停用账号。");
-        return;
-      }
-      await deleteSalespersonSafely(panelAction.user.id);
+      const result = await deleteSalespersonSafely(panelAction.user.id);
       setPanelAction(null);
-      setSuccessMessage("删除成功");
+      setSuccessMessage(
+        `删除成功，已释放 ${result.released_products} 个品牌和 ${result.released_tasks} 个任务，历史数据已保留。`,
+      );
       await reload();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "删除业务员失败，请稍后重试。");
-    } finally {
-      setDeleteLoading(false);
-    }
-  }
-
-  async function handleDisableSalespersonFromDelete() {
-    if (panelAction?.type !== "delete-sales") return;
-    setDeleteLoading(true);
-    setActionError(null);
-    try {
-      await disableSalesperson(panelAction.user.id);
-      setPanelAction(null);
-      setSuccessMessage("业务员已停用。");
-      await reload();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "停用业务员失败。");
     } finally {
       setDeleteLoading(false);
     }
@@ -476,14 +454,6 @@ export function AdminProductsPanel() {
         onSaved={() => void handleSaved("品牌权限已更新。")}
       />
 
-      <TransferBrandsDrawer
-        open={panelAction?.type === "transfer-sales"}
-        user={panelAction?.type === "transfer-sales" ? panelAction.user : null}
-        users={users}
-        onClose={() => setPanelAction(null)}
-        onTransferred={() => void handleSaved("品牌已转移，可继续停用或删除业务员。")}
-      />
-
       <BrandFormDrawer
         open={panelAction?.type === "edit-brand"}
         brand={panelAction?.type === "edit-brand" ? panelAction.brand : null}
@@ -508,27 +478,17 @@ export function AdminProductsPanel() {
       <SalespersonDeleteDialog
         open={panelAction?.type === "delete-sales"}
         userName={panelAction?.type === "delete-sales" ? panelAction.user.display_name?.trim() || panelAction.user.username : ""}
-        hasRelatedData={
-          panelAction?.type === "delete-sales"
-            ? salespersonHasRelatedData(panelAction.user, panelAction.row)
-            : false
-        }
-        relatedBrandNames={
-          panelAction?.type === "delete-sales"
-            ? (panelAction.user.bound_products ?? []).map((product) => product.name)
-            : []
-        }
+        username={panelAction?.type === "delete-sales" ? panelAction.user.username : ""}
+        productCount={panelAction?.type === "delete-sales" ? panelAction.row.brandCount : 0}
+        taskCount={panelAction?.type === "delete-sales" ? panelAction.row.taskCount : 0}
+        influencerCount={panelAction?.type === "delete-sales" ? panelAction.row.influencerCount : 0}
+        emailCount={panelAction?.type === "delete-sales" ? panelAction.row.emailCount : 0}
+        replyCount={panelAction?.type === "delete-sales" ? panelAction.row.replyCount : 0}
         error={panelAction?.type === "delete-sales" ? actionError : null}
         loading={deleteLoading}
         onCancel={() => {
           setPanelAction(null);
           setActionError(null);
-        }}
-        onDisable={() => void handleDisableSalespersonFromDelete()}
-        onTransfer={() => {
-          if (panelAction?.type !== "delete-sales") return;
-          setActionError(null);
-          setPanelAction({ type: "transfer-sales", user: panelAction.user });
         }}
         onDelete={() => void handleDeleteSalesperson()}
       />

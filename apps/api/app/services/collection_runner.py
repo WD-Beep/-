@@ -734,6 +734,50 @@ class CollectionRunnerService:
         return rows
 
     @staticmethod
+    async def _persist_inserted_candidate_snapshot(
+        db: AsyncSession,
+        task: CollectionTask,
+        candidate_rows: list[dict],
+        *,
+        run_at: datetime,
+    ) -> int:
+        inserted_rows = [
+            row for row in candidate_rows if row.get("status") == CandidateStatus.INSERTED.value
+        ]
+        if not inserted_rows:
+            return 0
+        await TaskCandidateService.clear_for_task(db, task.id)
+        await TaskCandidateService.bulk_insert(
+            db,
+            task.id,
+            inserted_rows,
+            run_at=run_at,
+            product_id=task.product_id,
+            user_id=task.user_id,
+        )
+        await db.flush()
+        await TaskCandidateService.sync_task_inserted_stats(db, task)
+        return len(inserted_rows)
+
+    @staticmethod
+    def _should_skip_checkpointed_item(
+        *,
+        resume: bool,
+        product_record: ProductInfluencer | None,
+    ) -> bool:
+        if not resume:
+            return True
+        return bool(product_record and product_record.is_inserted)
+
+    @staticmethod
+    async def _resume_inserted_count(db: AsyncSession, task: CollectionTask) -> int:
+        return await TaskCandidateService.count_by_status(
+            db,
+            task.id,
+            status=CandidateStatus.INSERTED.value,
+        )
+
+    @staticmethod
     def _normalize_item_urls(data: CollectedInfluencer) -> None:
         from app.services.instagram_urls import sanitize_url_text
 
@@ -1721,7 +1765,7 @@ class CollectionRunnerService:
                 skipped_count = task.skipped_count or 0
                 filtered_count = task.failed_count or 0
                 new_count = 0
-                updated_count = task.success_count or 0
+                updated_count = await CollectionRunnerService._resume_inserted_count(db, task)
 
             for item in collected:
                 if target_reached:
@@ -1732,6 +1776,7 @@ class CollectionRunnerService:
                         item.profile_url,
                         platform_unique_id=item.platform_unique_id,
                     ):
+                        product_record = None
                         if resume:
                             identity_key = identity_key_for_item(item)
                             product_record = product_map.get(identity_key)
@@ -1754,7 +1799,11 @@ class CollectionRunnerService:
                                 platform_outcomes[profile_key] = outcome
                                 if item.platform == "instagram":
                                     outcomes[user_key] = outcome
-                        continue
+                        if CollectionRunnerService._should_skip_checkpointed_item(
+                            resume=resume,
+                            product_record=product_record,
+                        ):
+                            continue
 
                     hard = evaluate_post_hydration_hard_filter(item, task)
                     user_key = (item.username or "").lower()
@@ -1987,6 +2036,29 @@ class CollectionRunnerService:
                                     outcome["global_influencer_id"] = pending.global_influencer_id
                         funnel.filtered_out_count = filtered_count
                         funnel.inserted_count = new_count + updated_count
+                        snapshot_rows = CollectionRunnerService._build_candidate_rows(
+                            task,
+                            pipeline_result,
+                            run_at=run_at,
+                            outcomes=outcomes,
+                            filtered_below=filtered_below_min,
+                            filtered_excluded=filtered_excluded,
+                        ) if pipeline_result else []
+                        if aggregate.platform_profiles:
+                            snapshot_rows.extend(
+                                CollectionRunnerService._build_platform_candidate_rows(
+                                    task,
+                                    aggregate.platform_profiles,
+                                    platform_outcomes,
+                                    run_at=run_at,
+                                )
+                            )
+                        await CollectionRunnerService._persist_inserted_candidate_snapshot(
+                            db,
+                            task,
+                            snapshot_rows,
+                            run_at=run_at,
+                        )
                         logger.info(
                             "[Persist] batch commit processed=%d/%d inserted=%d updated=%d "
                             "skipped=%d filtered=%d persist_errors=%d",

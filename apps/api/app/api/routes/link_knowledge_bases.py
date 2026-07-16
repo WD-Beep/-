@@ -21,6 +21,7 @@ from app.models.link_knowledge_base import (
     LinkScriptJob,
     LinkScriptResult,
 )
+from app.models.message_template import MessageTemplate
 from app.schemas.common import PaginatedResponse
 from app.schemas.link_knowledge_base import (
     LinkKnowledgeBaseCreate,
@@ -273,6 +274,43 @@ def _job_config(payload: LinkScriptGenerateRequest | LinkScriptRegenerateRequest
         "collaboration_type": payload.collaboration_type or (base.collaboration_type if base else "gifted_collab"),
         "script_types": getattr(payload, "script_types", None) or (base.script_types if base else []),
         "extra_instruction": payload.extra_instruction if payload.extra_instruction is not None else (base.extra_instruction if base else None),
+        "message_template_id": payload.message_template_id if payload.message_template_id is not None else (base.message_template_id if base else None),
+    }
+
+
+async def _load_message_template_config(
+    db: AsyncSession,
+    *,
+    product_id: int,
+    template_id: int | None,
+) -> dict[str, Any] | None:
+    if template_id is None:
+        template = await db.scalar(
+            select(MessageTemplate)
+            .where(MessageTemplate.product_id == product_id)
+            .order_by(
+                MessageTemplate.is_default.desc(),
+                MessageTemplate.usage_count.desc(),
+                MessageTemplate.updated_at.desc(),
+            )
+            .limit(1)
+        )
+    else:
+        template = await db.scalar(
+            select(MessageTemplate).where(
+                MessageTemplate.id == template_id,
+                MessageTemplate.product_id == product_id,
+            )
+        )
+        if not template:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="话术模板不存在")
+    if not template:
+        return None
+    return {
+        "id": template.id,
+        "title": template.title,
+        "content": template.content,
+        "generation_rules": template.generation_rules or {},
     }
 
 
@@ -285,10 +323,16 @@ async def generate_link_scripts(
 ) -> LinkScriptJobRead:
     product_id = require_write_product_id(ctx)
     base = await _load_base(db, base_id, product_id)
+    template_config = await _load_message_template_config(
+        db,
+        product_id=product_id,
+        template_id=payload.message_template_id,
+    )
     job = LinkScriptJob(
         workspace_id=ctx.workspace_id,
         link_knowledge_base_id=base.id,
         product_id=product_id,
+        message_template_id=template_config["id"] if template_config else None,
         name=payload.name or f"{base.name} script job",
         status="running",
         total_count=len(payload.influencer_ids),
@@ -302,6 +346,7 @@ async def generate_link_scripts(
     db.add(job)
     await db.flush()
     config = _job_config(payload)
+    config["message_template"] = template_config
     for influencer_id in payload.influencer_ids:
         pair = await ProductInfluencerService.get_product_influencer(db, product_id=product_id, record_id=influencer_id)
         if not pair:
@@ -471,6 +516,14 @@ async def regenerate_link_script_result(
     else:
         product_row, global_row = pair
         config = _job_config(payload, job)
+        template_config = await _load_message_template_config(
+            db,
+            product_id=job.product_id or ctx.product_id,
+            template_id=config.get("message_template_id"),
+        )
+        config["message_template"] = template_config
+        if payload.message_template_id is not None:
+            job.message_template_id = payload.message_template_id
         try:
             generated, snapshot = await link_script_generator.generate_scripts_for_influencer(
                 db, base, product_row, global_row, config

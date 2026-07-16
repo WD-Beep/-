@@ -14,6 +14,7 @@ import {
   fetchEmailReplies,
   fetchInfluencers,
   pollImapInbox,
+  rematchEmailReply,
   sendEmailReplyResponse,
   updateEmailReply,
   type EmailReply,
@@ -94,10 +95,10 @@ export function EmailRepliesPanel() {
     setLoading(true);
     setError(null);
     try {
-      const [replyData, influencerData] = await Promise.all([
-        fetchEmailReplies({ page: 1, pageSize: PAGE_SIZE }),
-        fetchInfluencers(1, 100, { hasEmail: true }),
-      ]);
+      const replyData = await fetchEmailReplies({ page: 1, pageSize: PAGE_SIZE });
+      const influencerData = await fetchInfluencers(1, 100, { hasEmail: true }).catch(() => ({
+        items: [],
+      }));
       setReplies(replyData.items);
       setInfluencers(influencerData.items);
       setSelectedReplyIds(new Set());
@@ -212,6 +213,48 @@ export function EmailRepliesPanel() {
       }),
     );
     setResponseDraftGenerated(true);
+  }
+
+  async function rematchReplyForAction(reply: EmailReply): Promise<EmailReply> {
+    if (reply.product_influencer_id || requiresProduct) return reply;
+    setActionId(reply.id);
+    setError(null);
+    setNotice(null);
+    try {
+      const updated = await rematchEmailReply(reply.id);
+      setReplies((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      if (expanded?.id === updated.id) setExpanded(updated);
+      return updated;
+    } finally {
+      setActionId(null);
+    }
+  }
+
+  async function openInfluencerInfo(reply: EmailReply) {
+    try {
+      const target = await rematchReplyForAction(reply);
+      if (target.product_influencer_id) {
+        window.location.href = `/influencers/${target.product_influencer_id}`;
+        return;
+      }
+      setNotice("暂未找到对应红人信息，可稍后刷新或检查原发送记录。");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "暂未找到对应红人信息");
+    }
+  }
+
+  async function openSocialLink(reply: EmailReply) {
+    try {
+      const target = await rematchReplyForAction(reply);
+      const influencer = target.product_influencer_id ? influencerMap.get(target.product_influencer_id) : null;
+      if (influencer?.profile_url) {
+        window.open(influencer.profile_url, "_blank", "noopener,noreferrer");
+        return;
+      }
+      setNotice("暂未找到对应红人信息或社媒链接，可稍后刷新或检查原发送记录。");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "暂未找到对应红人信息");
+    }
   }
 
   function openNoteEditor(reply: EmailReply) {
@@ -500,6 +543,26 @@ export function EmailRepliesPanel() {
                             <Button size="sm" variant={reply.viewed_at ? "outline" : "default"} onClick={() => void openReplyDetail(reply)}>
                               查看
                             </Button>
+                            {influencer ? (
+                              <Button size="sm" variant="outline" asChild>
+                                <Link href={`/influencers/${influencer.id}`}>查看红人信息</Link>
+                              </Button>
+                            ) : (
+                              <Button size="sm" variant="outline" disabled={actionId === reply.id} onClick={() => void openInfluencerInfo(reply)}>
+                                查看红人信息
+                              </Button>
+                            )}
+                            {influencer?.profile_url ? (
+                              <Button size="sm" variant="outline" asChild>
+                                <a href={influencer.profile_url} target="_blank" rel="noreferrer">
+                                  查看社媒链接
+                                </a>
+                              </Button>
+                            ) : (
+                              <Button size="sm" variant="outline" disabled={actionId === reply.id} onClick={() => void openSocialLink(reply)}>
+                                查看社媒链接
+                              </Button>
+                            )}
                             <Button size="sm" variant="outline" onClick={() => void openReplyComposer(reply)}>
                               回复
                             </Button>
@@ -587,9 +650,31 @@ export function EmailRepliesPanel() {
                       {expanded.from_address}
                     </p>
                   </div>
-                  {isGenericReplyAddress(expanded.from_address) ? (
-                    <Badge variant="warning">这是通用邮箱，请确认对方身份</Badge>
-                  ) : null}
+                  <div className="flex flex-wrap items-center gap-2">
+                    {expanded.product_influencer_id && influencerMap.get(expanded.product_influencer_id) ? (
+                      <>
+                        <Button size="sm" variant="outline" asChild>
+                          <Link href={`/influencers/${influencerMap.get(expanded.product_influencer_id)!.id}`}>
+                            查看红人信息
+                          </Link>
+                        </Button>
+                        {influencerMap.get(expanded.product_influencer_id)!.profile_url ? (
+                          <Button size="sm" variant="outline" asChild>
+                            <a
+                              href={influencerMap.get(expanded.product_influencer_id)!.profile_url}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              查看社媒链接
+                            </a>
+                          </Button>
+                        ) : null}
+                      </>
+                    ) : null}
+                    {isGenericReplyAddress(expanded.from_address) ? (
+                      <Badge variant="warning">这是通用邮箱，请确认对方身份</Badge>
+                    ) : null}
+                  </div>
                 </div>
                 {!expanded.product_influencer_id ? (
                   <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 from app.schemas.common import ORMModel
 
@@ -28,9 +28,32 @@ class LinkKnowledgeBaseUpdate(BaseModel):
     url: HttpUrl | None = None
     summary: str | None = None
     extracted_knowledge: dict[str, Any] | None = None
+    manual_selling_points: list[str] | None = Field(default=None, max_length=100)
     tags: list[str] | None = None
     is_active: bool | None = None
     reparse: bool = False
+
+    @field_validator("manual_selling_points")
+    @classmethod
+    def normalize_manual_selling_points(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for raw in value:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            if len(text) > 500:
+                raise ValueError("每条产品卖点不能超过 500 个字符")
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(text)
+        if len(normalized) > 100:
+            raise ValueError("产品卖点最多支持 100 条")
+        return normalized
 
 
 class LinkKnowledgeChunkRead(ORMModel):
@@ -60,6 +83,7 @@ class LinkKnowledgeBaseRead(ORMModel):
     parse_status: str | None
     summary: str | None
     extracted_knowledge: dict[str, Any] | None
+    manual_selling_points: list[str]
     tags: list[str] | None
     is_active: bool
     created_at: datetime
@@ -77,6 +101,7 @@ class LinkScriptGenerateRequest(BaseModel):
     collaboration_type: str = "gifted_collab"
     script_types: list[str] = Field(default_factory=lambda: list(DEFAULT_SCRIPT_TYPES))
     extra_instruction: str | None = None
+    message_template_id: int | None = None
 
 
 class LinkScriptJobRead(ORMModel):
@@ -84,6 +109,7 @@ class LinkScriptJobRead(ORMModel):
     workspace_id: int
     link_knowledge_base_id: int
     product_id: int | None
+    message_template_id: int | None
     name: str
     status: str
     total_count: int
@@ -131,3 +157,4 @@ class LinkScriptRegenerateRequest(BaseModel):
     language: str | None = None
     collaboration_type: str | None = None
     extra_instruction: str | None = None
+    message_template_id: int | None = None

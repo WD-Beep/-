@@ -306,6 +306,9 @@ class CollectionTaskBase(BaseModel):
     outreach_templates: dict[str, str] = Field(default_factory=dict)
     last_run_at: datetime | None = None
     next_run_at: datetime | None = None
+    worker_id: str | None = None
+    heartbeat_at: datetime | None = None
+    run_started_at: datetime | None = None
     result_count: int = Field(default=0, ge=0)
     email_count: int = Field(default=0, ge=0)
     missing_contact_count: int = Field(default=0, ge=0)
@@ -675,6 +678,8 @@ class CollectionTaskRead(CollectionTaskBase, TimestampMixin, ORMModel):
     stale: bool = False
     recoverable: bool = False
     stale_after_seconds: int = Field(default=0, ge=0)
+    queue_position: int | None = None
+    queue_reason_labels: list[str] = Field(default_factory=list)
     is_ineffective: bool = False
     effectiveness_category: Literal["high_value", "effective", "low_value_result", "no_result", "failed"] = "no_result"
     has_retention_traces: bool = False

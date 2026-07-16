@@ -28,7 +28,10 @@ def _parse_json_content(content: str) -> dict[str, Any]:
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
-    parsed = json.loads(text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = json.loads(text, strict=False)
     if not isinstance(parsed, dict):
         raise ValueError(f"{_ai_provider_label()} 返回的 JSON 不是对象")
     return parsed

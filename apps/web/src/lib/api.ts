@@ -5,7 +5,7 @@ const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "/api-proxy").replace(/\/$/,
 const SERVER_API_URL =
   process.env.INTERNAL_API_URL?.replace(/\/$/, "") ?? "http://127.0.0.1:8000";
 const LONG_RUNNING_API_URL =
-  process.env.NEXT_PUBLIC_LONG_RUNNING_API_URL?.replace(/\/$/, "") ?? API_URL;
+  process.env.NEXT_PUBLIC_LONG_RUNNING_API_URL?.replace(/\/$/, "") ?? "/api-long";
 
 const API_FETCH_TIMEOUT_MS = 30_000;
 const PREVIEW_FETCH_TIMEOUT_MS = 600_000;
@@ -269,11 +269,15 @@ export type CollectionTaskStatus =
   | "pending"
   | "queued"
   | "running"
+  | "rate_limited"
+  | "stopping"
   | "completed"
   | "completed_with_results"
   | "completed_no_results"
   | "partial_failed"
   | "failed"
+  | "timeout"
+  | "stale"
   | "paused";
 
 export type CollectionMode =
@@ -317,6 +321,9 @@ export type PlatformCapabilitiesResponse = {
   tiktok_data_provider?: string;
   facebook_data_provider?: string;
   collection_max_running_tasks?: number;
+  collection_max_concurrency_per_user?: number;
+  collection_max_concurrency_per_platform?: number;
+  collection_worker_count?: number;
   collection_profile_enrich_concurrency?: number;
   collection_profile_request_timeout_seconds?: number;
   collection_running_stale_seconds?: number;
@@ -381,6 +388,11 @@ export type CollectionTask = {
   current_stage: string | null;
   last_error: string | null;
   run_checkpoint: Record<string, unknown>;
+  worker_id?: string | null;
+  heartbeat_at?: string | null;
+  run_started_at?: string | null;
+  queue_position?: number | null;
+  queue_reason_labels?: string[];
   stale: boolean;
   recoverable: boolean;
   stale_after_seconds: number;
@@ -536,6 +548,8 @@ const COLLECTION_TASK_TERMINAL_STATUSES: CollectionTaskStatus[] = [
   "completed_no_results",
   "partial_failed",
   "failed",
+  "timeout",
+  "stale",
 ];
 
 export function isCollectionTaskSettled(status: CollectionTaskStatus): boolean {
@@ -543,7 +557,7 @@ export function isCollectionTaskSettled(status: CollectionTaskStatus): boolean {
 }
 
 export function isCollectionTaskRunning(task: CollectionTask): boolean {
-  return task.status === "running";
+  return task.status === "running" || task.status === "rate_limited" || task.status === "stopping";
 }
 
 export function isCollectionTaskQueued(task: CollectionTask): boolean {
@@ -559,7 +573,7 @@ export function isCollectionTaskActive(task: CollectionTask): boolean {
 }
 
 export function getCollectionTaskRunningReferenceAt(task: CollectionTask): string | null {
-  return task.last_run_at ?? task.updated_at ?? task.created_at;
+  return task.heartbeat_at ?? task.last_run_at ?? task.updated_at ?? task.created_at;
 }
 
 export function getCollectionTaskRunningElapsedMs(task: CollectionTask, now = Date.now()): number {
@@ -569,16 +583,27 @@ export function getCollectionTaskRunningElapsedMs(task: CollectionTask, now = Da
 }
 
 export function isCollectionTaskRunningStale(task: CollectionTask): boolean {
-  if (!isCollectionTaskRunning(task)) return false;
-  return task.recoverable === true || task.stale === true;
+  if (!isCollectionTaskRunning(task) && task.status !== "stale") return false;
+  return task.recoverable === true || task.stale === true || task.status === "stale";
 }
 
 export function isCollectionTaskRateLimited(task: CollectionTask): boolean {
+  if (task.status === "rate_limited") return true;
   const checkpoint = task.run_checkpoint ?? {};
   if (checkpoint.rate_limited === true) return true;
   const haystack = `${task.last_error ?? ""} ${task.status_summary ?? ""} ${task.error_message ?? ""}`;
-  return /429|闄愭祦|rate.?limit/i.test(haystack);
+  return /429|限流|rate.?limit/i.test(haystack);
 }
+
+export type CollectionConcurrencyStatus = {
+  global_running: number;
+  global_capacity: number;
+  user_running: number;
+  user_capacity: number;
+  platform_capacity: number;
+  queued_count: number;
+  worker_count: number;
+};
 
 export function getCollectionTaskTargetCount(task: CollectionTask): number {
   return Math.max(1, task.discovery_limit ?? 100);
@@ -754,6 +779,10 @@ export type EmailLog = {
   id: number;
   task_id: number | null;
   product_influencer_id: number | null;
+  sender_user_id?: number | null;
+  smtp_account_id?: number | null;
+  sender_source?: string | null;
+  follow_up_index?: number | null;
   sender_email: string | null;
   influencer_username: string | null;
   recipients: string[];
@@ -797,6 +826,15 @@ export type EmailLogBulkDeleteResult = {
   missing_ids: number[];
 };
 
+export type BulkSecondFollowUpResult = {
+  requested_count: number;
+  created_count: number;
+  skipped_count: number;
+  created_record_ids: number[];
+  queue_item_ids: number[];
+  skip_reasons: Record<number, string>;
+};
+
 export type InboundEmailStatus = {
   configured: boolean;
   imap_configured: boolean;
@@ -807,6 +845,45 @@ export type InboundEmailStatus = {
   imap_folder: string | null;
   imap_poll_enabled: boolean;
   message: string;
+};
+
+export type UserSmtpAccount = {
+  id: number;
+  user_id: number;
+  provider: string;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_user: string;
+  smtp_from: string;
+  smtp_from_name: string | null;
+  use_tls: boolean;
+  imap_host: string | null;
+  imap_port: number | null;
+  imap_user: string | null;
+  imap_use_ssl: boolean;
+  enabled: boolean;
+  verified_at: string | null;
+  last_tested_at: string | null;
+  last_error: string | null;
+  has_password: boolean;
+  has_imap_password: boolean;
+};
+
+export type UserSmtpAccountStatus = {
+  configured: boolean;
+  source: string;
+  sender_email: string | null;
+  account: UserSmtpAccount | null;
+};
+
+export type UserSmtpAccountPayload = {
+  provider?: string | null;
+  smtp_user: string;
+  smtp_password?: string | null;
+  imap_password?: string | null;
+  imap_same_as_smtp?: boolean;
+  smtp_from_name?: string | null;
+  enabled?: boolean;
 };
 
 export type EmailReply = {
@@ -1074,6 +1151,9 @@ export function cleanBackendErrorMessage(message: string): string {
   }
   if (/Method Not Allowed/i.test(cleaned)) {
     return "请求方法不被允许，请检查接口是否支持该操作。";
+  }
+  if (/Admin access required|Forbidden|403/i.test(cleaned)) {
+    return "管理员登录状态已失效或被业务员账号覆盖，请重新登录后台后再操作。";
   }
   if (/[\u4e00-\u9fff]/.test(cleaned)) {
     return cleaned;
@@ -1406,6 +1486,16 @@ export async function analyzeInfluencer(id: number): Promise<AnalyzeInfluencerRe
 
 export async function fetchPlatformCapabilities(): Promise<PlatformCapabilitiesResponse> {
   const response = await apiFetch(`${API_URL}/api/collection-tasks/platform-capabilities`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function fetchCollectionConcurrencyStatus(): Promise<CollectionConcurrencyStatus> {
+  const response = await apiFetch(`${API_URL}/api/collection-tasks/concurrency-status`, {
     cache: "no-store",
   });
   if (!response.ok) {
@@ -1949,6 +2039,18 @@ export async function stopOutreachRecordFollowUp(
   return response.json();
 }
 
+export async function bulkSecondFollowUpOutreachRecords(recordIds: number[]): Promise<BulkSecondFollowUpResult> {
+  const response = await apiFetch(`${API_URL}/api/outreach-records/bulk-second-follow-up`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ record_ids: recordIds }),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
 export async function markOutreachRecordReplied(recordId: number): Promise<EmailLog> {
   const response = await apiFetch(`${API_URL}/api/outreach-records/${recordId}/mark-replied`, {
     method: "POST",
@@ -2017,6 +2119,37 @@ export async function fetchEmailReplyWorkCount(): Promise<EmailReplyWorkCount> {
   return response.json();
 }
 
+export async function fetchMySmtpAccount(): Promise<UserSmtpAccountStatus> {
+  const response = await apiFetch(`${API_URL}/api/smtp-accounts/me`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function saveMySmtpAccount(payload: UserSmtpAccountPayload): Promise<UserSmtpAccount> {
+  const response = await apiFetch(`${API_URL}/api/smtp-accounts/me`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function testMySmtpAccount(recipient?: string): Promise<EmailTestResponse> {
+  const search = recipient ? `?recipient=${encodeURIComponent(recipient)}` : "";
+  const response = await apiFetch(`${API_URL}/api/smtp-accounts/me/test${search}`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
 export async function updateEmailReply(
   replyId: number,
   payload: {
@@ -2032,6 +2165,16 @@ export async function updateEmailReply(
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function rematchEmailReply(replyId: number): Promise<EmailReply> {
+  const response = await apiFetch(`${API_URL}/api/email-inbound/replies/${replyId}/rematch`, {
+    method: "POST",
   });
   if (!response.ok) {
     throw new Error(await parseError(response));
@@ -2106,8 +2249,9 @@ export async function pollImapInbox(markSeen = false): Promise<{
   failed: number;
 }> {
   const response = await apiFetch(
-    `${API_URL}/api/email-inbound/poll-imap?mark_seen=${markSeen ? "true" : "false"}`,
+    `${LONG_RUNNING_API_URL}/api/email-inbound/poll-imap?mark_seen=${markSeen ? "true" : "false"}`,
     { method: "POST" },
+    { timeoutMs: PREVIEW_FETCH_TIMEOUT_MS },
   );
   if (!response.ok) {
     throw new Error(await parseError(response));
@@ -2389,6 +2533,17 @@ export type AdminUserUpdatePayload = {
   is_active?: boolean;
 };
 
+export type AdminUserDeleteResult = {
+  success: boolean;
+  deleted_user_id: number;
+  released_products: number;
+  released_tasks: number;
+  cancelled_campaigns: number;
+  cancelled_queue_items: number;
+  preserved_history_records: boolean;
+  preserved_history_count: number;
+};
+
 export type AdminProductMember = {
   user_id: number;
   username: string;
@@ -2523,13 +2678,18 @@ export async function updateAdminUser(userId: number, payload: AdminUserUpdatePa
   return response.json();
 }
 
-export async function deleteAdminUser(userId: number): Promise<void> {
-  const response = await apiFetch(`${API_URL}/api/admin/users/${userId}`, {
-    method: "DELETE",
-  });
+export async function deleteAdminUser(userId: number): Promise<AdminUserDeleteResult> {
+  const response = await apiFetch(
+    `${LONG_RUNNING_API_URL}/api/admin/users/${userId}`,
+    {
+      method: "DELETE",
+    },
+    { timeoutMs: PREVIEW_FETCH_TIMEOUT_MS },
+  );
   if (!response.ok) {
     throw new Error(await parseError(response));
   }
+  return response.json();
 }
 
 export async function setAdminUserProducts(userId: number, productIds: number[]): Promise<AdminUser> {
@@ -2670,11 +2830,26 @@ export type MessageTemplate = {
   tags: string[];
   content: string;
   note: string | null;
+  generation_rules: MessageTemplateGenerationRules;
+  is_default: boolean;
+  source_filename: string | null;
   usage_count: number;
   last_used_at: string | null;
   created_at: string;
   updated_at: string;
   is_system_default?: boolean;
+};
+
+export type MessageTemplateGenerationRules = {
+  tone?: string | null;
+  language?: string | null;
+  min_length?: number | null;
+  max_length?: number | null;
+  subject_format?: string | null;
+  body_structure?: string | null;
+  required_content?: string[];
+  forbidden_content?: string[];
+  cta?: string | null;
 };
 
 export type MessageTemplatePayload = {
@@ -2685,6 +2860,9 @@ export type MessageTemplatePayload = {
   tags?: string[];
   content: string;
   note?: string | null;
+  generation_rules?: MessageTemplateGenerationRules;
+  is_default?: boolean;
+  source_filename?: string | null;
 };
 
 export type MessageTemplateListParams = {
@@ -2756,6 +2934,19 @@ export async function deleteMessageTemplate(id: number): Promise<void> {
   }
 }
 
+export async function parseMessageTemplateUpload(file: File): Promise<{ filename: string; content: string }> {
+  const form = new FormData();
+  form.append("file", file);
+  const response = await apiFetch(`${API_URL}/api/message-templates/parse-upload`, {
+    method: "POST",
+    body: form,
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
 export async function recordMessageTemplateUse(id: number): Promise<MessageTemplate> {
   const response = await apiFetch(`${API_URL}/api/message-templates/${id}/use`, {
     method: "POST",
@@ -2815,6 +3006,7 @@ export type LinkKnowledgeBase = {
   parse_status: string | null;
   summary: string | null;
   extracted_knowledge: Record<string, unknown> | null;
+  manual_selling_points: string[];
   tags: string[] | null;
   is_active: boolean;
   created_at: string;
@@ -2837,6 +3029,7 @@ export type UpdateLinkKnowledgeBasePayload = {
   url?: string | null;
   summary?: string | null;
   extracted_knowledge?: Record<string, unknown> | null;
+  manual_selling_points?: string[] | null;
   tags?: string[] | null;
   is_active?: boolean;
   reparse?: boolean;
@@ -2850,6 +3043,7 @@ export type GenerateLinkScriptsPayload = {
   collaboration_type?: string;
   script_types?: string[];
   extra_instruction?: string | null;
+  message_template_id?: number | null;
 };
 
 export type LinkScriptJob = {
@@ -2857,6 +3051,7 @@ export type LinkScriptJob = {
   workspace_id: number;
   link_knowledge_base_id: number;
   product_id: number | null;
+  message_template_id: number | null;
   name: string;
   status: string;
   total_count: number;
@@ -3141,7 +3336,7 @@ export async function sendInfluencerOutreachEmail(
 export type OutreachSendQueueItem = {
   id: number;
   product_id: number;
-  user_id: number;
+  user_id: number | null;
   product_influencer_id: number;
   recipient: string;
   sender_email: string | null;
@@ -3411,7 +3606,7 @@ export async function clearFailedOutreachQueue(): Promise<OutreachSendQueueClear
 export type OutreachCampaign = {
   id: number;
   product_id: number;
-  user_id: number;
+  user_id: number | null;
   name: string;
   status: string;
   knowledge_base_id: number | null;
@@ -4004,7 +4199,7 @@ export async function updateLinkKnowledgeBase(
 
 export async function refreshLinkKnowledgeBase(id: number): Promise<LinkKnowledgeBase> {
   const response = await apiFetch(
-    `${API_URL}/api/link-knowledge-bases/${id}/refresh`,
+    `${LONG_RUNNING_API_URL}/api/link-knowledge-bases/${id}/refresh`,
     { method: "POST" },
     { timeoutMs: PREVIEW_FETCH_TIMEOUT_MS },
   );
@@ -4031,7 +4226,7 @@ export async function generateLinkScripts(
   payload: GenerateLinkScriptsPayload,
 ): Promise<LinkScriptJob> {
   const response = await apiFetch(
-    `${API_URL}/api/link-knowledge-bases/${id}/generate-scripts`,
+    `${LONG_RUNNING_API_URL}/api/link-knowledge-bases/${id}/generate-scripts`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -4128,7 +4323,7 @@ export async function regenerateLinkScript(
   payload: RegenerateLinkScriptPayload = {},
 ): Promise<LinkScriptResult> {
   const response = await apiFetch(
-    `${API_URL}/api/link-script-results/${id}/regenerate`,
+    `${LONG_RUNNING_API_URL}/api/link-script-results/${id}/regenerate`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

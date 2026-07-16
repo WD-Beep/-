@@ -316,8 +316,7 @@ function SalespersonFormDrawerContent({
   async function performSave() {
     setSubmitting(true);
     setError(null);
-    const contact = email.trim();
-    const emailPayload = contact.includes("@") ? contact : null;
+    const emailPayload = email.trim() || null;
     try {
       if (mode === "create") {
         await createAdminUser({
@@ -452,8 +451,8 @@ function SalespersonFormDrawerContent({
               <input className={fieldClass} value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="后台展示名称" />
             </label>
             <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
-              邮箱 / 手机
-              <input className={fieldClass} value={email ?? ""} onChange={(e) => setEmail(e.target.value)} placeholder="可选" />
+              邮箱 / 手机 / 联系方式
+              <input className={fieldClass} value={email ?? ""} onChange={(e) => setEmail(e.target.value)} placeholder="邮箱、手机号、微信号或内部账号（选填）" maxLength={255} />
             </label>
             <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
               状态
@@ -985,79 +984,81 @@ export function AdminDeleteConfirmDialog({
 export function SalespersonDeleteDialog({
   open,
   userName,
-  hasRelatedData,
-  relatedBrandNames = [],
+  username,
+  productCount,
+  taskCount,
+  influencerCount,
+  emailCount,
+  replyCount,
   error,
   loading,
   onCancel,
-  onDisable,
-  onTransfer,
   onDelete,
 }: {
   open: boolean;
   userName: string;
-  hasRelatedData: boolean;
-  relatedBrandNames?: string[];
+  username: string;
+  productCount: number;
+  taskCount: number;
+  influencerCount: number;
+  emailCount: number;
+  replyCount: number;
   error?: string | null;
   loading?: boolean;
   onCancel: () => void;
-  onDisable: () => void;
-  onTransfer: () => void;
   onDelete: () => void;
 }) {
   if (!open) return null;
+
+  const hasOtherHistory = influencerCount > 0 || emailCount > 0 || replyCount > 0;
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-[#102033]/50 p-4 backdrop-blur-[1px]">
       <div className="w-full max-w-md rounded-xl border border-[#D8E2EE] bg-white p-5 shadow-[0_24px_64px_rgba(16,32,51,0.18)]">
         <h3 className="text-base font-semibold text-[#102033]">删除业务员 · {userName}</h3>
-        {hasRelatedData ? (
-          <p className="mt-2 text-sm leading-6 text-[#667085]">
-            该业务员仍有关联数据，请先转移品牌/任务，或选择停用账号。当前不允许直接硬删除。
-            {relatedBrandNames.length > 0 ? (
-              <span className="mt-2 block text-[#B42318]">
-                关联品牌：{relatedBrandNames.join("、")}
-              </span>
-            ) : null}
+        <p className="mt-2 text-sm leading-6 text-[#667085]">
+          删除后账号无法恢复；品牌和任务将变为未分配，邮件、红人、回复和发送历史会保留。
+        </p>
+        <dl className="mt-4 grid grid-cols-2 gap-3 rounded-lg border border-[#E5ECF4] bg-[#F8FAFD] p-4 text-sm">
+          <div>
+            <dt className="text-[#667085]">登录账号</dt>
+            <dd className="mt-1 font-medium text-[#102033]">{username}</dd>
+          </div>
+          <div>
+            <dt className="text-[#667085]">关联品牌</dt>
+            <dd className="mt-1 font-medium text-[#102033]">{productCount}</dd>
+          </div>
+          <div>
+            <dt className="text-[#667085]">关联任务</dt>
+            <dd className="mt-1 font-medium text-[#102033]">{taskCount}</dd>
+          </div>
+          <div>
+            <dt className="text-[#667085]">其他历史数据</dt>
+            <dd className="mt-1 font-medium text-[#102033]">{hasOtherHistory ? "存在，将保留" : "无"}</dd>
+          </div>
+        </dl>
+        {hasOtherHistory ? (
+          <p className="mt-3 text-xs text-[#667085]">
+            红人 {influencerCount}、邮件 {emailCount}、回复 {replyCount}
           </p>
-        ) : (
-          <p className="mt-2 text-sm leading-6 text-[#667085]">确认删除该业务员账号？删除后不可恢复，也可改为停用账号。</p>
-        )}
+        ) : null}
         {error ? (
           <div className="mt-3 rounded-md border border-[#FECDCA] bg-[#FEF3F2] px-3 py-2 text-sm text-[#B42318]">
             {error}
           </div>
         ) : null}
-        <div className="mt-5 flex flex-col gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            disabled={loading}
-            onClick={onDisable}
-            className="justify-start"
-          >
-            停用业务员
+        <div className="mt-5 flex justify-end gap-2">
+          <Button type="button" variant="outline" disabled={loading} onClick={onCancel}>
+            取消
           </Button>
           <Button
             type="button"
-            variant="outline"
             disabled={loading}
-            onClick={onTransfer}
-            className="justify-start"
-          >
-            转移名下品牌给其他业务员
-          </Button>
-          <Button
-            type="button"
-            disabled={loading || hasRelatedData}
             onClick={onDelete}
-            className="justify-start bg-[#B42318] text-white hover:bg-[#912018] disabled:opacity-50"
+            className="bg-[#B42318] text-white hover:bg-[#912018] disabled:opacity-50"
           >
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-            {hasRelatedData ? "确认无关联数据后删除（当前不可用）" : "确认删除"}
-          </Button>
-          <Button type="button" variant="ghost" disabled={loading} onClick={onCancel}>
-            取消
+            确认删除
           </Button>
         </div>
       </div>
@@ -1070,7 +1071,7 @@ export async function disableSalesperson(userId: number) {
 }
 
 export async function deleteSalespersonSafely(userId: number) {
-  await deleteAdminUser(userId);
+  return deleteAdminUser(userId);
 }
 
 export async function deleteBrandSafely(brand: AdminProduct) {
@@ -1487,7 +1488,7 @@ function WorkbenchSalespersonDrawerContent({
     <AdminDrawer
       open={open}
       title={`编辑业务员 · ${user.username}`}
-      description="修改登录账号、显示名称、邮箱和账号状态。"
+      description="修改登录账号、显示名称、联系方式和账号状态。"
       onClose={onClose}
     >
       <form onSubmit={submit} className="space-y-4">
@@ -1501,8 +1502,8 @@ function WorkbenchSalespersonDrawerContent({
           <AdminInput value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="例如 张三" />
         </label>
         <label className="grid gap-1.5 text-sm font-medium text-[#344054]">
-          邮箱
-          <AdminInput type="email" value={email ?? ""} onChange={(event) => setEmail(event.target.value)} />
+          邮箱 / 手机 / 联系方式
+          <AdminInput value={email ?? ""} onChange={(event) => setEmail(event.target.value)} maxLength={255} />
         </label>
         <AdminFilterField label="状态">
           <AdminSelect value={isActive ? "active" : "disabled"} onChange={(event) => setIsActive(event.target.value === "active")}>

@@ -12,6 +12,8 @@ import {
   buildOneClickCampaignPayload,
   buildOutreachCampaignResultUrl,
   buildOutreachCampaignsUrl,
+  filterEmailableInfluencerIds,
+  withRequiredOutreachEmailFilter,
   resolveCurrentPageSelectedIds,
   resolveBulkDeleteSelection,
   resolveBulkOutreachSelection,
@@ -72,6 +74,36 @@ test("buildOutreachCampaignsUrl tags selected recipients with product id", () =>
   const url = buildOutreachCampaignsUrl({ ids: [11, 9, 3], productId: 2 });
   assert.match(url, /product_id=2/);
   assert.match(url, /ids=11%2C9%2C3/);
+});
+
+test("filterEmailableInfluencerIds keeps only selected influencers with a usable email", () => {
+  const ids = filterEmailableInfluencerIds([1, 2, 3, 4, 5], [
+    { id: 1, final_email: null, business_email: null, public_email: null, email: null },
+    { id: 2, final_email: "final@example.com", business_email: null, public_email: null, email: null },
+    { id: 3, final_email: null, business_email: "biz@example.com", public_email: null, email: null },
+    { id: 4, final_email: null, business_email: null, public_email: "pub@example.com", email: null },
+    { id: 5, final_email: null, business_email: null, public_email: null, email: "legacy@example.com" },
+  ]);
+
+  assert.deepEqual(ids, [2, 3, 4, 5]);
+});
+
+test("withRequiredOutreachEmailFilter forces batch outreach to only preview emailable influencers", () => {
+  assert.deepEqual(
+    withRequiredOutreachEmailFilter({ platform: "instagram", hasEmail: false }),
+    { platform: "instagram", hasEmail: true },
+  );
+});
+
+test("buildOutreachCampaignsUrl requires email when selecting all filtered recipients", () => {
+  const url = buildOutreachCampaignsUrl({
+    selectAll: true,
+    total: 200,
+    filters: withRequiredOutreachEmailFilter({ platform: "youtube" }),
+  });
+
+  assert.match(url, /select_all=1/);
+  assert.match(url, /has_email=true/);
 });
 
 test("buildOutreachCampaignResultUrl preserves checked recipients after one-click send", () => {

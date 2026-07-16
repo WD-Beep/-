@@ -1,4 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from io import BytesIO
+from pathlib import Path
+import zipfile
+from xml.etree import ElementTree
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
@@ -9,6 +14,7 @@ from app.schemas.message_template import (
     MessageTemplateCreate,
     MessageTemplateFilter,
     MessageTemplateRead,
+    MessageTemplateUploadRead,
     MessageTemplateUpdate,
 )
 from app.services.default_message_templates import ensure_default_templates_for_product
@@ -16,6 +22,8 @@ from app.services.message_template import MessageTemplateService
 from app.services.tenant_scope import ALL_PRODUCTS_ID
 
 router = APIRouter(prefix="/message-templates", tags=["message-templates"])
+MAX_TEMPLATE_UPLOAD_BYTES = 2 * 1024 * 1024
+SUPPORTED_TEMPLATE_UPLOAD_SUFFIXES = {".txt", ".md", ".docx"}
 
 
 def _require_product_scope(ctx: TenantContext) -> int:
@@ -31,6 +39,31 @@ def _ensure_template_access(row: MessageTemplate, ctx: TenantContext) -> None:
     product_id = _require_product_scope(ctx)
     if row.product_id != product_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="话术不存在")
+
+
+def _decode_template_text(content: bytes) -> str:
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="模板文本编码无法识别，请使用 UTF-8")
+
+
+def _parse_docx_text(content: bytes) -> str:
+    try:
+        with zipfile.ZipFile(BytesIO(content)) as archive:
+            xml = archive.read("word/document.xml")
+    except (KeyError, zipfile.BadZipFile) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="DOCX 文件损坏或格式不正确") from exc
+    root = ElementTree.fromstring(xml)
+    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    paragraphs: list[str] = []
+    for paragraph in root.findall(".//w:p", namespace):
+        text = "".join(node.text or "" for node in paragraph.findall(".//w:t", namespace)).strip()
+        if text:
+            paragraphs.append(text)
+    return "\n".join(paragraphs)
 
 
 @router.get("", response_model=PaginatedResponse[MessageTemplateRead])
@@ -67,6 +100,26 @@ async def create_message_template(
     _require_product_scope(ctx)
     row = await MessageTemplateService.create_template(db, data, ctx=ctx)
     return MessageTemplateService._to_read(row)
+
+
+@router.post("/parse-upload", response_model=MessageTemplateUploadRead)
+async def parse_message_template_upload(
+    file: UploadFile = File(...),
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> MessageTemplateUploadRead:
+    _require_product_scope(ctx)
+    filename = Path(file.filename or "").name
+    suffix = Path(filename).suffix.lower()
+    if suffix not in SUPPORTED_TEMPLATE_UPLOAD_SUFFIXES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="仅支持 .txt、.md、.docx 模板文件")
+    content = await file.read(MAX_TEMPLATE_UPLOAD_BYTES + 1)
+    if len(content) > MAX_TEMPLATE_UPLOAD_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="模板文件不能超过 2MB")
+    parsed = _parse_docx_text(content) if suffix == ".docx" else _decode_template_text(content)
+    parsed = parsed.strip()
+    if not parsed:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="模板文件内容为空")
+    return MessageTemplateUploadRead(filename=filename, content=parsed)
 
 
 @router.get("/{template_id}", response_model=MessageTemplateRead)

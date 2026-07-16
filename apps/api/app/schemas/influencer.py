@@ -77,7 +77,7 @@ class InfluencerBase(BaseModel):
     website: OptionalUrl = None
     contact_page: OptionalUrl = None
     linktree_url: OptionalUrl = None
-    whatsapp: str | None = Field(default=None, max_length=50)
+    whatsapp: str | None = Field(default=None, max_length=1024)
     telegram: str | None = Field(default=None, max_length=100)
     other_social_links: list[dict[str, str]] = Field(default_factory=list)
     product_fit: float | None = Field(default=None, ge=0, le=100)
@@ -230,7 +230,7 @@ class InfluencerUpdate(BaseModel):
     website: OptionalUrl = None
     contact_page: OptionalUrl = None
     linktree_url: OptionalUrl = None
-    whatsapp: str | None = Field(default=None, max_length=50)
+    whatsapp: str | None = Field(default=None, max_length=1024)
     telegram: str | None = Field(default=None, max_length=100)
     other_social_links: list[dict[str, str]] | None = None
     product_fit: float | None = Field(default=None, ge=0, le=100)

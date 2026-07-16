@@ -6,11 +6,15 @@ class CollectionTaskStatus(str, enum.Enum):
     PENDING = "pending"
     QUEUED = "queued"
     RUNNING = "running"
+    RATE_LIMITED = "rate_limited"
+    STOPPING = "stopping"
     COMPLETED = "completed"
     COMPLETED_WITH_RESULTS = "completed_with_results"
     COMPLETED_NO_RESULTS = "completed_no_results"
     PARTIAL_FAILED = "partial_failed"
     FAILED = "failed"
+    TIMEOUT = "timeout"
+    STALE = "stale"
     PAUSED = "paused"
 
 

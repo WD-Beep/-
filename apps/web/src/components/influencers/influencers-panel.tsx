@@ -69,11 +69,13 @@ import {
   buildOutreachCampaignsUrl,
   buildOneClickCampaignName,
   buildOneClickCampaignPayload,
+  filterEmailableInfluencerIds,
   resolveBulkDeleteSelection,
   resolveBulkOutreachSelection,
   resolveCurrentPageSelectedIds,
   type InfluencerSelectionMode,
 } from "@/lib/influencer-selection-helpers";
+import { INFLUENCER_EMAIL_SENT_EVENT } from "@/lib/influencer-email-sync";
 
 type QuickFilter =
   | "all"
@@ -381,6 +383,22 @@ export function InfluencersPanel() {
   }, [statsFilters, loadStats, productId]);
 
   useEffect(() => {
+    if (productId === null) return;
+    const refreshSentStatus = () => {
+      void load(apiFilters, page);
+      void loadStats(statsFilters);
+    };
+    window.addEventListener(INFLUENCER_EMAIL_SENT_EVENT, refreshSentStatus);
+    window.addEventListener("focus", refreshSentStatus);
+    window.addEventListener("pageshow", refreshSentStatus);
+    return () => {
+      window.removeEventListener(INFLUENCER_EMAIL_SENT_EVENT, refreshSentStatus);
+      window.removeEventListener("focus", refreshSentStatus);
+      window.removeEventListener("pageshow", refreshSentStatus);
+    };
+  }, [apiFilters, load, loadStats, page, productId, statsFilters]);
+
+  useEffect(() => {
     queueMicrotask(() => setPage(1));
   }, [activePlatform]);
 
@@ -489,12 +507,13 @@ export function InfluencersPanel() {
     [...selectedIds],
     items.map((item) => item.id),
   );
+  const currentPageEmailableSelectedIds = filterEmailableInfluencerIds(currentPageSelectedIds, items);
   const allPageSelected = items.length > 0 && items.every((item) => selectedIds.has(item.id));
   const hasSelection = selectionMode === "filter_all" || currentPageSelectedIds.length > 0;
   const bulkOutreachSelection = hasSelection
     ? resolveBulkOutreachSelection({
         mode: selectionMode,
-        selectedIds: currentPageSelectedIds,
+        selectedIds: currentPageEmailableSelectedIds,
         total,
         filters: apiFilters,
       })
@@ -569,6 +588,10 @@ export function InfluencersPanel() {
     setOneClickSending(true);
     setError(null);
     try {
+      if (!bulkOutreachSelection.selectAll && (bulkOutreachSelection.ids ?? []).length === 0) {
+        setError("已勾选的红人没有可用邮箱，请改选有邮箱的红人或先补充邮箱。");
+        return;
+      }
       const campaign = await createOutreachCampaign(
         buildOneClickCampaignPayload({
           name: buildOneClickCampaignName(),
@@ -765,7 +788,11 @@ export function InfluencersPanel() {
                     }),
                   );
                 } else {
-                  const ids = bulkOutreachSelection?.ids ?? currentPageSelectedIds;
+                  const ids = bulkOutreachSelection?.ids ?? currentPageEmailableSelectedIds;
+                  if (ids.length === 0) {
+                    setError("已勾选的红人没有可用邮箱，请改选有邮箱的红人或先补充邮箱。");
+                    return;
+                  }
                   clearSelection();
                   router.push(buildOutreachCampaignsUrl({ ids, productId }));
                 }
@@ -1183,6 +1210,7 @@ export function InfluencersPanel() {
           onClose={() => setOutreachEmailTarget(null)}
           onSent={() => {
             void load(apiFilters, page);
+            void loadStats(statsFilters);
           }}
         />
       ) : null}

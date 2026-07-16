@@ -8,7 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.collection_task import CollectionTask
-from app.models.enums import CollectionMode, CollectionTaskStatus
+from app.models.collection_task_candidate import CollectionTaskCandidate
+from app.models.enums import CandidateStatus, CollectionMode, CollectionTaskStatus
+from app.models.product_influencer import ProductInfluencer
 from app.schemas.collection_task import (
     CollectionTaskBulkManageResult,
     CollectionTaskCreate,
@@ -159,17 +161,11 @@ class CollectionTaskService:
         *,
         now: datetime | None = None,
     ) -> bool:
+        from app.services.collection_lease import CollectionLeaseService
+
         if task.status != CollectionTaskStatus.RUNNING.value:
             return False
-        reference = (
-            CollectionTaskService._as_aware_utc(task.updated_at)
-            or CollectionTaskService._as_aware_utc(task.created_at)
-        )
-        if reference is None:
-            return False
-        threshold_seconds = max(settings.collection_running_stale_seconds, 0)
-        current = now.astimezone(UTC) if now and now.tzinfo else (now.replace(tzinfo=UTC) if now else datetime.now(UTC))
-        return current - reference > timedelta(seconds=threshold_seconds)
+        return CollectionLeaseService.is_lease_stale(task, now=now)
 
     @staticmethod
     def task_read(
@@ -181,6 +177,7 @@ class CollectionTaskService:
         is_possible_duplicate: bool = False,
         child_tasks: list[dict] | None = None,
         aggregate_update: dict | None = None,
+        queue_position: int | None = None,
     ) -> CollectionTaskRead:
         stale = CollectionTaskService.is_running_stale(task)
         retention = (
@@ -197,15 +194,21 @@ class CollectionTaskService:
             CollectionTaskStatus.COMPLETED_WITH_RESULTS.value,
             CollectionTaskStatus.COMPLETED_NO_RESULTS.value,
         }
+        reason_labels = checkpoint.get("queue_reason_labels") or []
+        if not isinstance(reason_labels, list):
+            reason_labels = []
         update = {
                 "stale": stale,
                 "recoverable": (not terminal_success)
                 and (
                     task.status == CollectionTaskStatus.PARTIAL_FAILED.value
+                    or task.status == CollectionTaskStatus.QUEUED.value
                     or running
                 )
-                and (stale or interrupted),
+                and (stale or interrupted or bool(checkpoint.get("stale_recovered"))),
                 "stale_after_seconds": max(settings.collection_running_stale_seconds, 0),
+                "queue_position": queue_position,
+                "queue_reason_labels": [str(item) for item in reason_labels],
                 "effectiveness_category": category,
                 "is_ineffective": (not running) and category not in {"high_value", "effective"},
                 "has_retention_traces": retention,
@@ -251,7 +254,13 @@ class CollectionTaskService:
         }
 
     @staticmethod
-    def _batch_parent_aggregate(parent: CollectionTask, children: list[CollectionTask]) -> dict:
+    def _batch_parent_aggregate(
+        parent: CollectionTask,
+        children: list[CollectionTask],
+        *,
+        unique_inserted_count: int | None = None,
+        product_library_inserted_count: int | None = None,
+    ) -> dict:
         if not children:
             return {}
         status_values = [child.status for child in children]
@@ -304,12 +313,19 @@ class CollectionTaskService:
             CollectionTaskStatus.QUEUED.value,
             CollectionTaskStatus.PAUSED.value,
         }
+        inserted_count = sum(child.inserted_count or 0 for child in children)
+        run_checkpoint = dict(parent.run_checkpoint or {})
+        if unique_inserted_count is not None:
+            run_checkpoint["unique_inserted_count"] = unique_inserted_count
+            run_checkpoint["batch_cumulative_inserted_count"] = inserted_count
+        if product_library_inserted_count is not None:
+            run_checkpoint["product_library_inserted_count"] = product_library_inserted_count
         return {
             "status": status_value,
             "discovery_limit": parent.discovery_limit
             or sum(child.discovery_limit or 0 for child in children),
             "result_count": sum(child.result_count or 0 for child in children),
-            "inserted_count": sum(child.inserted_count or 0 for child in children),
+            "inserted_count": inserted_count,
             "deduped_count": sum(child.deduped_count or 0 for child in children),
             "discovered_count": sum(child.discovered_count or 0 for child in children),
             "profile_fetched_count": sum(child.profile_fetched_count or 0 for child in children),
@@ -318,9 +334,15 @@ class CollectionTaskService:
             "failed_count": sum(child.failed_count or 0 for child in children),
             "skipped_count": sum(child.skipped_count or 0 for child in children),
             "current_stage": current_stage,
-            "status_summary": CollectionTaskService._batch_parent_status_summary(parent, children),
+            "status_summary": CollectionTaskService._batch_parent_status_summary(
+                parent,
+                children,
+                unique_inserted_count=unique_inserted_count,
+                product_library_inserted_count=product_library_inserted_count,
+            ),
             "error_message": None if clear_error else parent.error_message,
             "last_error": None if clear_error else parent.last_error,
+            "run_checkpoint": run_checkpoint,
             "last_run_at": max(
                 (child.last_run_at for child in children if child.last_run_at),
                 default=parent.last_run_at,
@@ -328,7 +350,13 @@ class CollectionTaskService:
         }
 
     @staticmethod
-    def _batch_parent_status_summary(parent: CollectionTask, children: list[CollectionTask]) -> str:
+    def _batch_parent_status_summary(
+        parent: CollectionTask,
+        children: list[CollectionTask],
+        *,
+        unique_inserted_count: int | None = None,
+        product_library_inserted_count: int | None = None,
+    ) -> str:
         completed = sum(
             1
             for child in children
@@ -362,10 +390,71 @@ class CollectionTaskService:
         )
         inserted = sum(child.inserted_count or 0 for child in children)
         total = parent.discovery_limit or sum(child.discovery_limit or 0 for child in children)
+        if product_library_inserted_count is not None and unique_inserted_count is not None:
+            inserted_label = (
+                f"红人库当前 {product_library_inserted_count}/{total}，"
+                f"本批次去重 {unique_inserted_count}，累计命中 {inserted}"
+            )
+        else:
+            inserted_label = (
+            f"红人库去重入库 {unique_inserted_count}/{total}，累计命中 {inserted}"
+            if unique_inserted_count is not None and inserted > unique_inserted_count
+            else f"已入库 {inserted}/{total}"
+            )
         return (
             f"多轮采集：第 {current_round}/{parent.batch_round_count or len(children)} 轮，"
-            f"已入库 {inserted}/{total}，成功 {completed} 轮，失败 {failed} 轮，跳过 {skipped}"
+            f"{inserted_label}，成功 {completed} 轮，失败 {failed} 轮，跳过 {skipped}"
         )
+
+    @staticmethod
+    async def _batch_parent_unique_inserted_counts(
+        db: AsyncSession,
+        child_rows_by_parent: dict[int, list[CollectionTask]],
+    ) -> dict[int, int]:
+        child_to_parent: dict[int, int] = {
+            child.id: parent_id
+            for parent_id, children in child_rows_by_parent.items()
+            for child in children
+        }
+        if not child_to_parent:
+            return {}
+        result = await db.execute(
+            select(CollectionTaskCandidate.task_id, CollectionTaskCandidate.product_influencer_id)
+            .where(CollectionTaskCandidate.task_id.in_(child_to_parent.keys()))
+            .where(CollectionTaskCandidate.status == CandidateStatus.INSERTED.value)
+            .where(CollectionTaskCandidate.product_influencer_id.isnot(None))
+        )
+        unique_by_parent: dict[int, set[int]] = {}
+        for task_id, product_influencer_id in result.all():
+            parent_id = child_to_parent.get(task_id)
+            if parent_id is None or product_influencer_id is None:
+                continue
+            unique_by_parent.setdefault(parent_id, set()).add(int(product_influencer_id))
+        return {parent_id: len(ids) for parent_id, ids in unique_by_parent.items()}
+
+    @staticmethod
+    async def _batch_parent_product_library_counts(
+        db: AsyncSession,
+        parents: list[CollectionTask],
+    ) -> dict[int, int]:
+        product_ids_by_parent = {
+            parent.id: parent.product_id
+            for parent in parents
+            if parent.id is not None and parent.product_id is not None
+        }
+        if not product_ids_by_parent:
+            return {}
+        result = await db.execute(
+            select(ProductInfluencer.product_id, func.count(ProductInfluencer.id))
+            .where(ProductInfluencer.product_id.in_(set(product_ids_by_parent.values())))
+            .where(ProductInfluencer.is_inserted.is_(True))
+            .group_by(ProductInfluencer.product_id)
+        )
+        counts_by_product = {int(product_id): int(count) for product_id, count in result.all()}
+        return {
+            parent_id: counts_by_product.get(product_id, 0)
+            for parent_id, product_id in product_ids_by_parent.items()
+        }
 
     @staticmethod
     async def pause_task(db: AsyncSession, task: CollectionTask) -> CollectionTask:
@@ -384,6 +473,11 @@ class CollectionTaskService:
         task.status_summary = "任务已暂停，当前已采集的数据和进度已保留。"
         task.error_message = None
         task.last_error = None
+        from app.services.collection_lease import CollectionLeaseService
+        from app.services.collection_runner import CollectionRunnerService
+
+        CollectionLeaseService.clear_lease(task)
+        await CollectionRunnerService._release_collection_run(task.id)
         await db.commit()
         await db.refresh(task)
         return task
@@ -745,6 +839,9 @@ class CollectionTaskService:
         page_size: int,
     ) -> PaginatedResponse[CollectionTaskRead]:
         await CollectionTaskService.reconcile_stale_running_tasks(db)
+        from app.services.collection_queue import CollectionQueueService
+
+        await CollectionQueueService.dispatch_queued_tasks(db=db)
         base_query = select(CollectionTask)
         base_query = CollectionTaskService._apply_filters(base_query, filters)
 
@@ -789,6 +886,15 @@ class CollectionTaskService:
                 for child in child_result.scalars().all():
                     if child.parent_task_id is not None:
                         child_rows_by_parent.setdefault(child.parent_task_id, []).append(child)
+        unique_inserted_counts = await CollectionTaskService._batch_parent_unique_inserted_counts(
+            db,
+            child_rows_by_parent,
+        )
+        batch_parent_rows = [row for row in rows if CollectionTaskService._is_batch_parent(row)]
+        product_library_counts = await CollectionTaskService._batch_parent_product_library_counts(
+            db,
+            batch_parent_rows,
+        )
         duplicate_ids = await CollectionTaskService._duplicate_ids_for_rows(
             db,
             rows,
@@ -803,12 +909,28 @@ class CollectionTaskService:
             tasks=rows,
         )
         categories = await batch_task_effectiveness_categories(db, rows)
+        queued_ids = [
+            row.id
+            for row in rows
+            if row.status == CollectionTaskStatus.QUEUED.value
+        ]
+        queue_positions: dict[int, int] = {}
+        if queued_ids:
+            ordered = await db.execute(
+                select(CollectionTask.id)
+                .where(CollectionTask.status == CollectionTaskStatus.QUEUED.value)
+                .order_by(CollectionTask.updated_at.asc(), CollectionTask.id.asc())
+            )
+            for index, task_id in enumerate((row[0] for row in ordered.all()), start=1):
+                if task_id in queued_ids:
+                    queue_positions[task_id] = index
         items = [
             CollectionTaskService.task_read(
                 row,
                 has_retention_traces=retention_flags.get(row.id, False),
                 effectiveness_category=categories.get(row.id, "no_result"),
                 is_possible_duplicate=row.id in duplicate_ids,
+                queue_position=queue_positions.get(row.id),
                 child_tasks=[
                     CollectionTaskService._batch_child_summary(child)
                     for child in child_rows_by_parent.get(row.id, [])
@@ -816,6 +938,8 @@ class CollectionTaskService:
                 aggregate_update=CollectionTaskService._batch_parent_aggregate(
                     row,
                     child_rows_by_parent.get(row.id, []),
+                    unique_inserted_count=unique_inserted_counts.get(row.id),
+                    product_library_inserted_count=product_library_counts.get(row.id),
                 )
                 if CollectionTaskService._is_batch_parent(row)
                 else None,
@@ -1608,8 +1732,15 @@ class CollectionTaskService:
         *,
         exclude_id: int | None = None,
         exclude_ids: set[int] | None = None,
+        requeue: bool = True,
     ) -> int:
-        """Mark long-idle running tasks as interrupted so the UI and mutex stay accurate."""
+        """Release long-idle running leases so concurrency slots are not permanently stuck.
+
+        By default stale tasks are re-queued for resume. Set requeue=False to mark
+        them partial_failed (legacy behavior for explicit fail-closed callers).
+        """
+        from app.services.collection_lease import CollectionLeaseService
+        from app.services.collection_queue import QUEUE_REASON_STALE_RECOVERY, CollectionQueueService
         from app.services.collection_runner import CollectionRunnerService
 
         skip_ids = set(exclude_ids or [])
@@ -1630,23 +1761,45 @@ class CollectionTaskService:
             if not CollectionTaskService.is_running_stale(task):
                 continue
             stage = task.current_stage or "unknown"
+            heartbeat = CollectionTaskService._as_aware_utc(getattr(task, "heartbeat_at", None))
             updated = CollectionTaskService._as_aware_utc(task.updated_at)
-            updated_label = updated.strftime("%Y-%m-%d %H:%M UTC") if updated else "未知"
-            interrupted = (
-                f"任务已超时中断（阶段：{stage}，最后更新 {updated_label}，超过 {threshold}s 无进度），"
-                f"可重新运行从 checkpoint 继续"
-            )
-            task.status = CollectionTaskStatus.PARTIAL_FAILED.value
-            task.current_stage = STAGE_FAILED
-            task.status_summary = interrupted
-            task.last_error = task.last_error or interrupted
-            if not task.error_message:
-                task.error_message = interrupted
-            checkpoint = dict(task.run_checkpoint or {})
-            checkpoint["interrupted"] = True
-            checkpoint["interrupted_stage"] = stage
-            checkpoint["interrupted_at"] = datetime.now(UTC).isoformat()
-            task.run_checkpoint = checkpoint
+            reference = heartbeat or updated
+            updated_label = reference.strftime("%Y-%m-%d %H:%M UTC") if reference else "未知"
+            await CollectionRunnerService._release_collection_run(task.id)
+            if requeue:
+                CollectionQueueService.mark_task_queued(
+                    task,
+                    [QUEUE_REASON_STALE_RECOVERY],
+                    resume=True,
+                )
+                task.status_summary = (
+                    f"stale 回收后重新排队（阶段：{stage}，最后心跳/更新 {updated_label}，"
+                    f"超过 {threshold}s 无进度）"
+                )
+                checkpoint = dict(task.run_checkpoint or {})
+                checkpoint["stale_recovered"] = True
+                checkpoint["interrupted"] = True
+                checkpoint["interrupted_stage"] = stage
+                checkpoint["interrupted_at"] = datetime.now(UTC).isoformat()
+                task.run_checkpoint = checkpoint
+                task.status = CollectionTaskStatus.QUEUED.value
+            else:
+                interrupted = (
+                    f"任务已超时中断（阶段：{stage}，最后更新 {updated_label}，超过 {threshold}s 无进度），"
+                    f"可重新运行从 checkpoint 继续"
+                )
+                task.status = CollectionTaskStatus.PARTIAL_FAILED.value
+                task.current_stage = STAGE_FAILED
+                task.status_summary = interrupted
+                task.last_error = task.last_error or interrupted
+                if not task.error_message:
+                    task.error_message = interrupted
+                checkpoint = dict(task.run_checkpoint or {})
+                checkpoint["interrupted"] = True
+                checkpoint["interrupted_stage"] = stage
+                checkpoint["interrupted_at"] = datetime.now(UTC).isoformat()
+                task.run_checkpoint = checkpoint
+                CollectionLeaseService.clear_lease(task)
             reconciled += 1
         if reconciled:
             await db.commit()

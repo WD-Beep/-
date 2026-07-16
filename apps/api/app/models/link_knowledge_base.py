@@ -28,6 +28,7 @@ class LinkKnowledgeBase(Base):
     raw_html: Mapped[str | None] = mapped_column(Text, nullable=True)
     clean_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     extracted_knowledge: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    manual_selling_points: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=list)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -72,6 +73,12 @@ class LinkScriptJob(Base):
         Integer, ForeignKey("link_knowledge_bases.id", ondelete="CASCADE"), index=True
     )
     product_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("products.id", ondelete="SET NULL"), nullable=True)
+    message_template_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("message_templates.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
     total_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

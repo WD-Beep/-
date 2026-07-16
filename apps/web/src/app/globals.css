@@ -1677,6 +1677,29 @@ body {
   padding: 12px;
 }
 
+.campaign-preview-item {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.campaign-preview-item > * {
+  min-width: 0;
+}
+
+.campaign-email-body {
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.campaign-email-body-compact {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
 .campaign-segmented {
   max-width: 100%;
   border: 1px solid hsl(214 24% 86%);

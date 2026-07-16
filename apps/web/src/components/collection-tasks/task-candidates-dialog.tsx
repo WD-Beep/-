@@ -359,7 +359,7 @@ export function TaskCandidatesDialog({ task, open, onClose }: TaskCandidatesDial
     }
 
     void loadCandidates(items.length > 0);
-    const pollId = isCollectionTaskRunning(activeTask)
+    const pollId = isCollectionTaskRunning(activeTask) || activeTask.status === "paused"
       ? window.setInterval(() => {
           void loadCandidates(true);
         }, COLLECTION_TASK_POLL_INTERVAL_MS)
