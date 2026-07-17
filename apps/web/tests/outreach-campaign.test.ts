@@ -179,6 +179,25 @@ test("AI batch email requires and manages a reusable generation template", () =>
   assert.match(source, /generation_rules/);
 });
 
+test("manual batch email stores reusable sender copy plans separately from script templates", () => {
+  const source = readFileSync(
+    new URL("../src/components/outreach-campaigns/outreach-campaigns-panel.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /MANUAL_EMAIL_PRESET_SCENARIO/);
+  assert.match(source, /outreach_manual_preset/);
+  assert.match(source, /常用邮箱方案/);
+  assert.match(source, /manualEmailPresets/);
+  assert.match(source, /loadManualEmailPresets/);
+  assert.match(source, /applyManualEmailPreset/);
+  assert.match(source, /saveManualEmailPreset/);
+  assert.match(source, /deleteManualEmailPreset/);
+  assert.match(source, /fetchMessageTemplates\(\{\s*pageSize:\s*100,\s*scenario:\s*"first_contact"/);
+  assert.match(source, /fetchMessageTemplates\(\{\s*pageSize:\s*10,\s*scenario:\s*MANUAL_EMAIL_PRESET_SCENARIO/);
+  assert.doesNotMatch(source, /recipientsText.*manualEmailPreset/);
+});
+
 test("link knowledge editor exposes human selling points and advanced source data", () => {
   const source = readFileSync(
     new URL("../src/components/link-knowledge-bases/link-knowledge-panels.tsx", import.meta.url),

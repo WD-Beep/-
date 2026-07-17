@@ -32,6 +32,7 @@ TELEGRAM_RE = re.compile(r"https?://(?:t\.me|telegram\.me)/[^\s\"'<>]+", re.I)
 
 EXCLUDED_EMAIL_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg")
 EXCLUDED_EMAIL_DOMAINS = {"example.com", "email.com", "domain.com", "test.com", "sample.com"}
+EXCLUDED_EMAIL_DOMAIN_SUFFIXES = ("ingest.sentry.io",)
 EXCLUDED_EMAILS = {"test@example.com", "name@example.com", "email@example.com", "you@example.com"}
 IMAGE_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "webp", "gif", "svg"})
 PSEUDO_EMAIL_CONTEXT_RE = re.compile(
@@ -180,9 +181,12 @@ def normalize_email(raw: str | None) -> str | None:
     if any(email.endswith(suffix) for suffix in EXCLUDED_EMAIL_SUFFIXES):
         return None
     local, domain = email.split("@", 1)
+    domain = domain.strip(".")
     if _local_part_looks_like_filename(local):
         return None
     if domain in EXCLUDED_EMAIL_DOMAINS:
+        return None
+    if any(domain == suffix or domain.endswith(f".{suffix}") for suffix in EXCLUDED_EMAIL_DOMAIN_SUFFIXES):
         return None
     if not EMAIL_RE.fullmatch(email):
         return None

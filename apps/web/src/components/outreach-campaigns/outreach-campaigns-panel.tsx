@@ -109,6 +109,8 @@ const TIMEZONE = "Asia/Shanghai";
 const DRAFT_PAGE_SIZE = 10;
 const TEMPLATE_RECOMMENDED_MIN_LENGTH = 800;
 const TEMPLATE_NOTE_MAX_LENGTH = 500;
+const MANUAL_EMAIL_PRESET_SCENARIO = "outreach_manual_preset";
+const MANUAL_EMAIL_PRESET_TAG = "manual-email-preset";
 const DRAFT_FILTER_LABELS: Record<DraftFilter, string> = {
   all: "全部",
   needs_review: "待审核",
@@ -231,6 +233,36 @@ function buildTemplatePayload(draft: TemplateDraft): MessageTemplatePayload {
   };
 }
 
+function parseManualEmailPreset(template: MessageTemplate): { subject: string; body: string } | null {
+  try {
+    const parsed = JSON.parse(template.content) as { subject?: unknown; body?: unknown };
+    const subject = typeof parsed.subject === "string" ? parsed.subject : "";
+    const body = typeof parsed.body === "string" ? parsed.body : "";
+    if (!subject.trim() || !body.trim()) return null;
+    return { subject, body };
+  } catch {
+    return null;
+  }
+}
+
+function buildManualEmailPresetPayload(input: { subject: string; body: string }): MessageTemplatePayload {
+  const subject = input.subject.trim();
+  const body = input.body.trim();
+  const title = subject.length > 60 ? `${subject.slice(0, 60)}...` : subject;
+  return {
+    title: title || "常用邮箱方案",
+    scenario: MANUAL_EMAIL_PRESET_SCENARIO,
+    platform: null,
+    language: null,
+    tags: [MANUAL_EMAIL_PRESET_TAG, "outreach"],
+    content: JSON.stringify({ subject, body }),
+    note: "批量发邮件页面保存的常用邮箱方案；不包含收件人。",
+    generation_rules: {},
+    is_default: false,
+    source_filename: null,
+  };
+}
+
 function validateTemplateDraft(draft: TemplateDraft): string | null {
   if (!draft.title.trim()) return "请填写模板名称";
   if (!draft.content.trim()) return "请粘贴话术模板正文";
@@ -343,6 +375,9 @@ export function OutreachCampaignsPanel() {
   const [copyMode, setCopyMode] = useState<CopyMode>("manual");
   const [manualSubject, setManualSubject] = useState("");
   const [manualBody, setManualBody] = useState("");
+  const [manualEmailPresets, setManualEmailPresets] = useState<MessageTemplate[]>([]);
+  const [selectedManualPresetId, setSelectedManualPresetId] = useState<number | null>(null);
+  const [manualPresetBusy, setManualPresetBusy] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState<number | null>(null);
   const [templateDraft, setTemplateDraft] = useState<TemplateDraft>(() => emptyTemplateDraft());
   const [templateBusy, setTemplateBusy] = useState(false);
@@ -480,7 +515,7 @@ export function OutreachCampaignsPanel() {
       setTemplateDraft(emptyTemplateDraft());
       return;
     }
-    const data = await fetchMessageTemplates({ pageSize: 100 });
+    const data = await fetchMessageTemplates({ pageSize: 100, scenario: "first_contact" });
     setTemplates(data.items);
     const nextId =
       preferredId && data.items.some((item) => item.id === preferredId)
@@ -503,6 +538,99 @@ export function OutreachCampaignsPanel() {
       cancelled = true;
     };
   }, [loadTemplates]);
+
+  const loadManualEmailPresets = useCallback(async (preferredId?: number | null) => {
+    if (requiresProduct) {
+      setManualEmailPresets([]);
+      setSelectedManualPresetId(null);
+      return;
+    }
+    const data = await fetchMessageTemplates({ pageSize: 10, scenario: MANUAL_EMAIL_PRESET_SCENARIO });
+    const validPresets = data.items.filter((item) => parseManualEmailPreset(item));
+    setManualEmailPresets(validPresets);
+    const nextId =
+      preferredId && validPresets.some((item) => item.id === preferredId)
+        ? preferredId
+        : validPresets[0]?.id ?? null;
+    setSelectedManualPresetId(nextId);
+  }, [requiresProduct]);
+
+  useEffect(() => {
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      void loadManualEmailPresets().catch(() => {
+        if (!cancelled) setManualEmailPresets([]);
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadManualEmailPresets]);
+
+  function applyManualEmailPreset(id: number | null = selectedManualPresetId) {
+    if (!id) return;
+    const preset = manualEmailPresets.find((item) => item.id === id) ?? null;
+    const content = preset ? parseManualEmailPreset(preset) : null;
+    if (!preset || !content) {
+      setError("常用邮箱方案内容无效，请重新保存。");
+      return;
+    }
+    setSelectedManualPresetId(preset.id);
+    setManualSubject(content.subject);
+    setManualBody(content.body);
+    setCopyMode("manual");
+    clearPreview();
+  }
+
+  async function persistManualEmailPreset(options: { silent?: boolean } = {}) {
+    const subject = manualSubject.trim();
+    const body = manualBody.trim();
+    if (!subject || !body) {
+      if (!options.silent) setError("请先填写邮件主题和正文，再保存常用邮箱方案。");
+      return null;
+    }
+    const alreadyExists = manualEmailPresets.some((preset) => {
+      const content = parseManualEmailPreset(preset);
+      return content?.subject.trim() === subject && content.body.trim() === body;
+    });
+    if (alreadyExists) return null;
+
+    const saved = await createMessageTemplate(buildManualEmailPresetPayload({ subject, body }));
+    await loadManualEmailPresets(saved.id);
+    if (!options.silent) setMessage("常用邮箱方案已保存；只保存主题和正文，不保存收件人。");
+    return saved;
+  }
+
+  async function saveManualEmailPreset() {
+    setManualPresetBusy(true);
+    setError(null);
+    try {
+      await persistManualEmailPreset({ silent: false });
+    } catch (err) {
+      setError(translateErrorMessage(err instanceof Error ? err.message : "保存常用邮箱方案失败"));
+    } finally {
+      setManualPresetBusy(false);
+    }
+  }
+
+  async function deleteManualEmailPreset() {
+    if (!selectedManualPresetId) return;
+    const preset = manualEmailPresets.find((item) => item.id === selectedManualPresetId) ?? null;
+    if (!preset) return;
+    if (!window.confirm(`确认删除常用邮箱方案「${preset.title}」？已生成或已发送的邮件记录不会删除。`)) return;
+    setManualPresetBusy(true);
+    setError(null);
+    try {
+      await deleteMessageTemplate(preset.id);
+      await loadManualEmailPresets(null);
+      setMessage("常用邮箱方案已删除，不影响历史邮件。");
+    } catch (err) {
+      setError(translateErrorMessage(err instanceof Error ? err.message : "删除常用邮箱方案失败"));
+    } finally {
+      setManualPresetBusy(false);
+    }
+  }
 
   function handleSelectTemplate(value: string) {
     const nextId = Number(value) || null;
@@ -829,6 +957,9 @@ export function OutreachCampaignsPanel() {
             }));
           }
         }
+      }
+      if ((action === "send" || action === "queue" || action === "save") && copyMode === "manual") {
+        void persistManualEmailPreset({ silent: true }).catch(() => undefined);
       }
       await load({ syncLatestCampaign: true });
     } catch (err) {
@@ -1477,6 +1608,57 @@ export function OutreachCampaignsPanel() {
                 </div>
                 {copyMode === "manual" ? (
                   <div className="campaign-manual-copy">
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
+                        <label className="min-w-0 flex-1 space-y-1">
+                          <span className="text-xs font-medium text-slate-600">常用邮箱方案</span>
+                          <select
+                            className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                            value={selectedManualPresetId ?? ""}
+                            onChange={(event) => setSelectedManualPresetId(Number(event.target.value) || null)}
+                          >
+                            <option value="">选择已保存的主题和正文</option>
+                            {manualEmailPresets.map((preset) => (
+                              <option key={preset.id} value={preset.id}>
+                                {preset.title}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={!selectedManualPresetId || manualPresetBusy}
+                            onClick={() => applyManualEmailPreset()}
+                          >
+                            套用
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={manualPresetBusy || !manualSubject.trim() || !manualBody.trim()}
+                            onClick={() => void saveManualEmailPreset()}
+                          >
+                            保存为常用方案
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={!selectedManualPresetId || manualPresetBusy}
+                            onClick={() => void deleteManualEmailPreset()}
+                          >
+                            删除方案
+                          </Button>
+                        </div>
+                      </div>
+                      <p className="mt-2 text-xs text-slate-500">
+                        只保存邮件主题和正文，不保存本次勾选的红人或收件人；下次可直接套用后再发送。
+                      </p>
+                    </div>
                     <label className="space-y-1">
                       <span className="text-xs font-medium text-slate-600">邮件主题</span>
                       <Input

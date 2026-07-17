@@ -9,7 +9,8 @@ from fastapi import HTTPException, status
 from app.core.config import settings
 
 _EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$")
-_EXCLUDED_DOMAINS = {"email.com", "domain.com", "test.com", "sample.com"}
+_EXCLUDED_DOMAINS = {"email.com", "domain.com", "test.com", "sample.com", "example.com"}
+_EXCLUDED_DOMAIN_SUFFIXES = ("ingest.sentry.io",)
 _EXCLUDED_EMAILS = {"test@example.com", "name@example.com", "email@example.com", "you@example.com"}
 _COMMON_REAL_TLDS = {
     "com",
@@ -83,6 +84,8 @@ def outreach_recipient_skip_reason(recipient: str | None) -> str | None:
     domain = normalized.rsplit("@", 1)[-1]
     if normalized in _EXCLUDED_EMAILS or domain in _EXCLUDED_DOMAINS:
         return "测试邮箱域名，已跳过"
+    if any(domain == suffix or domain.endswith(f".{suffix}") for suffix in _EXCLUDED_DOMAIN_SUFFIXES):
+        return "Sentry 监控日志地址，不是真实红人邮箱，已跳过"
     tld = domain.rsplit(".", 1)[-1]
     if tld not in _COMMON_REAL_TLDS:
         return "收件人邮箱格式无效"

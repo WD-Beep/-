@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from app.services.contact_discovery import extract_whatsapp
+from app.services.contact_discovery import extract_emails_from_text, extract_whatsapp, normalize_email
 from app.services.contact_signals import (
     apply_bio_contact_hints,
     build_contact_summary,
@@ -179,6 +179,19 @@ def test_extract_bio_contact_hints_linktree_and_whatsapp():
     )
     assert hints.linktree_url == "https://linktr.ee/demo"
     assert hints.whatsapp == "https://wa.me/1234567890"
+
+
+def test_contact_discovery_rejects_sentry_ingest_email_from_page_logs():
+    sentry_email = "37df41a9eafc429585b01c3771b4af54@o468184.ingest.sentry.io"
+    html = f"""
+    <script>
+      window.SENTRY_DSN = "https://{sentry_email}/123";
+    </script>
+    <p>For collaborations email hello@byaivhe.com</p>
+    """
+
+    assert normalize_email(sentry_email) is None
+    assert [candidate.email for candidate in extract_emails_from_text(html, "website")] == ["hello@byaivhe.com"]
 
 
 def test_extract_whatsapp_rejects_view_count_and_dates():

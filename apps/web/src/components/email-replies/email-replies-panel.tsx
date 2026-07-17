@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Inbox, Loader2, RefreshCw, Trash2 } from "lucide-react";
 
@@ -74,6 +74,9 @@ export function EmailRepliesPanel() {
   const requiresProduct = productId === ALL_PRODUCTS_ID;
   const [replies, setReplies] = useState<EmailReply[]>([]);
   const [influencers, setInfluencers] = useState<Influencer[]>([]);
+  const [influencersLoading, setInfluencersLoading] = useState(false);
+  const [influencersLoaded, setInfluencersLoaded] = useState(false);
+  const influencersPromiseRef = useRef<Promise<Influencer[]> | null>(null);
   const [activeView, setActiveView] = useState<EmailReplyCenterView>("unprocessed");
   const [expanded, setExpanded] = useState<EmailReply | null>(null);
   const [noteEditingReply, setNoteEditingReply] = useState<EmailReply | null>(null);
@@ -96,11 +99,7 @@ export function EmailRepliesPanel() {
     setError(null);
     try {
       const replyData = await fetchEmailReplies({ page: 1, pageSize: PAGE_SIZE });
-      const influencerData = await fetchInfluencers(1, 100, { hasEmail: true }).catch(() => ({
-        items: [],
-      }));
       setReplies(replyData.items);
-      setInfluencers(influencerData.items);
       setSelectedReplyIds(new Set());
     } catch (err) {
       setError(err instanceof Error ? err.message : "鍥炲鍒楄〃鍔犺浇澶辫触");
@@ -114,6 +113,25 @@ export function EmailRepliesPanel() {
       void load();
     });
   }, [load, productId]);
+
+  const ensureInfluencers = useCallback(async (): Promise<Influencer[]> => {
+    if (influencersLoaded) return influencers;
+    if (influencersPromiseRef.current) return influencersPromiseRef.current;
+    setInfluencersLoading(true);
+    const promise = fetchInfluencers(1, 100, { hasEmail: true })
+      .then((data) => {
+        setInfluencers(data.items);
+        setInfluencersLoaded(true);
+        return data.items;
+      })
+      .catch(() => [])
+      .finally(() => {
+        setInfluencersLoading(false);
+        influencersPromiseRef.current = null;
+      });
+    influencersPromiseRef.current = promise;
+    return promise;
+  }, [influencers, influencersLoaded]);
 
   const visibleReplies = useMemo(
     () => filterEmailRepliesForCenter(replies, { view: activeView }),
@@ -200,12 +218,17 @@ export function EmailRepliesPanel() {
     setExpanded(target);
     setResponseBody("");
     setResponseDraftGenerated(false);
+    void ensureInfluencers();
   }
 
   async function openReplyComposer(reply: EmailReply) {
     const target = await markReplyViewed(reply);
     setExpanded(target);
-    const influencer = target.product_influencer_id ? influencerMap.get(target.product_influencer_id) : null;
+    let influencer = target.product_influencer_id ? influencerMap.get(target.product_influencer_id) : null;
+    if (target.product_influencer_id && !influencer) {
+      const loaded = await ensureInfluencers();
+      influencer = loaded.find((item) => item.id === target.product_influencer_id) ?? null;
+    }
     setResponseBody(
       buildEmailReplyResponseDraft({
         influencerName: influencer?.display_name || influencer?.username || null,
@@ -246,7 +269,11 @@ export function EmailRepliesPanel() {
   async function openSocialLink(reply: EmailReply) {
     try {
       const target = await rematchReplyForAction(reply);
-      const influencer = target.product_influencer_id ? influencerMap.get(target.product_influencer_id) : null;
+      let influencer = target.product_influencer_id ? influencerMap.get(target.product_influencer_id) : null;
+      if (target.product_influencer_id && !influencer) {
+        const loaded = await ensureInfluencers();
+        influencer = loaded.find((item) => item.id === target.product_influencer_id) ?? null;
+      }
       if (influencer?.profile_url) {
         window.open(influencer.profile_url, "_blank", "noopener,noreferrer");
         return;
@@ -718,9 +745,10 @@ export function EmailRepliesPanel() {
                   <select
                     className="h-9 w-full rounded-md border bg-background px-3"
                     value={selectedInfluencerId}
+                    onFocus={() => void ensureInfluencers()}
                     onChange={(event) => setSelectedInfluencerId(event.target.value)}
                   >
-                    <option value="">选择红人</option>
+                    <option value="">{influencersLoading ? "正在加载红人..." : "选择红人"}</option>
                     {influencers.map((item) => (
                       <option key={item.id} value={item.id}>
                         {influencerLabel(item)}

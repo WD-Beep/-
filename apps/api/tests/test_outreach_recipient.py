@@ -49,6 +49,13 @@ def test_outreach_recipient_skip_reason_rejects_pseudo_and_test_emails():
         assert outreach_recipient_skip_reason("creator@gmail.com") is None
 
 
+def test_outreach_recipient_skip_reason_rejects_sentry_ingest_email():
+    with patch("app.services.outreach_recipient.settings", _settings()):
+        reason = outreach_recipient_skip_reason("37df41a9eafc429585b01c3771b4af54@o468184.ingest.sentry.io")
+    assert reason is not None
+    assert "Sentry" in reason
+
+
 def test_validate_real_outreach_recipient_rejects_sender():
     with patch("app.services.outreach_recipient.settings", _settings()):
         with pytest.raises(HTTPException) as exc:

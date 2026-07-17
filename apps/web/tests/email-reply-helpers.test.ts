@@ -205,14 +205,16 @@ test("reply panel marks a reply viewed before clearing the navigation badge", as
   assert.match(apiSource, /viewed_at:\s*string \| null/);
 });
 
-test("reply panel keeps replies visible when optional influencer lookup fails", async () => {
+test("reply panel keeps first paint fast by lazy loading optional influencer lookup", async () => {
   const source = await import("node:fs/promises").then((fs) =>
     fs.readFile(new URL("../src/components/email-replies/email-replies-panel.tsx", import.meta.url), "utf8"),
   );
 
   assert.match(source, /const replyData = await fetchEmailReplies/);
-  assert.match(source, /fetchInfluencers\(1,\s*100,\s*\{\s*hasEmail:\s*true\s*\}\)\.catch/);
   assert.match(source, /setReplies\(replyData\.items\)/);
+  assert.doesNotMatch(source, /const influencerData = await fetchInfluencers/);
+  assert.match(source, /ensureInfluencers/);
+  assert.match(source, /fetchInfluencers\(1,\s*100,\s*\{\s*hasEmail:\s*true\s*\}\)/);
 });
 
 test("reply panel exposes linked influencer detail and social profile actions", async () => {

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 
 const BACKEND_URL = process.env.INTERNAL_API_URL?.replace(/\/$/, "") ?? "http://127.0.0.1:8000";
 const PROXY_TIMEOUT_MS = 30_000;
+const PROXY_TIMEOUT = "PROXY_TIMEOUT";
+const PROXY_UNAVAILABLE = "PROXY_UNAVAILABLE";
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -33,12 +35,43 @@ async function proxyApiRequest(request: NextRequest, context: RouteContext) {
   });
 
   const hasBody = request.method !== "GET" && request.method !== "HEAD";
-  const response = await fetch(target, {
-    method: request.method,
-    headers,
-    body: hasBody ? await request.arrayBuffer() : undefined,
-    signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
-  });
+  let response: Response;
+  try {
+    response = await fetch(target, {
+      method: request.method,
+      headers,
+      body: hasBody ? await request.arrayBuffer() : undefined,
+      signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
+    });
+  } catch (error) {
+    const errorName = error instanceof Error ? error.name : "UnknownError";
+    const isTimeout = errorName === "TimeoutError" || errorName === "AbortError";
+    console.error("API proxy failed", {
+      path: target.pathname,
+      error_name: errorName,
+      timeout: isTimeout,
+    });
+    if (isTimeout) {
+      return NextResponse.json(
+        {
+          detail: "后端接口请求超时，请稍后重试；如果刚部署过，请刷新页面后再试。",
+          code: PROXY_TIMEOUT,
+          retryable: true,
+          stage: "proxy",
+        },
+        { status: 504 },
+      );
+    }
+    return NextResponse.json(
+      {
+        detail: "后端接口连接中断，请刷新页面重试；如果频繁出现，说明 Web 代理或服务器内存不稳定。",
+        code: PROXY_UNAVAILABLE,
+        retryable: true,
+        stage: "proxy",
+      },
+      { status: 502 },
+    );
+  }
 
   const responseHeaders = new Headers();
   response.headers.forEach((value, key) => {

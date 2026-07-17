@@ -155,6 +155,17 @@ test("long-running proxy returns structured timeout and connection errors", () =
   assert.match(route, /status:\s*502/);
 });
 
+test("standard api proxy returns structured timeout and connection errors", () => {
+  const route = source("../src/app/api-proxy/[...path]/route.ts");
+
+  assert.match(route, /PROXY_TIMEOUT/);
+  assert.match(route, /PROXY_UNAVAILABLE/);
+  assert.match(route, /try\s*\{/);
+  assert.match(route, /catch \(error\)/);
+  assert.match(route, /status:\s*504/);
+  assert.match(route, /status:\s*502/);
+});
+
 test("docker web service waits for the API healthcheck", () => {
   const compose = source("../../../docker-compose.yml");
 
