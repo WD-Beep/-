@@ -293,7 +293,7 @@ async def test_preview_skips_sent_unless_allow_resend():
         preview1 = await _preview_with_mock(
             db, product_id=1, campaign_id=campaign_no_resend.id
         )
-        assert preview1.items[0].skip_reason == "已有成功发信记录"
+        assert preview1.items[0].skip_reason == "宸叉湁鎴愬姛鍙戜俊璁板綍"
 
         campaign_resend = await _create_campaign(
             db, ctx=ctx, influencer_ids=[influencer.id], allow_resend=True
@@ -321,7 +321,7 @@ async def test_queue_requires_preview_and_valid_recipients():
                 campaign_id=campaign.id,
                 payload=OutreachCampaignQueueRequest(confirm=True),
             )
-        assert "请先生成个性化邮件草稿" in str(exc.value.detail)
+        assert "璇峰厛鐢熸垚涓€у寲閭欢鑽夌" in str(exc.value.detail)
 
         await _preview_with_mock(db, product_id=1, campaign_id=campaign.id)
         result = await _queue_confirmed(db, ctx=ctx, campaign_id=campaign.id)
@@ -358,7 +358,7 @@ async def test_queue_skips_whitespace_only_subject_or_body():
         assert result.skipped == 1
 
         await db.refresh(rec)
-        assert rec.skip_reason == "邮件标题或正文为空，无法入队"
+        assert rec.skip_reason == "閭欢鏍囬鎴栨鏂囦负绌猴紝鏃犳硶鍏ラ槦"
         assert rec.queue_item_id is None
 
         queue_count = await db.scalar(
@@ -806,7 +806,7 @@ async def test_preview_shows_no_knowledge_message():
         campaign = await _create_campaign(db, ctx=ctx, influencer_ids=[influencer.id])
 
         gen = _mock_generation()
-        gen.reason = "基于话术模板"
+        gen.reason = "鍩轰簬璇濇湳妯℃澘"
         with patch(
             "app.services.outreach_campaign_service.SpeechRecommendationService.generate_outreach_email",
             new=AsyncMock(return_value=gen),
@@ -814,7 +814,7 @@ async def test_preview_shows_no_knowledge_message():
             preview = await OutreachCampaignService.preview_campaign(
                 db, product_id=1, campaign_id=campaign.id
             )
-        assert "未引用知识库" in preview.items[0].reason
+        assert "鏈紩鐢ㄧ煡璇嗗簱" in preview.items[0].reason
 
 
 @pytest.mark.asyncio
@@ -946,7 +946,7 @@ async def test_preview_single_ai_failure_does_not_500():
         by_id = {item.influencer_id: item for item in preview.items}
         assert by_id[ok.id].can_queue is True
         assert by_id[bad.id].can_queue is False
-        assert "生成失败" in (by_id[bad.id].skip_reason or "")
+        assert "鐢熸垚澶辫触" in (by_id[bad.id].skip_reason or "")
 
 
 @pytest.mark.asyncio
@@ -1103,7 +1103,7 @@ async def test_campaign_reply_board_lists_replied_unreplied_failed_and_skipped_r
         assert by_id[failed.id].reply_status == "unreplied"
         assert by_id[failed.id].send_status == "failed"
         assert by_id[skipped.id].reply_status == "skipped"
-        assert by_id[skipped.id].skip_reason == "缺少邮箱"
+        assert by_id[skipped.id].skip_reason == "缂哄皯閭"
 
 
 @pytest.mark.asyncio
@@ -1205,7 +1205,7 @@ async def test_preview_skips_sender_address_recipient():
         with patch("app.services.outreach_recipient.settings", mock_settings):
             preview = await _preview_with_mock(db, product_id=1, campaign_id=campaign.id)
         assert preview.items[0].can_queue is False
-        assert "鍙戜欢閭鐩稿悓" in (preview.items[0].skip_reason or "")
+        assert "发件邮箱相同" in (preview.items[0].skip_reason or "")
 
 
 @pytest.mark.asyncio
@@ -1259,7 +1259,7 @@ async def test_pause_blocks_manual_process():
             await OutreachCampaignService.process_campaign(
                 db, ctx=ctx, campaign_id=campaign.id
             )
-        assert "鏆傚仠" in str(exc.value.detail)
+        assert "暂停" in str(exc.value.detail)
 
 
 @pytest.mark.asyncio
@@ -1519,7 +1519,7 @@ async def test_process_sends_queue_item_saved_subject_body():
 
         captured: dict[str, str] = {}
 
-        async def _capture_send(message, recipients):
+        async def _capture_send(message, recipients, smtp_account=None):
             captured["subject"] = message["Subject"]
             part = message.get_payload()[0]
             raw = part.get_payload(decode=True)
@@ -1563,7 +1563,7 @@ async def test_send_campaign_now_sends_directly_then_records_terminal_queue_rows
 
         captured: list[tuple[str, list[str]]] = []
 
-        async def _capture_send(message, recipients):
+        async def _capture_send(message, recipients, smtp_account=None):
             captured.append((message["Subject"], list(recipients)))
 
         with patch(
@@ -1619,6 +1619,60 @@ async def test_send_campaign_now_sends_directly_then_records_terminal_queue_rows
 
 
 @pytest.mark.asyncio
+async def test_send_campaign_now_partial_failure_returns_smtp_reason():
+    suffix = _suffix()
+    async with async_session_factory() as db:
+        a = await _create_influencer(db, suffix=f"partial_a_{suffix}", email=f"partial_a_{suffix}@creator-mail.net")
+        b = await _create_influencer(db, suffix=f"partial_b_{suffix}", email=f"partial_b_{suffix}@creator-mail.net")
+        await db.commit()
+        ctx = TenantContext(user_id=1, workspace_id=1, product_id=1, is_admin=True)
+        campaign = await _create_campaign(
+            db,
+            ctx=ctx,
+            influencer_ids=[a.id, b.id],
+            daily_limit=10,
+            send_window_start="00:00",
+            send_window_end="23:59",
+        )
+
+        async def _generate_side_effect(_db, *, product_row, **_kwargs):
+            return _mock_generation(
+                subject=f"Partial subject {product_row.id}",
+                body=f"Partial body for influencer {product_row.id}",
+            )
+
+        send_calls = 0
+
+        async def _send_one_success_then_fail(message, recipients, smtp_account=None):
+            nonlocal send_calls
+            send_calls += 1
+            if send_calls == 2:
+                raise RuntimeError("Connection lost")
+
+        with patch(
+            "app.services.outreach_campaign_service.SpeechRecommendationService.generate_outreach_email",
+            new=AsyncMock(side_effect=_generate_side_effect),
+        ), patch(
+            "app.services.email.EmailService._send_message",
+            new=AsyncMock(side_effect=_send_one_success_then_fail),
+        ):
+            preview = await OutreachCampaignService.preview_campaign(
+                db, product_id=1, campaign_id=campaign.id
+            )
+            result = await OutreachCampaignService.send_campaign_now(
+                db,
+                ctx=ctx,
+                campaign_id=campaign.id,
+                influencer_ids=[item.influencer_id for item in preview.items],
+            )
+
+        assert result.sent == 1
+        assert result.failed == 1
+        assert "部分发送失败" in result.message
+        assert "SMTP 连接中断" in result.message
+
+
+@pytest.mark.asyncio
 async def test_generate_and_send_campaign_one_click_generates_queues_and_sends_unique_emails():
     suffix = _suffix()
     async with async_session_factory() as db:
@@ -1644,7 +1698,7 @@ async def test_generate_and_send_campaign_one_click_generates_queues_and_sends_u
 
         captured: list[tuple[str, str]] = []
 
-        async def _capture_send(message, recipients):
+        async def _capture_send(message, recipients, smtp_account=None):
             part = message.get_payload()[0]
             raw = part.get_payload(decode=True)
             body = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
@@ -1684,7 +1738,7 @@ async def test_generate_and_send_campaign_one_click_generates_queues_and_sends_u
             )
         )
         assert missing_rec is not None
-        assert missing_rec.skip_reason == "缂哄皯閭"
+        assert missing_rec.skip_reason == "缂傚搫鐨柇顔绢唸"
 
 
 @pytest.mark.asyncio
@@ -1755,7 +1809,7 @@ async def test_one_click_workbench_summary_uses_real_campaign_queue_and_reply_ta
         reasons = {item.influencer_id: item.reason for item in summary.latest_results.items}
         assert statuses[sent.id] == "sent"
         assert statuses[missing.id] == "skipped"
-        assert reasons[missing.id] == "缺少邮箱"
+        assert reasons[missing.id] == "缂哄皯閭"
         assert summary.reply_followup.reply_count == 1
         reply_items = {item.influencer_id: item for item in summary.reply_followup.items}
         assert reply_items[sent.id].match_method == "message_header"

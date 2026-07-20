@@ -21,7 +21,7 @@ from app.models.outreach_email_campaign import OutreachEmailCampaign
 from app.models.outreach_send_queue import OutreachSendQueueItem
 from app.models.product_influencer import ProductInfluencer
 from app.models.tenant import Product
-from app.schemas.email_reply import InboundEmailPayload
+from app.schemas.email_reply import EmailReplyRead, InboundEmailPayload
 from app.services.email import EmailService
 from app.services.email_reply_service import EmailReplyService
 from app.services.influencer_persistence import (
@@ -128,6 +128,87 @@ async def test_webhook_ingest_matches_by_message_id_and_marks_replied():
         assert row is not None
         assert row.follow_status == LeadStatus.REPLIED.value
         assert row.last_reply_at is not None
+
+
+@pytest.mark.asyncio
+async def test_ingest_html_reply_stores_readable_text_body():
+    suffix = _suffix()
+    sender = "amazon03@ptraveldesign.com"
+    influencer_email = f"html_{suffix}@example.com"
+    message_id = f"<outreach-html-{suffix}@example.com>"
+    html_body = """<!DOCTYPE html>
+    <html><head><style>p{color:red}</style></head><body>
+      <p>Hello, thanks for reaching out.</p>
+      <div>Please send the product link and rate details.</div>
+    </body></html>"""
+
+    async with async_session_factory() as db:
+        record = await _create_influencer(db, suffix=suffix, email=influencer_email)
+        await EmailService.create_outreach_email_log(
+            db,
+            task_id=None,
+            recipients=[influencer_email],
+            subject="Partnership",
+            body="Would you like to collaborate?",
+            status=EmailLogStatus.SENT,
+            product_id=1,
+            user_id=1,
+            product_influencer_id=record.id,
+            sender_email=sender,
+            message_id=message_id,
+        )
+        await db.commit()
+
+        result = await EmailReplyService.ingest(
+            db,
+            InboundEmailPayload(
+                message_id=f"<reply-html-{suffix}@example.com>",
+                in_reply_to=message_id,
+                from_address=influencer_email,
+                to_address=sender,
+                subject="Re: Partnership",
+                body=html_body,
+                received_at=datetime.now(UTC),
+                product_id=1,
+            ),
+            source="imap",
+        )
+
+        assert result.status == "ingested"
+        reply = await db.get(EmailReply, result.reply_id)
+        assert reply is not None
+        assert "<!DOCTYPE" not in (reply.body or "")
+        assert "<html" not in (reply.body or "")
+        assert "Hello, thanks for reaching out." in (reply.body or "")
+        assert "Please send the product link" in (reply.snippet or "")
+
+
+def test_email_reply_read_cleans_existing_raw_html_body():
+    reply = EmailReply(
+        id=999001,
+        product_id=1,
+        email_log_id=None,
+        product_influencer_id=None,
+        campaign_id=None,
+        message_id="<old-html@example.com>",
+        in_reply_to=None,
+        match_method="unmatched",
+        processing_status="unprocessed",
+        intent_status="unmatched",
+        source="imap",
+        from_address="creator@example.com",
+        to_address="sales@example.com",
+        subject="Re: Partnership",
+        body="<html><body><p>Readable reply</p><style>.x{}</style></body></html>",
+        snippet="<html><body><p>Readable reply</p></body></html>",
+        raw_headers=None,
+        received_at=datetime.now(UTC),
+    )
+
+    data = EmailReplyRead.model_validate(reply)
+
+    assert data.body == "Readable reply"
+    assert data.snippet == "Readable reply"
 
 
 @pytest.mark.asyncio
@@ -500,7 +581,7 @@ async def test_unmatched_reply_is_saved_for_manual_review():
         assert result.status == "ingested"
         assert result.match_method == "unmatched"
         assert result.product_influencer_id is None
-        assert result.message == "已接收回复，但还没有匹配到红人，请在未匹配回复中手动关联"
+        assert result.message == "宸叉帴鏀跺洖澶嶏紝浣嗚繕娌℃湁鍖归厤鍒扮孩浜猴紝璇峰湪鏈尮閰嶅洖澶嶄腑鎵嬪姩鍏宠仈"
 
         reply = await db.scalar(
             select(EmailReply).where(EmailReply.message_id == f"<unmatched-{suffix}@example.com>")
@@ -692,6 +773,73 @@ async def test_unmatched_automated_mail_is_skipped():
             select(EmailReply).where(EmailReply.message_id == f"<steam-promo-{suffix}@example.com>")
         )
         assert row is None
+
+
+@pytest.mark.asyncio
+async def test_delivery_status_notification_is_skipped_even_if_subject_matches_sent_mail():
+    suffix = _suffix()
+    sender = "acer35430@gmail.com"
+    influencer_email = f"bounce_{suffix}@icloud.com"
+    message_id = f"<outreach-bounce-{suffix}@example.com>"
+
+    async with async_session_factory() as db:
+        record = await _create_influencer(db, suffix=f"bounce_{suffix}", email=influencer_email)
+        await EmailService.create_outreach_email_log(
+            db,
+            task_id=None,
+            recipients=[influencer_email],
+            subject="Partnership Opportunity with Amazon Seller Brand EPEDAL24",
+            body="Hello",
+            status=EmailLogStatus.SENT,
+            product_id=1,
+            user_id=1,
+            product_influencer_id=record.id,
+            sender_email=sender,
+            message_id=message_id,
+        )
+
+        result = await EmailReplyService.ingest(
+            db,
+            InboundEmailPayload(
+                message_id=f"<dsn-{suffix}@googlemail.com>",
+                in_reply_to=message_id,
+                from_address="mailer-daemon@googlemail.com",
+                to_address=sender,
+                subject="Delivery Status Notification (Failure)",
+                body="** Message blocked ** 554 5.7.1 Message rejected due to local policy.",
+                received_at=datetime.now(UTC),
+                product_id=1,
+            ),
+            source="imap",
+        )
+
+        assert result.status == "skipped"
+        assert result.reply_id is None
+
+
+@pytest.mark.asyncio
+async def test_outbound_copy_from_system_sender_is_skipped(monkeypatch):
+    suffix = _suffix()
+    sender = "acer35430@gmail.com"
+    monkeypatch.setattr("app.services.email_reply_service.settings.smtp_from", sender)
+
+    async with async_session_factory() as db:
+        result = await EmailReplyService.ingest(
+            db,
+            InboundEmailPayload(
+                message_id=f"<sent-copy-{suffix}@gmail.com>",
+                from_address=sender,
+                to_address=sender,
+                subject="Re: Partnership Opportunity with Amazon Seller Brand EPEDAL24",
+                body="<!DOCTYPE html><html><body>Original sent message copy</body></html>",
+                received_at=datetime.now(UTC),
+                product_id=1,
+            ),
+            source="imap",
+        )
+
+        assert result.status == "skipped"
+        assert result.reply_id is None
 
 
 @pytest.mark.asyncio
@@ -933,7 +1081,7 @@ async def test_send_response_for_matched_reply_writes_log_and_marks_processed():
 
         captured = {}
 
-        async def _capture_send(message, recipients):
+        async def _capture_send(message, recipients, smtp_account=None):
             captured["message"] = message
             captured["recipients"] = recipients
 

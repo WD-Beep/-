@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -55,12 +55,12 @@ function truncate(text: string | null | undefined, max = 90): string {
 }
 
 function influencerLabel(influencer: Influencer): string {
-  return `${influencer.display_name || influencer.username || influencer.id} · ${influencer.final_email || influencer.business_email || influencer.public_email || influencer.email || "无邮箱"}`;
+  return `${influencer.display_name || influencer.username || influencer.id} \u00b7 ${influencer.final_email || influencer.business_email || influencer.public_email || influencer.email || "\u65e0\u90ae\u7bb1"}`;
 }
 
 function candidateLabel(candidate: { display_name?: string | null; username?: string | null; email?: string | null }): string {
   const name = candidate.display_name || candidate.username || "疑似红人";
-  return candidate.email ? `${name} · ${candidate.email}` : name;
+  return candidate.email ? `${name} \u00b7 ${candidate.email}` : name;
 }
 
 function isGenericReplyAddress(value: string | null | undefined): boolean {
@@ -102,7 +102,7 @@ export function EmailRepliesPanel() {
       setReplies(replyData.items);
       setSelectedReplyIds(new Set());
     } catch (err) {
-      setError(err instanceof Error ? err.message : "鍥炲鍒楄〃鍔犺浇澶辫触");
+      setError(err instanceof Error ? err.message : "回复列表加载失败");
     } finally {
       setLoading(false);
     }
@@ -157,7 +157,7 @@ export function EmailRepliesPanel() {
 
   async function handlePoll() {
     if (requiresProduct) {
-      setError("请先选择具体产品后再收取红人回复");
+      setError("\u8bf7\u5148\u9009\u62e9\u5177\u4f53\u4ea7\u54c1\u540e\u518d\u6536\u53d6\u7ea2\u4eba\u56de\u590d");
       return;
     }
     setPolling(true);
@@ -168,7 +168,7 @@ export function EmailRepliesPanel() {
       if (result.processed === 0) {
         setNotice("没有新的未读回复");
       } else {
-        setNotice(`已拉取 ${result.processed} 封邮件，入库 ${result.ingested} 封`);
+        setNotice(`\u5df2\u62c9\u53d6 ${result.processed} \u5c01\u90ae\u4ef6\uff0c\u5165\u5e93 ${result.ingested} \u5c01`);
       }
       await load();
     } catch (err) {
@@ -204,7 +204,7 @@ export function EmailRepliesPanel() {
   async function handleManualLink(reply: EmailReply) {
     const influencerId = Number(selectedInfluencerId);
     if (!Number.isFinite(influencerId) || influencerId <= 0) {
-      setError("请先选择要关联的红人");
+      setError("\u8bf7\u5148\u9009\u62e9\u8981\u5173\u8054\u7684\u7ea2\u4eba");
       return;
     }
     await patchReply(reply, {
@@ -341,7 +341,7 @@ export function EmailRepliesPanel() {
         setError(result.error || "发送回复失败");
         return;
       }
-      setNotice("回复已发送，邮箱服务已接受发送");
+      setNotice("回复已发送，并已标记为已处理");
       await load();
       setExpanded(null);
       setResponseBody("");
@@ -401,7 +401,7 @@ export function EmailRepliesPanel() {
       setNotice(`已删除 ${result.deleted_count} 封回复`);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "鍒犻櫎鍥炲澶辫触锛岃绋嶅悗鍐嶈瘯");
+      setError(err instanceof Error ? err.message : "删除回复失败，请稍后再试");
     } finally {
       setDeleting(false);
     }
@@ -410,7 +410,7 @@ export function EmailRepliesPanel() {
   return (
     <AdminShell
       title="红人回复"
-      description="集中查看红人邮件回复，处理未读线索和未匹配邮件。"
+      description={"\u96c6\u4e2d\u67e5\u770b\u7ea2\u4eba\u90ae\u4ef6\u56de\u590d\uff0c\u4f18\u5148\u5904\u7406\u672a\u67e5\u770b\u3001\u672a\u5339\u914d\u90ae\u4ef6\u3002"}
       actions={
         <>
           <Button variant="outline" onClick={() => void load()} disabled={loading}>
@@ -428,7 +428,7 @@ export function EmailRepliesPanel() {
         {error ? <ErrorAlert message={error} onRetry={() => void load()} /> : null}
         {notice ? <SuccessAlert message={notice} /> : null}
         {requiresProduct ? (
-          <ErrorAlert message="总盘模式可以查看全部回复；收取、回复或删除前请先选择具体产品。" />
+          <ErrorAlert message={"\u5168\u90e8\u4ea7\u54c1\u6a21\u5f0f\u4e0b\u53ef\u4ee5\u67e5\u770b\u5168\u90e8\u56de\u590d\uff1b\u6536\u53d6\u65b0\u56de\u590d\u6216\u5220\u9664\u524d\uff0c\u8bf7\u5148\u9009\u62e9\u5177\u4f53\u4ea7\u54c1\u3002"} />
         ) : null}
 
         <section className="ops-panel shrink-0 p-4">
@@ -465,7 +465,7 @@ export function EmailRepliesPanel() {
               <Loader2 className="h-4 w-4 animate-spin" /> 正在加载回复...
             </div>
           ) : visibleReplies.length === 0 ? (
-            <EmptyState title="暂无符合条件的回复" description="可以切换筛选，或在具体产品下收取未读回复。" />
+            <EmptyState title={"\u6682\u65e0\u7b26\u5408\u6761\u4ef6\u7684\u56de\u590d"} description={"\u53ef\u4ee5\u5207\u6362\u7b5b\u9009\uff0c\u6216\u5728\u5177\u4f53\u4ea7\u54c1\u4e0b\u6536\u53d6\u672a\u8bfb\u56de\u590d\u3002"} />
           ) : (
             <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
               <table className="w-full min-w-[1080px] text-sm">
@@ -516,9 +516,9 @@ export function EmailRepliesPanel() {
                                 {getEmailReplyInfluencerDisplay(reply, influencer)}
                               </Link>
                             ) : matchCandidates.length > 0 ? (
-                              <span className="text-amber-700">疑似匹配：{candidateLabel(matchCandidates[0])}</span>
+                              <span className="text-amber-700">{"\u7591\u4f3c\u5339\u914d\uff1a"}{candidateLabel(matchCandidates[0])}</span>
                             ) : (
-                              <span className="text-amber-700">未自动关联</span>
+                              <span className="text-amber-700">{"\u672a\u5173\u8054\u7ea2\u4eba"}</span>
                             )}
                           </div>
                           <div className="mt-1 break-all text-xs text-muted-foreground">{reply.from_address}</div>
@@ -537,7 +537,7 @@ export function EmailRepliesPanel() {
                                     })
                                   }
                                 >
-                                  确认关联
+                                  {"\u786e\u8ba4\u5173\u8054"}
                                 </Button>
                               ))}
                             </div>
@@ -653,27 +653,27 @@ export function EmailRepliesPanel() {
               <div>
                 <h2 className="text-lg font-semibold">{expanded.subject || "(无标题)"}</h2>
                 <p className="mt-1 break-all text-sm text-muted-foreground">
-                  {expanded.from_address} → {expanded.to_address} · {formatDate(expanded.received_at)}
+                  {expanded.from_address}{" \u2192 "}{expanded.to_address}{" \u00b7 "}{formatDate(expanded.received_at)}
                 </p>
               </div>
               <Button variant="outline" onClick={() => setExpanded(null)}>
-                关闭
+                {"\u5173\u95ed"}
               </Button>
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
               <pre className="max-h-[52vh] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/20 p-4 text-sm leading-6">
-                {expanded.body || expanded.snippet || "没有正文内容"}
+                {expanded.body || expanded.snippet || "没有邮件正文"}
               </pre>
               <div className="mt-4 space-y-3 rounded-md border bg-muted/10 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <h3 className="text-sm font-semibold">回复红人</h3>
+                    <h3 className="text-sm font-semibold">回复处理</h3>
                     <p className="mt-1 break-all text-xs text-muted-foreground">
                       {expanded.product_influencer_id
                         ? getEmailReplyInfluencerDisplay(expanded, influencerMap.get(expanded.product_influencer_id))
-                        : "当前未自动关联红人，建议先关联后发送。"}
-                      {" · "}
+                        : "\u5f53\u524d\u672a\u5173\u8054\u7ea2\u4eba\uff0c\u5efa\u8bae\u5148\u5173\u8054\u540e\u53d1\u9001\u3002"}
+                      {" \u00b7 "}
                       {expanded.from_address}
                     </p>
                   </div>
@@ -705,7 +705,7 @@ export function EmailRepliesPanel() {
                 </div>
                 {!expanded.product_influencer_id ? (
                   <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                    当前未自动关联红人，建议先关联后发送。
+                    {"\u5f53\u524d\u672a\u5173\u8054\u7ea2\u4eba\uff0c\u5efa\u8bae\u5148\u5173\u8054\u540e\u53d1\u9001\u3002"}
                   </div>
                 ) : null}
                 <textarea
@@ -715,7 +715,7 @@ export function EmailRepliesPanel() {
                     setResponseBody(event.target.value);
                     setResponseDraftGenerated(false);
                   }}
-                  placeholder="编辑要发送给红人的回复内容"
+                  placeholder={"\u7f16\u8f91\u8981\u53d1\u9001\u7ed9\u7ea2\u4eba\u7684\u56de\u590d\u5185\u5bb9"}
                 />
                 <div className="flex flex-wrap justify-end gap-2">
                   <Button
@@ -724,7 +724,7 @@ export function EmailRepliesPanel() {
                     onClick={() => handleGenerateResponseDraft(expanded)}
                     disabled={sendingResponse}
                   >
-                    生成回复话术
+                    生成回复草稿
                   </Button>
                   <Button
                     type="button"
@@ -741,7 +741,7 @@ export function EmailRepliesPanel() {
             <div className="shrink-0 border-t bg-background px-6 py-4">
               <div className="grid min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
                 <label className="space-y-1 text-sm">
-                  <span className="font-medium">手动关联红人</span>
+                  <span className="font-medium">{"\u624b\u52a8\u5173\u8054\u7ea2\u4eba"}</span>
                   <select
                     className="h-9 w-full rounded-md border bg-background px-3"
                     value={selectedInfluencerId}
@@ -761,7 +761,7 @@ export function EmailRepliesPanel() {
                   onClick={() => void handleManualLink(expanded)}
                   disabled={actionId === expanded.id}
                 >
-                  保存关联
+                  {"\u5173\u8054\u7ea2\u4eba"}
                 </Button>
               </div>
             </div>
@@ -775,7 +775,7 @@ export function EmailRepliesPanel() {
             <div className="border-b px-6 py-4">
               <h2 className="text-lg font-semibold">编辑跟进备注</h2>
               <p className="mt-1 text-sm text-muted-foreground">
-                给业务同事记录下一步动作、对方诉求或需要注意的点。
+                给业务同事记录下一步动作、对方反馈或需要注意的点。
               </p>
             </div>
             <div className="px-6 py-4">
@@ -784,7 +784,7 @@ export function EmailRepliesPanel() {
                 value={noteDraft}
                 onChange={(event) => setNoteDraft(event.target.value)}
                 maxLength={2000}
-                placeholder="例如：对方想看报价单，明天下午跟进；需要确认寄样地址。"
+                placeholder="例如：对方想看报价，需要明天上午确认寄样地址。"
               />
               <div className="mt-2 text-right text-xs text-muted-foreground">{noteDraft.length}/2000</div>
             </div>

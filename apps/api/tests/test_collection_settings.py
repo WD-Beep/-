@@ -7,6 +7,7 @@ import anyio
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.core.config import Settings
 from app.core.config import settings
 from app.models.collection_task import CollectionTask
 from app.models.enums import CollectionTaskStatus
@@ -21,7 +22,8 @@ def test_collection_defaults_allow_ten_running_tasks():
     assert settings.collection_max_concurrency_per_user == 3
     assert settings.collection_max_concurrency_per_platform == 3
     # Field default is 4; conftest forces 0 so queue tests stay deterministic.
-    assert settings.model_fields["collection_worker_count"].default == 4
+    assert Settings.model_fields["collection_worker_count"].default == 4
+    assert Settings.model_fields["collection_api_embedded_worker_enabled"].default is True
 
 
 def test_collection_profile_enrichment_defaults():

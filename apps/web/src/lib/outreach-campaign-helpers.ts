@@ -379,6 +379,18 @@ export function buildImmediateSendStartedMessage(): string {
   return "正在发送，请留在当前页面查看结果。";
 }
 
+export const IMMEDIATE_SEND_CHUNK_SIZE = 20;
+
+export function chunkImmediateSendInfluencerIds(ids: number[], chunkSize = IMMEDIATE_SEND_CHUNK_SIZE): number[][] {
+  const size = Math.max(1, Math.floor(chunkSize || IMMEDIATE_SEND_CHUNK_SIZE));
+  const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isFinite(id) && id > 0)));
+  const chunks: number[][] = [];
+  for (let index = 0; index < uniqueIds.length; index += size) {
+    chunks.push(uniqueIds.slice(index, index + size));
+  }
+  return chunks;
+}
+
 export function buildImmediateSendResultMessage(input: {
   sent: number;
   failed: number;
@@ -391,6 +403,9 @@ export function buildImmediateSendResultMessage(input: {
       : "发送失败：当前网络连不上 SMTP 服务器（如 Gmail）。请改用 QQ/企业邮 SMTP，或打通 Gmail 后再发。";
   }
   if (input.failed > 0) {
+    if (input.reason?.trim()) {
+      return input.reason.trim();
+    }
     return `成功 ${input.sent} 封，失败 ${input.failed} 封。点击查看失败原因。`;
   }
   const skipped = input.skipped > 0 ? `，跳过 ${input.skipped} 人` : "";

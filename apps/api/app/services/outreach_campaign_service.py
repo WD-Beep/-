@@ -56,6 +56,7 @@ from app.services.outreach_send_queue_service import OutreachSendQueueService, _
 from app.services.outreach_recipient import outreach_recipient_skip_reason
 from app.services.product_influencer_service import ProductInfluencerService
 from app.services.speech_recommendation_service import SpeechRecommendationService
+from app.services.smtp_account import resolve_smtp_account
 from app.services.value_tier import classify_value_tier
 
 logger = logging.getLogger(__name__)
@@ -1682,13 +1683,12 @@ class OutreachCampaignService:
                 campaign_id=campaign_id,
             )
 
-        try:
-            EmailService.ensure_smtp_configured()
-        except EmailNotConfiguredError as exc:
+        sender_account = await resolve_smtp_account(db, user_id=ctx.user_id)
+        if not sender_account.configured:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=exc.message or SMTP_NOT_CONFIGURED_MSG,
-            ) from exc
+                detail=SMTP_NOT_CONFIGURED_MSG,
+            )
 
         filter_ids = set(influencer_ids or [])
         rows = list(
@@ -1739,10 +1739,10 @@ class OutreachCampaignService:
                 rec.draft_status = DRAFT_SKIPPED
                 continue
 
-            sender_email = _resolve_sender_email()
+            sender_email = sender_account.smtp_from or _resolve_sender_email()
             message_id = build_outbound_message_id(product_id=product_id)
             message = MIMEMultipart()
-            message["From"] = settings.smtp_from
+            message["From"] = sender_email or settings.smtp_from
             message["To"] = recipient
             message["Subject"] = subject
             message["Message-ID"] = message_id
@@ -1762,10 +1762,11 @@ class OutreachCampaignService:
                 "ai_reason": rec.reason,
                 "matched_knowledge": rec.matched_knowledge,
                 "message_id": message_id,
+                "smtp_account_id": sender_account.account_id,
             }
 
             try:
-                await EmailService._send_message(message, [recipient])
+                await EmailService._send_message(message, [recipient], smtp_account=sender_account)
                 log = await EmailService.create_outreach_email_log(
                     db,
                     status=EmailLogStatus.SENT,
@@ -1784,6 +1785,7 @@ class OutreachCampaignService:
                     campaign_id=campaign.id,
                     recipient=recipient,
                     sender_email=sender_email,
+                    smtp_account_id=sender_account.account_id,
                     subject=subject,
                     body=body,
                     status="sent",
@@ -1803,6 +1805,8 @@ class OutreachCampaignService:
                 sent += 1
             except Exception as exc:
                 err = format_smtp_send_error(exc)
+                if first_send_error is None:
+                    first_send_error = err
                 logger.warning("Direct campaign send failed for recipient %s: %s", rec.id, err)
                 log = await EmailService.create_outreach_email_log(
                     db,
@@ -1817,6 +1821,7 @@ class OutreachCampaignService:
                     campaign_id=campaign.id,
                     recipient=recipient,
                     sender_email=sender_email,
+                    smtp_account_id=sender_account.account_id,
                     subject=subject,
                     body=body,
                     status="failed",
@@ -1885,7 +1890,15 @@ class OutreachCampaignService:
             sent_today=await OutreachSendQueueService._count_sent_today_for_campaign(
                 db, product_id=product_id, campaign_id=campaign.id
             ),
-            message=(f"发送失败：{first_send_error}" if sent == 0 and failed > 0 and first_send_error else f"已处理 {sent + failed + skipped} 人：成功 {sent}，失败 {failed}，跳过 {skipped}"),
+            message=(
+                f"发送失败：{first_send_error}"
+                if sent == 0 and failed > 0 and first_send_error
+                else (
+                    f"部分发送失败：成功 {sent} 封，失败 {failed} 封，跳过 {skipped} 人。失败原因：{first_send_error}"
+                    if failed > 0 and first_send_error
+                    else f"已处理 {sent + failed + skipped} 人：成功 {sent}，失败 {failed}，跳过 {skipped}"
+                )
+            ),
         )
 
     @staticmethod

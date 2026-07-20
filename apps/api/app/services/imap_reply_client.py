@@ -11,7 +11,7 @@ from email.utils import parsedate_to_datetime
 
 from app.core.config import settings
 from app.schemas.email_reply import InboundEmailPayload
-from app.services.email_reply_utils import extract_email_address, parse_references
+from app.services.email_reply_utils import extract_email_address, html_to_text, parse_references
 from app.services.smtp_account import ResolvedImapAccount, system_imap_account
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,7 @@ def _decode_header_value(value: str | None) -> str:
 
 def _extract_body(msg: email.message.Message) -> str:
     if msg.is_multipart():
+        html_body = ""
         for part in msg.walk():
             content_type = part.get_content_type()
             if content_type == "text/plain" and part.get_content_disposition() != "attachment":
@@ -38,12 +39,18 @@ def _extract_body(msg: email.message.Message) -> str:
                 if isinstance(payload, bytes):
                     charset = part.get_content_charset() or "utf-8"
                     return payload.decode(charset, errors="replace")
-        return ""
+            if content_type == "text/html" and part.get_content_disposition() != "attachment" and not html_body:
+                payload = part.get_payload(decode=True)
+                if isinstance(payload, bytes):
+                    charset = part.get_content_charset() or "utf-8"
+                    html_body = payload.decode(charset, errors="replace")
+        return html_to_text(html_body)
     payload = msg.get_payload(decode=True)
     if isinstance(payload, bytes):
         charset = msg.get_content_charset() or "utf-8"
-        return payload.decode(charset, errors="replace")
-    return str(payload or "")
+        text = payload.decode(charset, errors="replace")
+        return html_to_text(text) if msg.get_content_type() == "text/html" else text
+    return html_to_text(str(payload or "")) if msg.get_content_type() == "text/html" else str(payload or "")
 
 
 def _header_map(msg: email.message.Message) -> dict[str, str]:

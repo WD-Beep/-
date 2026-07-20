@@ -339,12 +339,25 @@ test("sales login page is not server-redirected by a stale auth cookie", () => {
 
 test("sales sidebar reuses product options across route remounts", () => {
   const sidebar = source("../src/components/layout/sidebar.tsx");
+  const productContext = source("../src/lib/product-context.ts");
 
   assert.match(sidebar, /PRODUCT_OPTIONS_MEMORY_CACHE_TTL_MS/);
   assert.match(sidebar, /productOptionsInflight/);
   assert.match(sidebar, /readFreshProductOptionsMemoryCache/);
+  assert.match(sidebar, /readInitialProducts/);
   assert.match(sidebar, /fetchTenantProductsShared/);
   assert.match(sidebar, /setProductsLoading\(false\)/);
+  assert.match(sidebar, /router\.prefetch/);
+  assert.match(productContext, /let activeProductId: number = readStoredProductIdValue\(\)/);
+});
+
+test("admin sidebar prefetches admin routes to reduce click latency", () => {
+  const adminSidebar = source("../src/components/admin/admin-sidebar.tsx");
+  const adminHeader = source("../src/components/admin/admin-header.tsx");
+
+  assert.match(adminSidebar, /useRouter/);
+  assert.match(adminSidebar, /adminNavItems\.forEach\(\(item\) => router\.prefetch\(item\.href\)\)/);
+  assert.match(adminHeader, /router\.prefetch\("\/admin\/login\?relogin=1"\)/);
 });
 
 test("sales sidebar shows current sender email without blocking navigation", () => {

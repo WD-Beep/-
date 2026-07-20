@@ -48,6 +48,7 @@ import {
   type OutreachCampaignPreviewItem,
   type OutreachCampaignPreviewResponse,
   type OutreachOneClickWorkbench,
+  type OutreachSendQueueProcessResult,
 } from "@/lib/api";
 import { decodeFiltersFromSearchParams } from "@/lib/influencer-selection-helpers";
 import { notifyInfluencerEmailSent } from "@/lib/influencer-email-sync";
@@ -56,6 +57,7 @@ import { setStoredProductId } from "@/lib/product-context";
 import {
   buildImmediateSendResultMessage,
   buildImmediateSendStartedMessage,
+  chunkImmediateSendInfluencerIds,
   buildLocalDateTime,
   buildManualOutreachConfirmMessage,
   buildManualOutreachPayload,
@@ -869,6 +871,39 @@ export function OutreachCampaignsPanel() {
     });
   }
 
+  async function sendCampaignNowInChunks(
+    campaignId: number,
+    influencerIds: number[],
+  ): Promise<OutreachSendQueueProcessResult> {
+    const chunks = chunkImmediateSendInfluencerIds(influencerIds);
+    const total: OutreachSendQueueProcessResult = {
+      processed: 0,
+      sent: 0,
+      failed: 0,
+      skipped: 0,
+      daily_limit: 0,
+      sent_today: 0,
+      message: "",
+    };
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (chunks.length > 1) {
+        setMessage(`正在分批发送：第 ${index + 1}/${chunks.length} 批，请留在当前页面查看结果。`);
+      }
+      const result = await sendOutreachCampaignNow(campaignId, {
+        confirm: true,
+        influencer_ids: chunks[index],
+      });
+      total.processed += result.processed;
+      total.sent += result.sent;
+      total.failed += result.failed;
+      total.skipped += result.skipped;
+      total.daily_limit = result.daily_limit;
+      total.sent_today = result.sent_today;
+      total.message = result.message || total.message;
+    }
+    return total;
+  }
+
   async function runAction(action: ActionKind) {
     const reason = disabledReasonFor(action);
     if (reason) {
@@ -895,12 +930,12 @@ export function OutreachCampaignsPanel() {
           throw new Error("没有邮件发出。所有收件人都被规则跳过，请查看跳过原因。");
         }
         setMessage(buildImmediateSendStartedMessage());
-        const processed = await sendOutreachCampaignNow(generated.campaignId, {
-          confirm: true,
-          influencer_ids: generated.preview.items
+        const processed = await sendCampaignNowInChunks(
+          generated.campaignId,
+          generated.preview.items
             .filter((item) => item.can_queue)
             .map((item) => item.influencer_id),
-        });
+        );
         const skipped = generated.preview.skip_count + processed.skipped;
         setQueueStatus(processed.failed > 0 && processed.sent === 0 ? "failed" : "completed");
         const resultMessage = buildImmediateSendResultMessage({
@@ -1033,12 +1068,12 @@ export function OutreachCampaignsPanel() {
         if (action === "send") {
           setQueueStatus("sending");
           setMessage(buildImmediateSendStartedMessage());
-          const processed = await sendOutreachCampaignNow(generated.campaignId, {
-            confirm: true,
-            influencer_ids: actionPreview.items
+          const processed = await sendCampaignNowInChunks(
+            generated.campaignId,
+            actionPreview.items
               .filter((item) => item.can_queue)
               .map((item) => item.influencer_id),
-          });
+          );
           const skipped = actionPreview.skip_count + processed.skipped;
           setQueueStatus(processed.failed > 0 && processed.sent === 0 ? "failed" : "completed");
           const resultMessage = buildImmediateSendResultMessage({

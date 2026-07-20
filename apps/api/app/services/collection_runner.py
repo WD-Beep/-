@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors import get_collector
 from app.collectors.base import CollectedInfluencer
+from app.deps.tenant import TenantContext
 from app.models.collection_task import CollectionTask
 from app.models.enums import CandidateStatus, CollectionMode, CollectionTaskStatus
 from app.models.influencer import Influencer
@@ -16,6 +17,7 @@ from app.services.influencer_persistence import (
     InfluencerPersistenceService,
     apply_global_profile_data,
     apply_product_influencer_data,
+    clamp_collected_influencer_db_fields,
     create_global_profile_from_collected,
     create_product_influencer_from_collected,
     global_profile_has_changes,
@@ -48,6 +50,7 @@ from app.services.scoring import (
     calculate_score,
 )
 from app.services.business_quality import apply_creator_quality
+from app.services.collection_auto_outreach import CollectionAutoOutreachService
 
 logger = logging.getLogger(__name__)
 
@@ -839,6 +842,7 @@ class CollectionRunnerService:
         run_at: datetime,
     ) -> None:
         CollectionRunnerService._normalize_item_urls(data)
+        clamp_collected_influencer_db_fields(data)
         apply_creator_quality(data, task)
         score = data.score if data.score is not None else calculate_score(data, task)
         risk_level = data.risk_level or calculate_risk_level(score)
@@ -2319,7 +2323,30 @@ class CollectionRunnerService:
                 await EmailService.send_task_email_after_collection(db, task, total_count=result_count)
             if task.outreach_enabled:
                 await db.refresh(task)
-                await EmailService.sync_outreach_contacts_after_collection(db, task)
+                try:
+                    if task.user_id and task.product_id and task.workspace_id:
+                        await CollectionAutoOutreachService.create_campaign_and_queue(
+                            db,
+                            task,
+                            ctx=TenantContext(
+                                user_id=task.user_id,
+                                product_id=task.product_id,
+                                workspace_id=task.workspace_id,
+                                is_admin=False,
+                            ),
+                        )
+                    else:
+                        checkpoint = dict(task.run_checkpoint or {})
+                        checkpoint["auto_outreach_status"] = "missing_task_context"
+                        task.run_checkpoint = checkpoint
+                        await db.commit()
+                except Exception:
+                    logger.exception("collection auto outreach failed for task %s", task.id)
+                    checkpoint = dict(task.run_checkpoint or {})
+                    checkpoint["auto_outreach_status"] = "failed"
+                    checkpoint["auto_outreach_error"] = "auto_outreach_failed"
+                    task.run_checkpoint = checkpoint
+                    await db.commit()
 
             return {
                 "new_count": new_count + seed_new_count,

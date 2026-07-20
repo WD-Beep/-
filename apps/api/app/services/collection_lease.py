@@ -181,47 +181,54 @@ class CollectionLeaseService:
         worker_id: str,
     ) -> CollectionTask | None:
         """Atomically claim one runnable queued task using SKIP LOCKED."""
-        result = await db.execute(
-            select(CollectionTask)
-            .where(CollectionTask.status == CollectionTaskStatus.QUEUED.value)
-            .order_by(CollectionTask.updated_at.asc(), CollectionTask.id.asc())
-            .limit(80)
-            .with_for_update(skip_locked=True)
-        )
-        candidates = [
-            task
-            for task in result.scalars().all()
-            if not CollectionTaskService._is_batch_parent(task)
-        ]
-        if not candidates:
-            return None
+        try:
+            result = await db.execute(
+                select(CollectionTask)
+                .where(CollectionTask.status == CollectionTaskStatus.QUEUED.value)
+                .order_by(CollectionTask.updated_at.asc(), CollectionTask.id.asc())
+                .limit(80)
+                .with_for_update(skip_locked=True)
+            )
+            candidates = [
+                task
+                for task in result.scalars().all()
+                if not CollectionTaskService._is_batch_parent(task)
+            ]
+            if not candidates:
+                return None
 
-        running = await CollectionLeaseService.list_active_running(db)
-        candidates.sort(key=lambda task: CollectionLeaseService._queued_sort_key(task, running))
+            running = await CollectionLeaseService.list_active_running(db)
+            candidates.sort(key=lambda task: CollectionLeaseService._queued_sort_key(task, running))
 
-        from app.services.collection_queue import CollectionQueueService
+            from app.services.collection_queue import CollectionQueueService
 
-        for task in candidates:
-            reasons = CollectionLeaseService.capacity_reasons(task, running)
-            if reasons:
-                checkpoint = dict(task.run_checkpoint or {})
-                if checkpoint.get("queue_reasons") != reasons:
-                    CollectionQueueService.mark_task_queued(
-                        task,
-                        reasons,
-                        resume=bool(checkpoint.get("queued_resume")),
-                    )
-                continue
+            for task in candidates:
+                reasons = CollectionLeaseService.capacity_reasons(task, running)
+                if reasons:
+                    checkpoint = dict(task.run_checkpoint or {})
+                    if checkpoint.get("queue_reasons") != reasons:
+                        CollectionQueueService.mark_task_queued(
+                            task,
+                            reasons,
+                            resume=bool(checkpoint.get("queued_resume")),
+                        )
+                    continue
 
-            resume = bool((task.run_checkpoint or {}).get("queued_resume"))
-            CollectionQueueService.prepare_task_for_run(task, resume=resume)
-            CollectionLeaseService.attach_lease(task, worker_id)
+                resume = bool((task.run_checkpoint or {}).get("queued_resume"))
+                CollectionQueueService.prepare_task_for_run(task, resume=resume)
+                CollectionLeaseService.attach_lease(task, worker_id)
+                await db.commit()
+                await db.refresh(task)
+                return task
+
             await db.commit()
-            await db.refresh(task)
-            return task
-
-        await db.commit()
-        return None
+            return None
+        except Exception:
+            try:
+                await db.rollback()
+            except Exception:
+                logger.exception("Failed rolling back collection task claim transaction")
+            raise
 
     @staticmethod
     def concurrency_snapshot(

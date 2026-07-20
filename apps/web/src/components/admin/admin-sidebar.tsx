@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   Activity,
   BarChart3,
@@ -35,6 +35,7 @@ export const adminNavItems = [
 
 export function AdminSidebar() {
   const pathname = usePathname();
+  const router = useRouter();
   const [collapsed, setCollapsed] = useState(false);
   const [hovered, setHovered] = useState(false);
   const isCompact = collapsed && !hovered;
@@ -46,6 +47,11 @@ export function AdminSidebar() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
+
+  useEffect(() => {
+    adminNavItems.forEach((item) => router.prefetch(item.href));
+    router.prefetch("/admin/login?relogin=1");
+  }, [router]);
 
   function toggleCollapsed() {
     setCollapsed((value) => {

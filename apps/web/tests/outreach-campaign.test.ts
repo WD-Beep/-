@@ -25,6 +25,7 @@ import {
   getOneClickContentSourceLabel,
   getOneClickCurrentStatusLabel,
   buildOneClickCampaignName,
+  chunkImmediateSendInfluencerIds,
   buildPreviewResultMessage,
   buildSkipReasonSummary,
   CAMPAIGN_AUTO_SEND_CONFIRM_MESSAGE,
@@ -89,9 +90,10 @@ test("immediate campaign send uses direct send api instead of queue processing",
   const reviewedActionIndex = source.indexOf("async function runReviewedAction");
   const reviewedSendIndex = source.indexOf('if (action === "send")', reviewedActionIndex);
   const reviewedQueueIndex = source.indexOf("queuePreviewItems({", reviewedSendIndex);
-  const reviewedDirectIndex = source.indexOf("sendOutreachCampaignNow(", reviewedSendIndex);
+  const reviewedDirectIndex = source.indexOf("sendCampaignNowInChunks(", reviewedSendIndex);
 
   assert.ok(sendApiIndex >= 0, "direct send API should be imported");
+  assert.ok(source.includes("chunkImmediateSendInfluencerIds"), "large immediate sends should be split into chunks");
   assert.equal(processApiIndex, -1, "immediate send UI should not process queued campaign rows");
   assert.ok(reviewedActionIndex >= 0, "reviewed send action should exist");
   assert.ok(reviewedSendIndex > reviewedActionIndex, "reviewed send branch should exist");
@@ -742,6 +744,15 @@ test("one click workbench messages explain direct send and scheduled send clearl
     buildImmediateSendResultMessage({ sent: 38, failed: 2, skipped: 0 }),
     "成功 38 封，失败 2 封。点击查看失败原因。",
   );
+  assert.equal(
+    buildImmediateSendResultMessage({
+      sent: 137,
+      failed: 36,
+      skipped: 0,
+      reason: "部分发送失败：成功 137 封，失败 36 封，跳过 0 人。失败原因：SMTP 连接中断",
+    }),
+    "部分发送失败：成功 137 封，失败 36 封，跳过 0 人。失败原因：SMTP 连接中断",
+  );
   assert.match(
     buildScheduledQueueSuccessMessage({
       createdCount: 12,
@@ -750,6 +761,18 @@ test("one click workbench messages explain direct send and scheduled send clearl
     }),
     /^已设置定时发送：/,
   );
+});
+
+test("immediate campaign send splits large recipient lists into stable chunks", () => {
+  const ids = Array.from({ length: 45 }, (_, index) => index + 1);
+  const chunks = chunkImmediateSendInfluencerIds([...ids, 1, 2], 20);
+
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.length),
+    [20, 20, 5],
+  );
+  assert.equal(chunks[0][0], 1);
+  assert.equal(chunks[2][4], 45);
 });
 
 test("scheduled send completion message tells sales when mail actually went out", () => {

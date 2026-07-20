@@ -136,6 +136,18 @@ let smtpAccountMemoryCache: SmtpAccountMemoryCache | null = null;
 let smtpAccountInflight: Promise<UserSmtpAccountStatus> | null = null;
 let smtpAccountInflightUserId: number | null = null;
 
+function readInitialSession(): AuthSession | null {
+  return getStoredAuthSession();
+}
+
+function readInitialProducts(session: AuthSession | null): TenantProduct[] {
+  const userId = session?.userId;
+  const memoryItems = readFreshProductOptionsMemoryCache(userId);
+  if (memoryItems) return memoryItems;
+  const cachedItems = session ? prepareTenantProductOptions(readCachedTenantProducts(userId)) : [];
+  return cachedItems.length > 0 ? cachedItems : prepareTenantProductOptions(session?.accessibleProducts ?? []);
+}
+
 function isSameProductCacheUser(left?: number | null, right?: number | null) {
   return (left ?? null) === (right ?? null);
 }
@@ -224,9 +236,9 @@ export function Sidebar() {
   const router = useRouter();
   const productId = useActiveProductId();
   const { setProductId: setActiveProductId } = useProductActions();
-  const [products, setProducts] = useState<TenantProduct[]>([]);
-  const [session, setSession] = useState<AuthSession | null>(null);
-  const [productsLoading, setProductsLoading] = useState(true);
+  const [session, setSession] = useState<AuthSession | null>(() => readInitialSession());
+  const [products, setProducts] = useState<TenantProduct[]>(() => readInitialProducts(readInitialSession()));
+  const [productsLoading, setProductsLoading] = useState(() => readInitialProducts(readInitialSession()).length === 0);
   const [hasHydrated, setHasHydrated] = useState(false);
   const [productLoadError, setProductLoadError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -238,6 +250,7 @@ export function Sidebar() {
   const [smtpAccount, setSmtpAccount] = useState<UserSmtpAccountStatus | null>(null);
   const collapseTimer = useRef<number | null>(null);
   const productMenuRef = useRef<HTMLDivElement | null>(null);
+  const productIdRef = useRef(productId);
 
   const isAdmin = session?.isAdmin ?? false;
   const scopedProducts = useMemo(
@@ -288,6 +301,19 @@ export function Sidebar() {
   const senderEmailLabel = smtpAccount?.sender_email || "未配置发件邮箱";
   const senderSourceLabel = smtpAccount?.source === "user" ? "个人发件" : "系统发件";
 
+  useEffect(() => {
+    productIdRef.current = productId;
+  }, [productId]);
+
+  useEffect(() => {
+    const hrefs = new Set([
+      ...visibleMiniItems.map((item) => item.href),
+      ...visibleQuickLinks.map((item) => item.href),
+      "/login",
+    ]);
+    hrefs.forEach((href) => router.prefetch(href));
+  }, [router, visibleMiniItems, visibleQuickLinks]);
+
   const loadProducts = useCallback(async (
     sessionForCache: AuthSession | null = getStoredAuthSession(),
     options?: { force?: boolean },
@@ -337,10 +363,11 @@ export function Sidebar() {
         const sessionForResolution = storedSession
           ? { ...storedSession, accessibleProducts: items }
           : null;
+        const currentProductId = productIdRef.current;
         const resolvedId =
-          resolveProductIdForSession(productId, sessionForResolution) ??
-          resolveStoredProductId(productId, items);
-        if (resolvedId !== productId) {
+          resolveProductIdForSession(currentProductId, sessionForResolution) ??
+          resolveStoredProductId(currentProductId, items);
+        if (resolvedId !== currentProductId) {
           setActiveProductId(resolvedId);
           return;
         }
@@ -349,7 +376,7 @@ export function Sidebar() {
     return () => {
       cancelled = true;
     };
-  }, [loadProducts, productId, setActiveProductId]);
+  }, [loadProducts, setActiveProductId]);
 
   useEffect(() => {
     return () => {

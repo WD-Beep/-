@@ -73,6 +73,7 @@ import {
   resolveBulkDeleteSelection,
   resolveBulkOutreachSelection,
   resolveCurrentPageSelectedIds,
+  shouldPromotePageSelectionToFilterAll,
   type InfluencerSelectionMode,
 } from "@/lib/influencer-selection-helpers";
 import { INFLUENCER_EMAIL_SENT_EVENT } from "@/lib/influencer-email-sync";
@@ -557,6 +558,16 @@ export function InfluencersPanel() {
   function toggleSelectAllPage() {
     if (selectionMode === "filter_all") {
       cancelFilterAllSelection();
+      return;
+    }
+    if (
+      shouldPromotePageSelectionToFilterAll({
+        total,
+        currentPageCount: items.length,
+        allPageSelected,
+      })
+    ) {
+      selectAllFiltered();
       return;
     }
     setSelectedIds((prev) => {

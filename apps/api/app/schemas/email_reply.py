@@ -2,9 +2,10 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.common import ORMModel
+from app.services.email_reply_utils import html_to_text, make_snippet
 
 
 class InboundEmailPayload(BaseModel):
@@ -66,6 +67,20 @@ class EmailReplyRead(ORMModel):
     viewed_at: datetime | None = None
     handled_at: datetime | None = None
     manual_note: str | None = None
+
+    @field_validator("body", mode="before")
+    @classmethod
+    def clean_body(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return html_to_text(value)
+
+    @field_validator("snippet", mode="before")
+    @classmethod
+    def clean_snippet(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return make_snippet(value)
 
 
 class EmailReplyUpdateRequest(BaseModel):

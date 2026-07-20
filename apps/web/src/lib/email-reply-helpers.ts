@@ -44,7 +44,7 @@ export function getEmailReplyInfluencerDisplay(
   reply: EmailReplyCenterItem,
   influencer: EmailReplyInfluencerSummary | null | undefined,
 ): string {
-  if (!reply.product_influencer_id || !influencer) return "未自动关联";
+  if (!reply.product_influencer_id || !influencer) return "未关联红人";
   const name = influencer.display_name || influencer.username || String(influencer.id);
   const email = influencerEmail(influencer);
   return email ? `${name} · ${email}` : name;

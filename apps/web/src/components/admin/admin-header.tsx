@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import { LogOut, Menu, ShieldCheck } from "lucide-react";
 import { useRouter } from "next/navigation";
 
@@ -8,6 +9,10 @@ import { clearAuthSession, getStoredAuthSession } from "@/lib/auth";
 export function AdminHeader() {
   const router = useRouter();
   const session = getStoredAuthSession();
+
+  useEffect(() => {
+    router.prefetch("/admin/login?relogin=1");
+  }, [router]);
 
   function handleLogout() {
     clearAuthSession();

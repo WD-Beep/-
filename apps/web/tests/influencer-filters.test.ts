@@ -17,6 +17,7 @@ import {
   resolveCurrentPageSelectedIds,
   resolveBulkDeleteSelection,
   resolveBulkOutreachSelection,
+  shouldPromotePageSelectionToFilterAll,
 } from "../src/lib/influencer-selection-helpers.ts";
 
 test("valueTier maps to value_tier query param", () => {
@@ -169,6 +170,21 @@ test("resolveBulkOutreachSelection sends full filtered result only after select-
   assert.equal(selection.selectAll, true);
   assert.deepEqual(selection.filters, { hasEmail: true, excludeTerminalStatuses: true });
   assert.equal("ids" in selection, false);
+});
+
+test("table select-all promotes to filtered selection when more rows exist beyond current page", () => {
+  assert.equal(
+    shouldPromotePageSelectionToFilterAll({ total: 126, currentPageCount: 20, allPageSelected: false }),
+    true,
+  );
+  assert.equal(
+    shouldPromotePageSelectionToFilterAll({ total: 20, currentPageCount: 20, allPageSelected: false }),
+    false,
+  );
+  assert.equal(
+    shouldPromotePageSelectionToFilterAll({ total: 126, currentPageCount: 20, allPageSelected: true }),
+    false,
+  );
 });
 
 test("resolveBulkDeleteSelection only deletes explicitly checked page rows", () => {

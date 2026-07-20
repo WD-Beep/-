@@ -1094,13 +1094,13 @@ export function TaskFormDialog({
               >
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-medium">自动化与通知</h3>
+                    <h3 className="text-sm font-medium">采集后自动发信</h3>
                     <span className="text-xs text-muted-foreground">可选</span>
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {form.schedule_enabled || form.email_enabled || form.outreach_enabled
-                      ? "已启用部分自动化选项"
-                      : "默认可跳过"}
+                    {form.outreach_enabled
+                      ? "采集完成后会自动筛选邮箱、AI生成定制邮件并进入发送队列"
+                      : "默认关闭；不需要自动发信可以跳过"}
                   </p>
                 </div>
                 <ChevronDown
@@ -1109,86 +1109,151 @@ export function TaskFormDialog({
               </button>
 
               {automationOpen ? (
-                <div className="mt-4 space-y-4">
-                  <label className="flex items-center gap-2 text-sm">
+                <div className="mt-4 space-y-4 rounded-lg border bg-muted/20 p-4">
+                  <label className="flex items-start gap-2 text-sm">
                     <input
                       type="checkbox"
-                      checked={form.schedule_enabled}
-                      onChange={(e) => setForm({ ...form, schedule_enabled: e.target.checked })}
-                    />
-                    启用定时任务
-                  </label>
-                  {form.schedule_enabled ? (
-                    <div className="space-y-2">
-                      <Label htmlFor="schedule_cron">Cron 表达式</Label>
-                      <Input
-                        id="schedule_cron"
-                        value={form.schedule_cron}
-                        onChange={(e) => setForm({ ...form, schedule_cron: e.target.value })}
-                        placeholder="0 9 * * 1"
-                      />
-                    </div>
-                  ) : null}
-
-                  <label className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={form.email_enabled}
-                      onChange={(e) => setForm({ ...form, email_enabled: e.target.checked })}
-                    />
-                    采集完成后发送邮件
-                  </label>
-                  {form.email_enabled ? (
-                    <div className="space-y-2">
-                      <Label htmlFor="email_recipients">收件人邮箱</Label>
-                      <Input
-                        id="email_recipients"
-                        value={form.email_recipientsText}
-                        onChange={(e) => setForm({ ...form, email_recipientsText: e.target.value })}
-                        placeholder="ops@example.com"
-                      />
-                    </div>
-                  ) : null}
-
-                  <label className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
+                      className="mt-1"
                       checked={form.outreach_enabled}
                       onChange={(e) => setForm({ ...form, outreach_enabled: e.target.checked })}
                     />
-                    启用外联同步
+                    <span>
+                      <span className="block font-medium">开启采集完成后自动AI发邮件</span>
+                      <span className="block text-xs text-muted-foreground">
+                        系统会跳过无邮箱、无效邮箱、已发过和重复红人，生成草稿后放入发送队列分批发送。
+                      </span>
+                    </span>
                   </label>
+
                   {form.outreach_enabled ? (
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <div className="space-y-2">
-                        <Label htmlFor="outreach_provider">外联渠道</Label>
-                        <select
-                          id="outreach_provider"
-                          value={form.outreach_provider}
-                          onChange={(e) => setForm({ ...form, outreach_provider: e.target.value })}
-                          className={cn(
-                            "flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                          )}
-                        >
-                          <option value="mailchimp">Mailchimp</option>
-                          <option value="smtp">SMTP</option>
-                        </select>
+                    <div className="space-y-4">
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="space-y-2">
+                          <Label htmlFor="outreach_subject_template">邮件主题模板</Label>
+                          <Input
+                            id="outreach_subject_template"
+                            value={form.outreach_subject_template}
+                            onChange={(e) => setForm({ ...form, outreach_subject_template: e.target.value })}
+                            placeholder="Collaboration with {红人名称}"
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="outreach_product_name">产品名称</Label>
+                          <Input
+                            id="outreach_product_name"
+                            value={form.outreach_product_name}
+                            onChange={(e) => setForm({ ...form, outreach_product_name: e.target.value })}
+                            placeholder="Travel Home Lamp"
+                          />
+                        </div>
                       </div>
-                      <label className="flex items-end gap-2 pb-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={form.outreach_dry_run}
-                          onChange={(e) => setForm({ ...form, outreach_dry_run: e.target.checked })}
+
+                      <div className="space-y-2">
+                        <Label htmlFor="outreach_body_template">邮件正文模板 / 话术要求</Label>
+                        <Textarea
+                          id="outreach_body_template"
+                          rows={4}
+                          value={form.outreach_body_template}
+                          onChange={(e) => setForm({ ...form, outreach_body_template: e.target.value })}
+                          placeholder="先介绍品牌，再结合博主主页风格定制邀请，请她拍摄视频并发布到 Amazon 或社媒平台。"
                         />
-                        试跑模式
-                      </label>
+                      </div>
+
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="space-y-2">
+                          <Label htmlFor="outreach_selling_points">产品卖点</Label>
+                          <Textarea
+                            id="outreach_selling_points"
+                            rows={3}
+                            value={form.outreach_selling_points}
+                            onChange={(e) => setForm({ ...form, outreach_selling_points: e.target.value })}
+                            placeholder="便携、适合家居场景、Amazon 可购买、适合视频展示"
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="outreach_collaboration_offer">合作方式 / 合作诉求</Label>
+                          <Textarea
+                            id="outreach_collaboration_offer"
+                            rows={3}
+                            value={form.outreach_collaboration_offer}
+                            onChange={(e) => setForm({ ...form, outreach_collaboration_offer: e.target.value })}
+                            placeholder="寄样拍摄视频，可加入 Amazon 联盟计划，佣金 10%-30%"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label htmlFor="outreach_note">备注（优惠、佣金、样品、品牌介绍等）</Label>
+                        <Textarea
+                          id="outreach_note"
+                          rows={2}
+                          value={form.outreach_note}
+                          onChange={(e) => setForm({ ...form, outreach_note: e.target.value })}
+                          placeholder="可补充产品链接、优惠、样品政策或品牌介绍"
+                        />
+                      </div>
+
+                      <div className="grid gap-3 sm:grid-cols-3">
+                        <div className="space-y-2">
+                          <Label htmlFor="outreach_daily_limit">每天最多发送</Label>
+                          <Input
+                            id="outreach_daily_limit"
+                            type="number"
+                            min="1"
+                            max="1000"
+                            value={form.outreach_daily_limit}
+                            onChange={(e) => setForm({ ...form, outreach_daily_limit: e.target.value })}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="outreach_hourly_limit">每小时最多发送</Label>
+                          <Input
+                            id="outreach_hourly_limit"
+                            type="number"
+                            min="1"
+                            max="1000"
+                            value={form.outreach_hourly_limit}
+                            onChange={(e) => setForm({ ...form, outreach_hourly_limit: e.target.value })}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="outreach_send_interval_minutes">每封间隔分钟</Label>
+                          <Input
+                            id="outreach_send_interval_minutes"
+                            type="number"
+                            min="1"
+                            max="1440"
+                            value={form.outreach_send_interval_minutes}
+                            onChange={(e) => setForm({ ...form, outreach_send_interval_minutes: e.target.value })}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <label className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={form.outreach_require_high_value}
+                            onChange={(e) => setForm({ ...form, outreach_require_high_value: e.target.checked })}
+                          />
+                          只发给高价值红人
+                        </label>
+                        <label className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={form.outreach_allow_resend}
+                            onChange={(e) => setForm({ ...form, outreach_allow_resend: e.target.checked })}
+                          />
+                          允许给已联系过红人重复发送
+                        </label>
+                      </div>
                     </div>
                   ) : null}
                 </div>
               ) : null}
             </section>
-          </div>
 
+          </div>
           <div className="shrink-0 border-t bg-background px-5 py-4 sm:px-6">
             {validationError && mode === "create" ? (
               <p className="mb-3 text-xs text-muted-foreground">{validationError}</p>

@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     api_direct_max_retries: int = 2
     api_direct_retry_backoff_seconds: float = 1.5
     api_direct_max_requests_per_platform: int = 20
+    api_direct_min_interval_seconds: float = 0.35
+    api_direct_rate_limit_cooldown_seconds: float = 5.0
     collection_search_concurrency: int = 4
     collection_profile_concurrency: int = 8
     collection_profile_enrich_concurrency: int = 3
@@ -111,6 +113,13 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices(
             "COLLECTION_WORKER_COUNT",
             "collection_worker_count",
+        ),
+    )
+    collection_api_embedded_worker_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "COLLECTION_API_EMBEDDED_WORKER_ENABLED",
+            "collection_api_embedded_worker_enabled",
         ),
     )
     collection_worker_poll_interval_seconds: float = Field(

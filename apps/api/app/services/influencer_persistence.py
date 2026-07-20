@@ -16,6 +16,9 @@ from app.services.platform_utils import normalize_profile_url, platform_identity
 from app.services.scoring import calculate_risk_level, calculate_score
 
 GLOBAL_PROFILE_STALE_DAYS = 7
+GLOBAL_URL_FIELD_MAX_LENGTH = 1024
+PRODUCT_SOURCE_URL_FIELD_MAX_LENGTH = 512
+PRODUCT_SOURCE_TYPE_MAX_LENGTH = 32
 
 
 def normalize_username(username: str | None) -> str:
@@ -40,12 +43,38 @@ def should_refresh_global_profile(profile: GlobalInfluencerProfile, *, now: date
     return current - reference.astimezone(UTC) > timedelta(days=GLOBAL_PROFILE_STALE_DAYS)
 
 
+def _limit_text(value: str | None, max_length: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) <= max_length:
+        return text
+    return text[:max_length]
+
+
+def clamp_collected_influencer_db_fields(data: CollectedInfluencer) -> None:
+    for field in (
+        "profile_url",
+        "avatar_url",
+        "website",
+        "contact_page",
+        "linktree_url",
+        "whatsapp",
+    ):
+        setattr(data, field, _limit_text(getattr(data, field, None), GLOBAL_URL_FIELD_MAX_LENGTH))
+    data.source_post_url = _limit_text(data.source_post_url, PRODUCT_SOURCE_URL_FIELD_MAX_LENGTH)
+    data.source_comment_url = _limit_text(data.source_comment_url, PRODUCT_SOURCE_URL_FIELD_MAX_LENGTH)
+    data.source_input_url = _limit_text(data.source_input_url, PRODUCT_SOURCE_URL_FIELD_MAX_LENGTH)
+    data.source_discovery_type = _limit_text(data.source_discovery_type, PRODUCT_SOURCE_TYPE_MAX_LENGTH)
+
+
 def apply_global_profile_data(
     profile: GlobalInfluencerProfile,
     data: CollectedInfluencer,
     *,
     run_at: datetime,
 ) -> None:
+    clamp_collected_influencer_db_fields(data)
     profile.username = data.username
     profile.normalized_username = normalize_username(data.username)
     profile.display_name = getattr(data, "display_name", None)
@@ -116,6 +145,7 @@ def apply_product_influencer_data(
     *,
     run_at: datetime,
 ) -> None:
+    clamp_collected_influencer_db_fields(data)
     apply_creator_quality(data, task)
     score = data.score if data.score is not None else calculate_score(data, task)
     risk_level = data.risk_level or calculate_risk_level(score)

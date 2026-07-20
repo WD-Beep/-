@@ -36,7 +36,10 @@ from app.services.email_reply_utils import (
     build_outbound_message_id,
     detect_cooperation_interest,
     extract_email_address,
+    html_to_text,
     is_automated_sender,
+    is_delivery_status_notification,
+    is_outbound_copy,
     make_snippet,
     normalize_message_id,
     parse_references,
@@ -294,7 +297,7 @@ class EmailReplyService:
         to_address = extract_email_address(to_raw if isinstance(to_raw, str) else None)
         if not to_address and isinstance(to_raw, list):
             to_address = extract_email_address(to_raw[0] if to_raw else None)
-        body = payload.body or payload.text or payload.html or ""
+        body = payload.body or payload.text or html_to_text(payload.html) or ""
         return InboundEmailPayload(
             message_id=payload.message_id,
             in_reply_to=payload.in_reply_to,
@@ -341,7 +344,7 @@ class EmailReplyService:
             from_address=from_address,
             to_address=to_address or "",
             subject=(payload.subject or "")[:500],
-            body=payload.body,
+            body=html_to_text(payload.body),
             snippet=make_snippet(payload.body),
             raw_headers=with_reply_match_meta(
                 payload.raw_headers,
@@ -378,6 +381,23 @@ class EmailReplyService:
         if not from_address:
             return EmailReplyIngestResult(status="skipped", message="缺少有效发件人地址")
 
+
+        if is_delivery_status_notification(
+            from_address=from_address,
+            subject=payload.subject,
+            body=payload.body,
+        ):
+            return EmailReplyIngestResult(status="skipped", message="退信/投递失败通知已跳过，不作为红人回复")
+
+        outbound_addresses = {
+            normalize_email_address(settings.smtp_from),
+            normalize_email_address(settings.smtp_user),
+            normalize_email_address(settings.inbound_email_address),
+        }
+        outbound_addresses.discard(None)
+        if is_outbound_copy(from_address=from_address, configured_addresses=outbound_addresses):
+            return EmailReplyIngestResult(status="skipped", message="自己发出的邮件副本已跳过，不作为红人回复")
+
         normalized_message_id = normalize_message_id(payload.message_id)
         if normalized_message_id:
             existing = await db.scalar(
@@ -392,13 +412,14 @@ class EmailReplyService:
                     message="重复 Message-ID，已跳过",
                 )
 
+        clean_body = html_to_text(payload.body)
         match = await EmailReplyMatcher.match(
             db,
             from_address=from_address,
             to_address=to_address or "",
             subject=payload.subject,
-            snippet=make_snippet(payload.body),
-            body=payload.body,
+            snippet=make_snippet(clean_body),
+            body=clean_body,
             in_reply_to=payload.in_reply_to,
             references=payload.references,
             product_id_hint=payload.product_id,
@@ -415,18 +436,18 @@ class EmailReplyService:
                     status="failed",
                     message="已收到回复，但无法判断归属产品，请先选择产品后手动拉取收件箱",
                 )
-            snippet = make_snippet(payload.body)
+            snippet = make_snippet(clean_body)
             candidate_meta = await EmailReplyMatcher.candidate_meta(
                 db,
                 from_address=from_address,
                 subject=payload.subject,
                 snippet=snippet,
-                body=payload.body,
+                body=clean_body,
                 product_id_hint=resolved_product_id,
             )
             return await EmailReplyService._save_unmatched_reply(
                 db,
-                payload.model_copy(update={"product_id": resolved_product_id}),
+                payload.model_copy(update={"product_id": resolved_product_id, "body": clean_body}),
                 source=source,
                 from_address=from_address,
                 to_address=to_address,
@@ -444,8 +465,8 @@ class EmailReplyService:
                 )
 
         received_at = payload.received_at or datetime.now(UTC)
-        snippet = make_snippet(payload.body)
-        interested = detect_cooperation_interest(subject=payload.subject, body=payload.body)
+        snippet = make_snippet(clean_body)
+        interested = detect_cooperation_interest(subject=payload.subject, body=clean_body)
         reply = EmailReply(
             product_id=match.product_id,
             user_id=None,
@@ -461,7 +482,7 @@ class EmailReplyService:
             from_address=from_address,
             to_address=to_address or "",
             subject=(payload.subject or "")[:500],
-            body=payload.body,
+            body=clean_body,
             snippet=snippet,
             raw_headers=with_reply_match_meta(
                 payload.raw_headers,

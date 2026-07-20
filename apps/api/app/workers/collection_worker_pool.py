@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from app.core.config import settings
 from app.db.session import async_session_factory
@@ -20,6 +21,15 @@ logger = logging.getLogger(__name__)
 
 _pool_tasks: list[asyncio.Task] = []
 _stop_event: asyncio.Event | None = None
+
+
+def _stale_reconcile_interval_seconds() -> float:
+    threshold = CollectionLeaseService.stale_threshold_seconds()
+    return float(max(10, min(60, threshold // 2 or threshold)))
+
+
+async def _reconcile_stale_before_claim(db) -> int:
+    return await CollectionTaskService.reconcile_stale_running_tasks(db)
 
 
 async def _heartbeat_loop(task_id: int, worker_id: str, stop: asyncio.Event) -> None:
@@ -92,12 +102,20 @@ async def _run_claimed_task(task_id: int, worker_id: str, *, resume: bool) -> No
 async def _worker_loop(slot: int, stop_event: asyncio.Event) -> None:
     worker_id = make_worker_id(slot)
     poll = max(0.2, float(settings.collection_worker_poll_interval_seconds))
+    stale_reconcile_interval = _stale_reconcile_interval_seconds()
+    last_stale_reconcile = 0.0
     logger.info("Collection worker started: %s", worker_id)
     while not stop_event.is_set():
         claimed_id: int | None = None
         resume = False
         try:
             async with async_session_factory() as db:
+                now = time.monotonic()
+                if slot == 0 and now - last_stale_reconcile >= stale_reconcile_interval:
+                    last_stale_reconcile = now
+                    recovered = await _reconcile_stale_before_claim(db)
+                    if recovered:
+                        logger.warning("Collection worker recovered %s stale task(s) before claim", recovered)
                 task = await CollectionLeaseService.claim_next_queued_task(db, worker_id)
                 if task is not None:
                     claimed_id = task.id

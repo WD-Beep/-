@@ -38,6 +38,16 @@ def format_smtp_send_error(exc: Exception) -> str:
     if "535" in message or "authentication failed" in lowered:
         return SMTP_AUTH_FAILED_MSG
     if (
+        "connection lost" in lowered
+        or "connection reset" in lowered
+        or "server disconnected" in lowered
+        or "broken pipe" in lowered
+    ):
+        return (
+            "SMTP 连接中断：邮箱服务可能对本次批量发送限流或临时断开连接。"
+            "已成功发送的邮件不会重复发送；失败邮件请稍后重试，或改用定时发送/发送队列分批发送。"
+        )
+    if (
         "timed out" in lowered
         or "timeout" in lowered
         or "10060" in message

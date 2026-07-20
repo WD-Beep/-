@@ -40,17 +40,20 @@ _reporter: ContextVar[DiscoveryProgressReporter | None] = ContextVar("discovery_
 
 
 
+def _safe_loaded_attr(obj: Any, name: str, default: Any = None) -> Any:
+    return getattr(obj, "__dict__", {}).get(name, default)
+
+
 def _is_multi_platform_task(task: CollectionTask) -> bool:
-    platforms = getattr(task, "platforms", None) or []
-    return getattr(task, "platform", None) == "multi" or len(platforms) > 1
+    platforms = _safe_loaded_attr(task, "platforms", []) or []
+    return _safe_loaded_attr(task, "platform") == "multi" or len(platforms) > 1
 
 
-def _merge_progress_count(task: CollectionTask, field_name: str, value: int | None) -> int | None:
+def _merge_progress_count(current: int, is_multi_platform: bool, value: int | None) -> int | None:
     if value is None:
         return None
-    if not _is_multi_platform_task(task):
+    if not is_multi_platform:
         return value
-    current = getattr(task, field_name, None) or 0
     return max(current, value)
 
 
@@ -68,6 +71,22 @@ class DiscoveryProgressReporter:
 
     discovery_started_at: float = field(default_factory=time.perf_counter)
     _commit_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _is_multi_platform: bool = field(init=False, repr=False)
+    _platform: str | None = field(init=False, repr=False)
+    _discovered_count: int = field(init=False, repr=False)
+    _deduped_count: int = field(init=False, repr=False)
+    _profile_fetched_count: int = field(init=False, repr=False)
+    _filtered_out_count: int = field(init=False, repr=False)
+    _inserted_count: int = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._is_multi_platform = _is_multi_platform_task(self.task)
+        self._platform = _safe_loaded_attr(self.task, "platform")
+        self._discovered_count = int(_safe_loaded_attr(self.task, "discovered_count", 0) or 0)
+        self._deduped_count = int(_safe_loaded_attr(self.task, "deduped_count", 0) or 0)
+        self._profile_fetched_count = int(_safe_loaded_attr(self.task, "profile_fetched_count", 0) or 0)
+        self._filtered_out_count = int(_safe_loaded_attr(self.task, "filtered_out_count", 0) or 0)
+        self._inserted_count = int(_safe_loaded_attr(self.task, "inserted_count", 0) or 0)
 
 
     def _discovery_elapsed_seconds(self) -> float:
@@ -94,7 +113,7 @@ class DiscoveryProgressReporter:
 
             return False
 
-        discovered = discovered_count if discovered_count is not None else (self.task.discovered_count or 0)
+        discovered = discovered_count if discovered_count is not None else self._discovered_count
 
         if discovered > 0:
 
@@ -169,35 +188,56 @@ class DiscoveryProgressReporter:
 
         self.task.current_stage = phase
 
-        merged_discovered_count = _merge_progress_count(self.task, "discovered_count", discovered_count)
-        merged_deduped_count = _merge_progress_count(self.task, "deduped_count", deduped_count)
+        merged_discovered_count = _merge_progress_count(
+            self._discovered_count,
+            self._is_multi_platform,
+            discovered_count,
+        )
+        merged_deduped_count = _merge_progress_count(
+            self._deduped_count,
+            self._is_multi_platform,
+            deduped_count,
+        )
         merged_profile_fetched_count = _merge_progress_count(
-            self.task,
-            "profile_fetched_count",
+            self._profile_fetched_count,
+            self._is_multi_platform,
             profile_fetched_count,
         )
-        merged_filtered_out_count = _merge_progress_count(self.task, "filtered_out_count", filtered_out_count)
-        merged_inserted_count = _merge_progress_count(self.task, "inserted_count", inserted_count)
+        merged_filtered_out_count = _merge_progress_count(
+            self._filtered_out_count,
+            self._is_multi_platform,
+            filtered_out_count,
+        )
+        merged_inserted_count = _merge_progress_count(
+            self._inserted_count,
+            self._is_multi_platform,
+            inserted_count,
+        )
 
         if merged_discovered_count is not None:
 
             self.task.discovered_count = merged_discovered_count
+            self._discovered_count = merged_discovered_count
 
         if merged_deduped_count is not None:
 
             self.task.deduped_count = merged_deduped_count
+            self._deduped_count = merged_deduped_count
 
         if merged_profile_fetched_count is not None:
 
             self.task.profile_fetched_count = merged_profile_fetched_count
+            self._profile_fetched_count = merged_profile_fetched_count
 
         if merged_filtered_out_count is not None:
 
             self.task.filtered_out_count = merged_filtered_out_count
+            self._filtered_out_count = merged_filtered_out_count
 
         if merged_inserted_count is not None:
 
             self.task.inserted_count = merged_inserted_count
+            self._inserted_count = merged_inserted_count
 
             self.task.success_count = merged_inserted_count
 
@@ -213,7 +253,7 @@ class DiscoveryProgressReporter:
 
         self.task.processed_count = max(0, processed)
 
-        total = self.target_qualified if phase == "persist" else max(self.task.discovered_count or 0, self.target_qualified)
+        total = self.target_qualified if phase == "persist" else max(self._discovered_count, self.target_qualified)
 
         self.task.total_estimate = max(total, self.target_qualified)
 
@@ -331,15 +371,15 @@ class DiscoveryProgressReporter:
 
             target=self.target_qualified,
 
-            discovered=self.task.discovered_count or 0,
+            discovered=self._discovered_count,
 
-            deduped=self.task.deduped_count or 0,
+            deduped=self._deduped_count,
 
-            profile_fetched=self.task.profile_fetched_count or 0,
+            profile_fetched=self._profile_fetched_count,
 
-            filtered_out=self.task.filtered_out_count or 0,
+            filtered_out=self._filtered_out_count,
 
-            inserted=self.task.inserted_count or 0,
+            inserted=self._inserted_count,
 
             rate_limited=bool(extra.get("rate_limited")),
 
@@ -359,7 +399,7 @@ class DiscoveryProgressReporter:
 
             partial_skip_note=resolved_partial_skip,
 
-            platform=platform or getattr(self.task, "platform", None),
+            platform=platform or self._platform,
 
             current_platform=extra.get("current_platform"),
 

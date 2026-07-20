@@ -235,6 +235,45 @@ test("switching back from link import omits stale input_urls in payload", () => 
   assert.ok(payload.keywords.includes("amazon finds creator"));
 });
 
+test("collection task payload stores post-collection AI outreach settings", () => {
+  const form = {
+    ...createEmptyTaskForm(),
+    name: "auto outreach task",
+    keywordsText: "home finds creator",
+    outreach_enabled: true,
+    outreach_dry_run: false,
+    outreach_subject_template: "Collaboration with {红人名称}",
+    outreach_body_template: "Introduce our brand and invite the creator.",
+    outreach_product_name: "Travel Home Lamp",
+    outreach_selling_points: "Portable warm light, Amazon-ready",
+    outreach_collaboration_offer: "Create a video and join our Amazon affiliate plan.",
+    outreach_note: "Mention 10%-30% commission when appropriate.",
+    outreach_daily_limit: "25",
+    outreach_hourly_limit: "5",
+    outreach_send_interval_minutes: "8",
+    outreach_require_high_value: true,
+    outreach_allow_resend: false,
+  };
+
+  const payload = formValuesToPayload(form, noopCaps);
+
+  assert.equal(payload.outreach_enabled, true);
+  assert.equal(payload.outreach_dry_run, false);
+  assert.deepEqual(payload.outreach_templates, {
+    subject_template: "Collaboration with {红人名称}",
+    body_template: "Introduce our brand and invite the creator.",
+    product_name: "Travel Home Lamp",
+    selling_points: "Portable warm light, Amazon-ready",
+    collaboration_offer: "Create a video and join our Amazon affiliate plan.",
+    note: "Mention 10%-30% commission when appropriate.",
+    daily_limit: "25",
+    hourly_limit: "5",
+    send_interval_minutes: "8",
+    require_high_value: "true",
+    allow_resend: "false",
+  });
+});
+
 test("switching to link import omits stale keywords and discovery fields but keeps quality filters", () => {
   const dirty = {
     ...createEmptyTaskForm(),

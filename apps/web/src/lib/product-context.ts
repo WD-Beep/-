@@ -11,13 +11,18 @@ const PRODUCT_STORAGE_KEY = "influencer_intel_product_id";
 const USER_STORAGE_KEY = "influencer_intel_user_id";
 const AUTH_SESSION_STORAGE_KEY = "influencer_intel_auth_session";
 
-let activeProductId: number = ALL_PRODUCTS_ID;
-
-export function readStoredProductIdFromStorage(): number {
+function readStoredProductIdValue(): number {
   if (typeof window === "undefined") return ALL_PRODUCTS_ID;
   const raw = window.localStorage.getItem(PRODUCT_STORAGE_KEY);
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : ALL_PRODUCTS_ID;
+}
+
+let activeProductId: number = readStoredProductIdValue();
+
+export function readStoredProductIdFromStorage(): number {
+  activeProductId = readStoredProductIdValue();
+  return activeProductId;
 }
 
 export function getActiveProductId(): number {

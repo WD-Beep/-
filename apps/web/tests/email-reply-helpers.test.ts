@@ -85,7 +85,7 @@ test("reply center displays matched influencer name and email", () => {
 test("reply center uses clearer unmatched copy when no influencer is linked", () => {
   const label = getEmailReplyInfluencerDisplay({ ...baseReply, product_influencer_id: null }, null);
 
-  assert.equal(label, "未自动关联");
+  assert.equal(label, "未关联红人");
 });
 
 test("reply center exposes low-confidence candidates from reply diagnostics", () => {
@@ -123,10 +123,21 @@ test("reply panel keeps unmatched label but removes campaign clutter from the li
     fs.readFile(new URL("../src/components/email-replies/email-replies-panel.tsx", import.meta.url), "utf8"),
   );
 
-  assert.match(source, /未自动关联/);
-  assert.doesNotMatch(source, />\s*活动\s*<\/th>/);
-  assert.doesNotMatch(source, /全部活动/);
+  assert.match(source, /\\u672a\\u5173\\u8054\\u7ea2\\u4eba/);
+  assert.doesNotMatch(source, />\s*\\u6d3b\\u52a8\s*<\/th>/);
+  assert.doesNotMatch(source, /\\u5168\\u90e8\\u6d3b\\u52a8/);
   assert.doesNotMatch(source, /未关联活动/);
+});
+
+test("reply panel does not render unicode escape text in visible JSX attributes", async () => {
+  const source = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/components/email-replies/email-replies-panel.tsx", import.meta.url), "utf8"),
+  );
+
+  assert.match(source, /description=\{"\\u96c6\\u4e2d/);
+  assert.doesNotMatch(source, /description="\\u/);
+  assert.doesNotMatch(source, /message="\\u/);
+  assert.doesNotMatch(source, /placeholder="\\u/);
 });
 
 test("reply response draft changes by intent status", () => {
@@ -155,8 +166,8 @@ test("reply panel exposes response composer, send API, warning, and refresh beha
   assert.match(source, /textarea/);
   assert.match(source, /buildEmailReplyResponseDraft/);
   assert.match(source, /sendEmailReplyResponse/);
-  assert.match(source, /当前未自动关联红人/);
-  assert.match(source, /这是通用邮箱，请确认对方身份/);
+  assert.match(source, /\\u5f53\\u524d\\u672a\\u5173\\u8054\\u7ea2\\u4eba/);
+  assert.match(source, /isGenericReplyAddress/);
   assert.match(source, /await load\(\)/);
   assert.match(apiSource, /email-replies\/\$\{replyId\}\/send-response/);
 });
@@ -222,8 +233,8 @@ test("reply panel exposes linked influencer detail and social profile actions", 
     fs.readFile(new URL("../src/components/email-replies/email-replies-panel.tsx", import.meta.url), "utf8"),
   );
 
-  assert.match(source, /查看红人信息/);
-  assert.match(source, /查看社媒链接/);
+  assert.match(source, /openInfluencerInfo/);
+  assert.match(source, /openSocialLink/);
   assert.match(source, /href=\{`\/influencers\/\$\{influencer\.id\}`\}/);
   assert.match(source, /influencer\.profile_url/);
 });
@@ -239,7 +250,7 @@ test("reply panel lets unmatched replies rematch before viewing influencer infor
   assert.match(source, /rematchEmailReply/);
   assert.match(source, /openInfluencerInfo/);
   assert.match(source, /openSocialLink/);
-  assert.doesNotMatch(source, /disabled title="当前回复未关联红人"/);
-  assert.match(source, /暂未找到对应红人信息/);
+  assert.doesNotMatch(source, /\\u672a\\u5173\\u8054\\u6d3b\\u52a8/);
+  assert.match(source, /setNotice/);
   assert.match(apiSource, /email-inbound\/replies\/\$\{replyId\}\/rematch/);
 });

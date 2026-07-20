@@ -6,7 +6,9 @@ from __future__ import annotations
 
 
 
+import asyncio
 import logging
+import time
 
 from contextvars import ContextVar
 
@@ -31,6 +33,9 @@ API_DIRECT_BASE_DEFAULT = "https://apidirect.io"
 
 
 _request_counts: ContextVar[dict[str, int]] = ContextVar("api_direct_request_counts", default={})
+_platform_locks: dict[str, asyncio.Lock] = {}
+_next_request_at: dict[str, float] = {}
+_rate_limit_until: dict[str, float] = {}
 
 
 
@@ -154,6 +159,51 @@ def _headers() -> dict[str, str]:
     return {"X-API-Key": key, "accept": "application/json"}
 
 
+def _platform_key(platform: str | None) -> str:
+    return (platform or "global").strip().lower() or "global"
+
+
+def _platform_lock(platform: str | None) -> asyncio.Lock:
+    key = _platform_key(platform)
+    lock = _platform_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _platform_locks[key] = lock
+    return lock
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    value = response.headers.get("retry-after")
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
+
+
+def _remember_rate_limit(platform: str | None, response: httpx.Response) -> None:
+    key = _platform_key(platform)
+    configured = max(0.0, settings.api_direct_rate_limit_cooldown_seconds)
+    retry_after = _retry_after_seconds(response)
+    cooldown = max(configured, retry_after or 0.0)
+    if cooldown <= 0:
+        return
+    _rate_limit_until[key] = max(_rate_limit_until.get(key, 0.0), time.monotonic() + cooldown)
+
+
+async def _wait_for_platform_slot(platform: str | None) -> None:
+    key = _platform_key(platform)
+    async with _platform_lock(platform):
+        wait_until = max(_next_request_at.get(key, 0.0), _rate_limit_until.get(key, 0.0))
+        wait_seconds = wait_until - time.monotonic()
+        if wait_seconds > 0:
+            await asyncio.sleep(wait_seconds)
+        interval = max(0.0, settings.api_direct_min_interval_seconds)
+        if interval > 0:
+            _next_request_at[key] = time.monotonic() + interval
+
+
 
 
 
@@ -195,9 +245,16 @@ async def ad_get(path: str, *, params: dict | None = None, platform: str | None 
 
     async with httpx.AsyncClient(timeout=timeout) as client:
 
+        async def _request() -> httpx.Response:
+            await _wait_for_platform_slot(platform)
+            response = await client.get(url, headers=_headers(), params=params or {})
+            if response.status_code == 429:
+                _remember_rate_limit(platform, response)
+            return response
+
         response = await execute_with_retry(
 
-            lambda: client.get(url, headers=_headers(), params=params or {}),
+            _request,
 
             label=f"API Direct {path}",
 

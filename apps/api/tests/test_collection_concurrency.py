@@ -25,6 +25,24 @@ from app.services.collection_runner import CollectionRunnerService
 from app.services.collection_task import CollectionTaskService
 
 
+@pytest.mark.anyio
+async def test_worker_reconciles_stale_running_before_claiming(monkeypatch):
+    from app.workers.collection_worker_pool import _reconcile_stale_before_claim
+
+    db = AsyncMock()
+    reconcile = AsyncMock(return_value=1)
+    monkeypatch.setattr(
+        CollectionTaskService,
+        "reconcile_stale_running_tasks",
+        reconcile,
+    )
+
+    recovered = await _reconcile_stale_before_claim(db)
+
+    assert recovered == 1
+    reconcile.assert_awaited_once_with(db)
+
+
 def _task(**overrides):
     base = dict(
         id=1,
@@ -188,6 +206,19 @@ def test_capacity_reasons_user_limit():
 def test_task_platform_list_from_multi():
     task = _task(platforms=["YouTube", "tiktok"], platform="multi")
     assert task_platform_list(task) == ["youtube", "tiktok"]
+
+
+def test_claim_next_queued_task_rolls_back_failed_claim():
+    async def _run():
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=RuntimeError("broken transaction"))
+
+        with pytest.raises(RuntimeError, match="broken transaction"):
+            await CollectionLeaseService.claim_next_queued_task(db, "worker-1")
+
+        db.rollback.assert_awaited_once()
+
+    anyio.run(_run)
 
 
 @pytest.mark.anyio

@@ -59,6 +59,17 @@ export type TaskFormValues = {
   outreach_enabled: boolean;
   outreach_provider: string;
   outreach_dry_run: boolean;
+  outreach_subject_template: string;
+  outreach_body_template: string;
+  outreach_product_name: string;
+  outreach_selling_points: string;
+  outreach_collaboration_offer: string;
+  outreach_note: string;
+  outreach_daily_limit: string;
+  outreach_hourly_limit: string;
+  outreach_send_interval_minutes: string;
+  outreach_require_high_value: boolean;
+  outreach_allow_resend: boolean;
   micro_subject: string;
   micro_body: string;
   mid_subject: string;
@@ -105,6 +116,17 @@ const emptyForm: TaskFormValues = {
   outreach_enabled: false,
   outreach_provider: "mailchimp",
   outreach_dry_run: true,
+  outreach_subject_template: "",
+  outreach_body_template: "",
+  outreach_product_name: "",
+  outreach_selling_points: "",
+  outreach_collaboration_offer: "",
+  outreach_note: "",
+  outreach_daily_limit: "50",
+  outreach_hourly_limit: "10",
+  outreach_send_interval_minutes: "6",
+  outreach_require_high_value: false,
+  outreach_allow_resend: false,
   micro_subject: "",
   micro_body: "",
   mid_subject: "",
@@ -259,9 +281,36 @@ export function isLinkImportTaskForm(
 
 function templatesToForm(templates: Record<string, string> = {}): Pick<
   TaskFormValues,
-  "micro_subject" | "micro_body" | "mid_subject" | "mid_body" | "macro_subject" | "macro_body"
+  | "outreach_subject_template"
+  | "outreach_body_template"
+  | "outreach_product_name"
+  | "outreach_selling_points"
+  | "outreach_collaboration_offer"
+  | "outreach_note"
+  | "outreach_daily_limit"
+  | "outreach_hourly_limit"
+  | "outreach_send_interval_minutes"
+  | "outreach_require_high_value"
+  | "outreach_allow_resend"
+  | "micro_subject"
+  | "micro_body"
+  | "mid_subject"
+  | "mid_body"
+  | "macro_subject"
+  | "macro_body"
 > {
   return {
+    outreach_subject_template: templates.subject_template ?? "",
+    outreach_body_template: templates.body_template ?? "",
+    outreach_product_name: templates.product_name ?? "",
+    outreach_selling_points: templates.selling_points ?? "",
+    outreach_collaboration_offer: templates.collaboration_offer ?? "",
+    outreach_note: templates.note ?? "",
+    outreach_daily_limit: templates.daily_limit ?? "50",
+    outreach_hourly_limit: templates.hourly_limit ?? "10",
+    outreach_send_interval_minutes: templates.send_interval_minutes ?? "6",
+    outreach_require_high_value: templates.require_high_value === "true",
+    outreach_allow_resend: templates.allow_resend === "true",
     micro_subject: templates.micro_subject ?? "",
     micro_body: templates.micro_body ?? "",
     mid_subject: templates.mid_subject ?? "",
@@ -274,6 +323,15 @@ function templatesToForm(templates: Record<string, string> = {}): Pick<
 function formToTemplates(values: TaskFormValues): Record<string, string> {
   const templates: Record<string, string> = {};
   const pairs: [string, string][] = [
+    ["subject_template", values.outreach_subject_template],
+    ["body_template", values.outreach_body_template],
+    ["product_name", values.outreach_product_name],
+    ["selling_points", values.outreach_selling_points],
+    ["collaboration_offer", values.outreach_collaboration_offer],
+    ["note", values.outreach_note],
+    ["daily_limit", values.outreach_daily_limit],
+    ["hourly_limit", values.outreach_hourly_limit],
+    ["send_interval_minutes", values.outreach_send_interval_minutes],
     ["micro_subject", values.micro_subject],
     ["micro_body", values.micro_body],
     ["mid_subject", values.mid_subject],
@@ -284,6 +342,8 @@ function formToTemplates(values: TaskFormValues): Record<string, string> {
   for (const [key, value] of pairs) {
     if (value.trim()) templates[key] = value.trim();
   }
+  templates.require_high_value = values.outreach_require_high_value ? "true" : "false";
+  templates.allow_resend = values.outreach_allow_resend ? "true" : "false";
   return templates;
 }
 
@@ -449,6 +509,33 @@ export { stripUrlOnlyPlatforms };
 function validateQualityAndDelivery(values: TaskFormValues): string | null {
   if (values.email_enabled && splitLines(values.email_recipientsText).length === 0) {
     return "启用邮件发送时请填写收件人邮箱";
+  }
+  if (values.outreach_enabled) {
+    if (!values.outreach_subject_template.trim()) {
+      return "开启采集后自动发信时，请填写邮件主题模板";
+    }
+    if (!values.outreach_body_template.trim()) {
+      return "开启采集后自动发信时，请填写邮件正文模板";
+    }
+    if (
+      !values.outreach_product_name.trim() &&
+      !values.outreach_selling_points.trim() &&
+      !values.outreach_collaboration_offer.trim()
+    ) {
+      return "开启采集后自动发信时，请至少填写产品名称、产品卖点或合作方式";
+    }
+    const dailyLimit = Number(values.outreach_daily_limit);
+    const hourlyLimit = Number(values.outreach_hourly_limit);
+    const intervalMinutes = Number(values.outreach_send_interval_minutes);
+    if (!Number.isFinite(dailyLimit) || dailyLimit < 1 || dailyLimit > 1000) {
+      return "每天最多发送数量需要在 1-1000 之间";
+    }
+    if (!Number.isFinite(hourlyLimit) || hourlyLimit < 1 || hourlyLimit > 1000) {
+      return "每小时最多发送数量需要在 1-1000 之间";
+    }
+    if (!Number.isFinite(intervalMinutes) || intervalMinutes < 1 || intervalMinutes > 1440) {
+      return "每封邮件间隔分钟数需要在 1-1440 之间";
+    }
   }
   const discoveryLimit = Number(values.discovery_limit);
   if (!Number.isFinite(discoveryLimit) || discoveryLimit < 1 || discoveryLimit > 10000) {

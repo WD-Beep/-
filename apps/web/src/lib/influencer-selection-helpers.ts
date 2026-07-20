@@ -51,6 +51,14 @@ export function resolveBulkOutreachSelection(input: {
   };
 }
 
+export function shouldPromotePageSelectionToFilterAll(input: {
+  total: number;
+  currentPageCount: number;
+  allPageSelected: boolean;
+}): boolean {
+  return !input.allPageSelected && input.total > input.currentPageCount && input.currentPageCount > 0;
+}
+
 export function resolveBulkDeleteSelection(
   selectedIds: number[],
   mode: InfluencerSelectionMode,

@@ -36,13 +36,16 @@ async def lifespan(app: FastAPI):
             refresh_result.registered,
             refresh_result.skipped,
         )
-        worker_count = start_embedded_worker_pool()
+        if settings.collection_api_embedded_worker_enabled:
+            worker_count = start_embedded_worker_pool()
+        else:
+            logger.info("API embedded collection workers disabled; standalone collection-worker handles queued tasks")
         logger.info(
             "Collection concurrency: global=%s per_user=%s per_platform=%s workers=%s",
             settings.collection_max_running_tasks,
             settings.collection_max_concurrency_per_user,
             settings.collection_max_concurrency_per_platform,
-            worker_count,
+            settings.collection_worker_count if not settings.collection_api_embedded_worker_enabled else worker_count,
         )
     except Exception as exc:
         logger.exception("Scheduler refresh on startup failed: %s", exc)

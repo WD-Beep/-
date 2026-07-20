@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import re
 import uuid
+from html import unescape
 from email.utils import parseaddr
 
 from app.core.config import settings
 
 _MESSAGE_ID_RE = re.compile(r"<[^>]+>")
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_HTML_BLOCK_RE = re.compile(r"</?(?:p|div|br|li|tr|table|h[1-6]|section|article|blockquote)[^>]*>", re.IGNORECASE)
+_HTML_DROP_RE = re.compile(r"<(?:script|style|head)[^>]*>.*?</(?:script|style|head)>", re.IGNORECASE | re.DOTALL)
 
 
 def normalize_message_id(value: str | None) -> str | None:
@@ -48,6 +52,20 @@ def extract_email_address(value: str | None) -> str | None:
     return cleaned or None
 
 
+def html_to_text(value: str | None) -> str:
+    if not value:
+        return ""
+    raw = str(value)
+    if not re.search(r"<!doctype|<html|<body|</?[a-z][\s>/]", raw, re.IGNORECASE):
+        return raw.strip()
+    text = _HTML_DROP_RE.sub(" ", raw)
+    text = _HTML_BLOCK_RE.sub("\n", text)
+    text = _HTML_TAG_RE.sub(" ", text)
+    text = unescape(text)
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    return "\n".join(line for line in lines if line).strip()
+
+
 AUTOMATED_SENDER_PREFIXES = (
     "noreply",
     "no-reply",
@@ -59,8 +77,17 @@ AUTOMATED_SENDER_PREFIXES = (
 )
 
 AUTOMATED_SENDER_DOMAINS = (
+    "googlemail.com",
     "steampowered.com",
     "stripe.com",
+)
+
+BOUNCE_SUBJECT_KEYWORDS = (
+    "delivery status notification",
+    "message blocked",
+    "mail delivery failed",
+    "undelivered mail",
+    "failure notice",
 )
 
 
@@ -74,6 +101,20 @@ def is_automated_sender(value: str | None) -> bool:
     if any(local.startswith(f"{prefix}.") or local.startswith(f"{prefix}-") for prefix in AUTOMATED_SENDER_PREFIXES):
         return True
     return domain in AUTOMATED_SENDER_DOMAINS
+
+
+def is_delivery_status_notification(*, from_address: str | None, subject: str | None, body: str | None = None) -> bool:
+    email = extract_email_address(from_address)
+    local = email.rsplit("@", 1)[0] if email and "@" in email else ""
+    text = f"{subject or ''}\n{body or ''}".casefold()
+    if local == "mailer-daemon":
+        return True
+    return any(keyword in text for keyword in BOUNCE_SUBJECT_KEYWORDS)
+
+
+def is_outbound_copy(*, from_address: str | None, configured_addresses: set[str]) -> bool:
+    email = extract_email_address(from_address)
+    return bool(email and email in configured_addresses)
 
 
 def build_outbound_message_id(*, product_id: int | None = None) -> str:
@@ -99,7 +140,7 @@ def normalize_subject(value: str | None) -> str:
 def make_snippet(body: str | None, *, max_len: int = 200) -> str | None:
     if not body:
         return None
-    collapsed = " ".join(str(body).split())
+    collapsed = " ".join(html_to_text(body).split())
     if not collapsed:
         return None
     if len(collapsed) <= max_len:
