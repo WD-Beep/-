@@ -1,3 +1,4 @@
+# 文件说明：后端内置业务数据和种子资料；当前文件：brand products
 """Default workspace real brand/product seed data."""
 
 from __future__ import annotations

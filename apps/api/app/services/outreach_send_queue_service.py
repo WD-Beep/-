@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：outreach send queue service
 """邮件发送队列：保守版定时/手动批量发送。"""
 
 from __future__ import annotations

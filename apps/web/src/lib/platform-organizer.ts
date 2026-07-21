@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：platform organizer
 import { platformLabel } from "@/lib/labels";
 
 export const PRIMARY_PLATFORMS = ["tiktok", "youtube", "instagram", "facebook"] as const;

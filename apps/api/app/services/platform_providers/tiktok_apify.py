@@ -1,3 +1,4 @@
+# 文件说明：后端平台采集服务，负责不同平台的数据获取和标准化；当前文件：tiktok apify
 """TikTok Apify 平台 provider（clockworks/tiktok-scraper）。"""
 
 from __future__ import annotations

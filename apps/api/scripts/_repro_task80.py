@@ -1,3 +1,4 @@
+# 文件说明：后端维护脚本，用于检查、迁移、验证或批处理任务；当前文件：repro task80
 """Re-run TikTok task 80 to reproduce DiscoveryProgressReporter platform error."""
 from __future__ import annotations
 

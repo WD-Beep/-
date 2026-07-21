@@ -13,6 +13,7 @@ from app.deps.tenant import TenantContext
 from app.models.collection_task import CollectionTask
 from app.models.collection_task_candidate import CollectionTaskCandidate
 from app.models.enums import CandidateStatus, CollectionTaskStatus
+from app.models.message_template import MessageTemplate
 from app.models.outreach_email_campaign import OutreachEmailCampaign
 from app.models.outreach_send_queue import OutreachSendQueueItem
 from app.schemas.outreach_email import OutreachEmailGenerationResult
@@ -37,7 +38,15 @@ def _mock_generation(subject: str = "Personalized subject", body: str = "Persona
     )
 
 
-async def _create_task_with_inserted_candidate(db, *, candidate_count: int = 1):
+async def _create_task_with_inserted_candidate(
+    db,
+    *,
+    candidate_count: int = 1,
+    task_country: str | None = None,
+    task_category: str | None = None,
+    influencer_country: str | None = None,
+    influencer_category: str | None = None,
+):
     suffix = _suffix()
     run_at = datetime.now(UTC)
     task = CollectionTask(
@@ -49,6 +58,8 @@ async def _create_task_with_inserted_candidate(db, *, candidate_count: int = 1):
         platform="instagram",
         platforms=["instagram"],
         keywords=["home decor"],
+        country=task_country,
+        category=task_category,
         status=CollectionTaskStatus.COMPLETED_WITH_RESULTS.value,
         outreach_enabled=True,
         outreach_dry_run=False,
@@ -76,6 +87,8 @@ async def _create_task_with_inserted_candidate(db, *, candidate_count: int = 1):
             platform_unique_id=f"ig_creator_{suffix}_{index}",
             followers_count=28000 + index,
             engagement_rate=4.2,
+            country=influencer_country,
+            category=influencer_category,
             bio="home decor creator",
             final_email=f"creator_{suffix}_{index}@gmail.com",
         )
@@ -115,15 +128,23 @@ async def _create_task_with_inserted_candidate(db, *, candidate_count: int = 1):
 
 
 @pytest.mark.asyncio
-async def test_collection_auto_outreach_creates_campaign_previews_and_queues_once():
+async def test_collection_auto_outreach_creates_campaign_generates_and_sends_due_email_once():
     async with async_session_factory() as db:
         task = await _create_task_with_inserted_candidate(db)
         ctx = TenantContext(user_id=task.user_id, product_id=task.product_id, workspace_id=1, is_admin=False)
 
+        sent_messages: list[tuple[str, list[str]]] = []
+
+        async def _capture_send(message, recipients, smtp_account=None):
+            sent_messages.append((message["Subject"], list(recipients)))
+
         with patch(
             "app.services.outreach_campaign_service.SpeechRecommendationService.generate_outreach_email",
             new=AsyncMock(return_value=_mock_generation()),
-        ) as generate:
+        ) as generate, patch(
+            "app.services.outreach_send_queue_service.EmailService._send_message",
+            new=AsyncMock(side_effect=_capture_send),
+        ):
             result = await CollectionAutoOutreachService.create_campaign_and_queue(
                 db,
                 task,
@@ -132,10 +153,15 @@ async def test_collection_auto_outreach_creates_campaign_previews_and_queues_onc
 
         assert result["created"] is True
         assert result["queued"] == 1
+        assert result["processed"] == 1
+        assert result["sent"] == 1
+        assert result["failed"] == 0
         assert result["skipped"] == 0
         assert generate.await_count == 1
+        assert len(sent_messages) == 1
         assert task.run_checkpoint["auto_outreach_campaign_id"] == result["campaign_id"]
-        assert task.run_checkpoint["auto_outreach_status"] == "queued"
+        assert task.run_checkpoint["auto_outreach_status"] == "sent"
+        assert task.run_checkpoint["auto_outreach_sent"] == 1
 
         campaign = await db.scalar(
             select(OutreachEmailCampaign).where(OutreachEmailCampaign.id == result["campaign_id"])
@@ -144,6 +170,10 @@ async def test_collection_auto_outreach_creates_campaign_previews_and_queues_onc
         assert campaign.daily_limit == 25
         assert campaign.allow_resend is False
         assert campaign.status == "running"
+        assert campaign.message_template_id is not None
+        template = await db.get(MessageTemplate, campaign.message_template_id)
+        assert template is not None
+        assert template.generation_rules["required_content"] == []
 
         queue_rows = (
             await db.scalars(
@@ -153,10 +183,12 @@ async def test_collection_auto_outreach_creates_campaign_previews_and_queues_onc
         assert len(queue_rows) == 1
         assert queue_rows[0].subject == "Personalized subject"
         assert queue_rows[0].body == "Personalized body"
+        assert queue_rows[0].status == "sent"
 
         second = await CollectionAutoOutreachService.create_campaign_and_queue(db, task, ctx=ctx)
         assert second["created"] is False
         assert second["campaign_id"] == result["campaign_id"]
+        assert second["sent"] == 1
 
 
 @pytest.mark.asyncio
@@ -165,9 +197,17 @@ async def test_collection_auto_outreach_spreads_queue_by_hourly_limit_and_interv
         task = await _create_task_with_inserted_candidate(db, candidate_count=3)
         ctx = TenantContext(user_id=task.user_id, product_id=task.product_id, workspace_id=1, is_admin=False)
 
+        sent_messages: list[str] = []
+
+        async def _capture_send(message, recipients, smtp_account=None):
+            sent_messages.extend(recipients)
+
         with patch(
             "app.services.outreach_campaign_service.SpeechRecommendationService.generate_outreach_email",
             new=AsyncMock(return_value=_mock_generation()),
+        ), patch(
+            "app.services.outreach_send_queue_service.EmailService._send_message",
+            new=AsyncMock(side_effect=_capture_send),
         ):
             result = await CollectionAutoOutreachService.create_campaign_and_queue(
                 db,
@@ -184,8 +224,50 @@ async def test_collection_auto_outreach_spreads_queue_by_hourly_limit_and_interv
         ).all()
 
         assert len(queue_rows) == 3
+        assert result["sent"] == 1
+        assert len(sent_messages) == 1
+        assert queue_rows[0].status == "sent"
+        assert queue_rows[1].status == "scheduled"
+        assert queue_rows[2].status == "scheduled"
         assert queue_rows[1].scheduled_at > queue_rows[0].scheduled_at
         assert queue_rows[2].scheduled_at > queue_rows[1].scheduled_at
         assert (queue_rows[1].scheduled_at - queue_rows[0].scheduled_at).total_seconds() >= 8 * 60
+
+
+@pytest.mark.asyncio
+async def test_collection_auto_outreach_uses_inserted_candidates_without_country_category_refilter():
+    async with async_session_factory() as db:
+        task = await _create_task_with_inserted_candidate(
+            db,
+            task_country="DE",
+            task_category="Beauty & Personal Care›Tools & Accessories›Bags & Cases›Travel Cases",
+            influencer_country="US",
+            influencer_category="Tools & Accessories›Bags & Cases›Travel Cases",
+        )
+        ctx = TenantContext(user_id=task.user_id, product_id=task.product_id, workspace_id=1, is_admin=False)
+
+        sent_messages: list[str] = []
+
+        async def _capture_send(message, recipients, smtp_account=None):
+            del message, smtp_account
+            sent_messages.extend(recipients)
+
+        with patch(
+            "app.services.outreach_campaign_service.SpeechRecommendationService.generate_outreach_email",
+            new=AsyncMock(return_value=_mock_generation()),
+        ), patch(
+            "app.services.outreach_send_queue_service.EmailService._send_message",
+            new=AsyncMock(side_effect=_capture_send),
+        ):
+            result = await CollectionAutoOutreachService.create_campaign_and_queue(
+                db,
+                task,
+                ctx=ctx,
+            )
+
+        assert result["status"] == "sent"
+        assert result["queued"] == 1
+        assert result["sent"] == 1
+        assert len(sent_messages) == 1
 
 

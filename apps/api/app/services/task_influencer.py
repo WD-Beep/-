@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：task influencer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -73,11 +74,6 @@ class TaskInfluencerService:
             ]
             if platforms:
                 query = query.where(GlobalInfluencerProfile.platform.in_(platforms))
-        if task.country:
-            query = query.where(GlobalInfluencerProfile.country == task.country)
-        if task.category:
-            query = query.where(GlobalInfluencerProfile.category == task.category)
-
         query = query.order_by(ProductInfluencer.score.desc().nullslast(), ProductInfluencer.updated_at.desc())
         result = await db.execute(query)
         seen: set[int] = set()

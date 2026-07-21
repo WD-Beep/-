@@ -1,3 +1,4 @@
+# 文件说明：后端采集器入口，负责对接不同采集来源；当前文件：base
 from dataclasses import dataclass, field
 from datetime import datetime
 from abc import ABC, abstractmethod

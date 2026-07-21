@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：discovery accumulator
 """发现阶段候选累积：保留原始条数并统计去重/重复。"""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# 文件说明：后端维护脚本，用于检查、迁移、验证或批处理任务；当前文件：verify email sent stats
 """只读：邮件日志与已发送红人统计。"""
 import asyncio
 

@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：link seed enrichment
 """LTK / ShopMy / Pinterest 链接 seed：反查社媒主页并合并资料。"""
 
 from __future__ import annotations

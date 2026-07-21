@@ -1,3 +1,4 @@
+# 文件说明：后端核心配置和通用异常处理；当前文件：config
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 

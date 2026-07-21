@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：default message templates
 """产品级系统默认话术模板（首次访问话术库或 AI 生成兜底时使用）。"""
 
 from __future__ import annotations

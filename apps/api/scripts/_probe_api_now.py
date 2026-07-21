@@ -1,3 +1,4 @@
+# 文件说明：后端维护脚本，用于检查、迁移、验证或批处理任务；当前文件：probe api now
 """快速探测 API Direct 各端点当前可用性。"""
 from __future__ import annotations
 

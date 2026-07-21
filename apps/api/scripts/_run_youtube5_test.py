@@ -1,3 +1,4 @@
+# 文件说明：后端维护脚本，用于检查、迁移、验证或批处理任务；当前文件：run youtube5 test
 """创建并运行 YouTube 5 条入库测试（与 task 75 同配置）。"""
 from __future__ import annotations
 

@@ -1,3 +1,4 @@
+# 文件说明：后端知识库服务，负责资料解析、保存和检索；当前文件：search service
 """知识库关键词检索（可后续扩展向量 embedding）。"""
 
 from __future__ import annotations

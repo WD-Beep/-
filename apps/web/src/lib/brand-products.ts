@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：brand products
 /** Real brand list mirrored from backend `app.data.brand_products`. */
 
 export type BrandProductSeed = {

@@ -1,3 +1,4 @@
+// 文件说明：前端红人列表和详情组件；当前文件：platform organizer
 "use client";
 
 import { Loader2 } from "lucide-react";

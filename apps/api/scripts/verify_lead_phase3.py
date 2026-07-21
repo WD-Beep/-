@@ -1,3 +1,4 @@
+# 文件说明：后端维护脚本，用于检查、迁移、验证或批处理任务；当前文件：verify lead phase3
 """Quick verification for phase-3 lead followup schema."""
 
 import asyncio

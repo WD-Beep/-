@@ -1,3 +1,4 @@
+// 文件说明：前端 API 代理路由，负责转发浏览器请求到后端；当前文件：route
 import { NextResponse } from "next/server";
 
 const BACKEND_URL =

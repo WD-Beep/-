@@ -1,3 +1,4 @@
+// 文件说明：前端页面组件；当前文件：page states
 import { AlertCircle, Inbox, Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";

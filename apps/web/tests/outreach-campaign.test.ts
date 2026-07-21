@@ -1129,6 +1129,17 @@ test("reply follow-up only shows rows backed by real email reply data", () => {
   );
 });
 
+test("non-AI provider quota and rate-limit errors are not shown as AI balance errors", () => {
+  assert.doesNotMatch(
+    translateErrorMessage("API Direct /v1/instagram/posts HTTP 429 rate limit quota"),
+    /DeepSeek/,
+  );
+  assert.doesNotMatch(
+    humanizeOutreachFailureReason("YouTube official API quota_exceeded"),
+    /DeepSeek/,
+  );
+});
+
 test("send results hide pure skip rows from the one-click workbench", () => {
   assert.equal(hasRealSendResultEvidence({ status: "skipped", sent_at: null, subject: null }), false);
   assert.equal(hasRealSendResultEvidence({ status: "pending", sent_at: null, subject: "Waiting" }), true);

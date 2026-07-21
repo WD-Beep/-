@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：auth session
 import type { TenantProduct } from "./api.ts";
 
 export type UserRole = "admin" | "sales";

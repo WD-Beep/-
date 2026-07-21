@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：instagram quality
 """Instagram 采集第 3 步：质量评分与 P0-P3 优先级。"""
 
 from __future__ import annotations

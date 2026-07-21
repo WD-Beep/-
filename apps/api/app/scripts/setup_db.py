@@ -1,3 +1,4 @@
+# 文件说明：后端内部脚本入口，用于初始化、验收或数据处理；当前文件：setup db
 import asyncio
 
 import asyncpg

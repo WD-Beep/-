@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：shopping seed discovery
 """导购型 seed（LTK/ShopMy/Pinterest）关键词/类目自动发现。"""
 
 from __future__ import annotations

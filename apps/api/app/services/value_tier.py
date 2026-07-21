@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：value tier
 """红人价值分层：可直接外联 / 值得人工找联系 / 暂时跳过。"""
 
 from __future__ import annotations

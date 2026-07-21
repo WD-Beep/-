@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：contact discovery
 """联系方式深挖：从 IG 资料与公开外链页面提取邮箱与联系渠道。"""
 
 from __future__ import annotations

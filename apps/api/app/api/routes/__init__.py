@@ -1,3 +1,4 @@
+# 文件说明：后端接口路由，负责接收前端请求并调用对应业务逻辑；当前文件：init
 from fastapi import APIRouter
 
 from . import admin, ai, auth, collection_tasks, dashboard, email, email_inbound, email_logs, influencers, knowledge, link_import, link_knowledge_bases, manual_outreach_email, message_templates, outreach_campaigns, outreach_records, outreach_send_queue, settings, smtp_accounts, tenant

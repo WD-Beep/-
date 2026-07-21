@@ -1,3 +1,4 @@
+# 文件说明：后端维护脚本，用于检查、迁移、验证或批处理任务；当前文件：import scandihome knowledge
 """导入 ScandiHome 品牌资料到默认产品知识库。
 
 用法（在 apps/api 目录下）：

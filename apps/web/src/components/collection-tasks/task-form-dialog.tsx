@@ -1,3 +1,4 @@
+// 文件说明：前端采集任务组件；当前文件：task form dialog
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -1127,6 +1128,13 @@ export function TaskFormDialog({
 
                   {form.outreach_enabled ? (
                     <div className="space-y-4">
+                      <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                        <p className="font-medium">发送成功后系统会提醒，发送出去的邮件也可以在发送记录里查看。</p>
+                        <p className="mt-1 text-xs text-emerald-700">
+                          采集完成后会自动生成邮件并按发送限制处理，业务员不用一直守着页面。
+                        </p>
+                      </div>
+
                       <div className="grid gap-3 sm:grid-cols-2">
                         <div className="space-y-2">
                           <Label htmlFor="outreach_subject_template">邮件主题模板</Label>

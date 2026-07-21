@@ -1,3 +1,4 @@
+// 文件说明：前端采集任务组件；当前文件：collection tasks panel
 "use client";
 
 import Link from "next/link";
@@ -17,6 +18,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import {
   COLLECTION_TASK_TABLE_LAYOUT,
   buildTaskResultBreakdown,
+  collectionTaskAutoOutreachNotice,
   collectionTaskInterruptedHint,
   collectionTaskRunningHint,
   collectionTaskStatusDisplay,
@@ -163,6 +165,28 @@ function formatCollectionResultCell(
   const { isStaleRunning = false, elapsedMs = 0, slowThresholdMs = COLLECTION_TASK_SLOW_HINT_MS } = options;
   const lines = formatCollectionResultLines(task);
   const batchLines = batchProgressLines(task);
+  const autoOutreachNotice = collectionTaskAutoOutreachNotice(task);
+  const autoOutreachClassName =
+    autoOutreachNotice?.tone === "success"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : autoOutreachNotice?.tone === "error"
+        ? "border-red-200 bg-red-50 text-red-700"
+        : autoOutreachNotice?.tone === "warning"
+          ? "border-amber-200 bg-amber-50 text-amber-700"
+          : "border-blue-200 bg-blue-50 text-blue-700";
+  const autoOutreachNode = autoOutreachNotice ? (
+    <div className={`mt-1 inline-flex max-w-full items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium ${autoOutreachClassName}`}>
+      {autoOutreachNotice.href ? (
+        <Link href={autoOutreachNotice.href} className="truncate hover:underline" title={autoOutreachNotice.text}>
+          {autoOutreachNotice.text}
+        </Link>
+      ) : (
+        <span className="truncate" title={autoOutreachNotice.text}>
+          {autoOutreachNotice.text}
+        </span>
+      )}
+    </div>
+  ) : null;
   const runningHint = collectionTaskRunningHint(task, {
     elapsedMs,
     slowThresholdMs,
@@ -260,6 +284,7 @@ function formatCollectionResultCell(
             {task.status_summary}
           </span>
         ) : null}
+        {autoOutreachNode}
       </div>
     );
   }
@@ -298,6 +323,7 @@ function formatCollectionResultCell(
             {breakdown.reason}
           </div>
         ) : null}
+        {autoOutreachNode}
       </div>
     );
   }
@@ -323,6 +349,7 @@ function formatCollectionResultCell(
           {breakdown.reason ?? lines.hint ?? task.status_summary}
         </span>
       ) : null}
+      {autoOutreachNode}
     </div>
   );
 }

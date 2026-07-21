@@ -50,6 +50,8 @@ backups/
 # Local probes / scratch files
 .codex-logs/
 .playwright-cli/
+.worktrees/
+pytest-cache-files-*/
 tmp_*
 probe_*.txt
 *_result.txt

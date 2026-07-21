@@ -1,3 +1,4 @@
+// 文件说明：前端管理员后台页面入口；当前文件：page
 import { notFound } from "next/navigation";
 
 import { AdminInfluencerDetailPanel } from "@/components/admin/admin-influencer-detail-panel";

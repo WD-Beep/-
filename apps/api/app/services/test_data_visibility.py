@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：test data visibility
 from sqlalchemy import String, and_, cast, func, not_, or_
 
 from app.models.email_log import EmailLog

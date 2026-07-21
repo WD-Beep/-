@@ -1,3 +1,4 @@
+# 文件说明：后端数据库模型，定义业务数据表结构；当前文件：init
 from app.models.admin_audit_log import AdminAuditLog
 from app.models.collection_task import CollectionTask
 from app.models.collection_task_candidate import CollectionTaskCandidate

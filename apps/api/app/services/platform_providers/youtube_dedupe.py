@@ -1,3 +1,4 @@
+# 文件说明：后端平台采集服务，负责不同平台的数据获取和标准化；当前文件：youtube dedupe
 """YouTube Apify / 发现结果去重工具。"""
 
 from __future__ import annotations

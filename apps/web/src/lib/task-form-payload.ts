@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：task form payload
 import type { CollectionMode, CollectionTask, CollectionTaskPayload, PlatformCapability, TaskSourceMethod } from "./api.ts";
 import { COLLECTION_MODE_LABELS, KEYWORD_DISCOVERY_PLATFORMS, KEYWORD_SEED_DISCOVERY_PLATFORMS, NO_CONFIGURED_KEYWORD_PLATFORMS_MSG, PLATFORM_LABELS, SEED_DISCOVERY_PLATFORMS, taskSourceMethodForMode, URL_ONLY_PLATFORM_VALIDATION_MSG, URL_ONLY_PLATFORMS } from "./labels.ts";
 import { parseLinkImportPreview } from "./collection-sources.ts";

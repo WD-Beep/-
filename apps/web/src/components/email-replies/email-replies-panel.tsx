@@ -1,3 +1,4 @@
+// 文件说明：前端回信中心组件；当前文件：email replies panel
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";

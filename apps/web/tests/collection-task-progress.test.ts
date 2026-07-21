@@ -16,6 +16,7 @@ import {
   collectionTaskSlowApiHintLabel,
   formatCollectionResultLines,
   buildTaskResultBreakdown,
+  collectionTaskAutoOutreachNotice,
   formatInsertedVsTarget,
   isCollectionTaskSlowApi,
   isCollectionTaskSlowApiFromBackend,
@@ -26,7 +27,7 @@ import {
   isCollectionTaskRunningStale,
   type CollectionTask,
 } from "../src/lib/api.ts";
-import { PLATFORM_LABELS } from "../src/lib/labels.ts";
+import { PLATFORM_LABELS, translateErrorMessage } from "../src/lib/labels.ts";
 
 function task(overrides: Partial<CollectionTask>): CollectionTask {
   return {
@@ -431,6 +432,13 @@ test("task result breakdown exposes structured funnel metrics", () => {
   assert.equal(lines.highValue, true);
 });
 
+test("apify token backend errors are translated without exposing apify setup to sales users", () => {
+  const message = translateErrorMessage("未配置 Apify Token（APIFY_TOKEN）");
+
+  assert.doesNotMatch(message, /Apify|APIFY_TOKEN/i);
+  assert.match(message, /备用采集通道|继续采集|可用数据源/);
+});
+
 test("task result breakdown ignores corrupted question-mark summary", () => {
   const lines = buildTaskResultBreakdown(
     task({
@@ -453,6 +461,50 @@ test("task result breakdown ignores corrupted question-mark summary", () => {
   assert.deepEqual(lines.primary, ["已入库 6 / 目标 10"]);
   assert.deepEqual(lines.funnel, ["发现 406", "去重 319", "主页 128", "过滤 5"]);
   assert.deepEqual(lines.contacts, ["邮箱 0", "缺联系方式 0"]);
+});
+
+test("auto outreach notice shows sent and queue results from checkpoint", () => {
+  assert.deepEqual(
+    collectionTaskAutoOutreachNotice(
+      task({
+        outreach_enabled: true,
+        run_checkpoint: {
+          auto_outreach_status: "sent",
+          auto_outreach_campaign_id: 32,
+          auto_outreach_queued: 1,
+          auto_outreach_sent: 1,
+          auto_outreach_failed: 0,
+          auto_outreach_skipped: 0,
+        },
+      }),
+    ),
+    {
+      tone: "success",
+      text: "自动发信已发送 1 封，可在发送记录查看",
+      href: "/outreach-campaigns/32",
+    },
+  );
+
+  assert.deepEqual(
+    collectionTaskAutoOutreachNotice(
+      task({
+        outreach_enabled: true,
+        run_checkpoint: {
+          auto_outreach_status: "scheduled",
+          auto_outreach_campaign_id: 33,
+          auto_outreach_queued: 5,
+          auto_outreach_sent: 0,
+          auto_outreach_failed: 0,
+          auto_outreach_skipped: 2,
+        },
+      }),
+    ),
+    {
+      tone: "info",
+      text: "自动发信已入队 5 封，等待发送队列自动发送",
+      href: "/outreach-campaigns/33",
+    },
+  );
 });
 
 test("zero-result diagnostics explain strict contact and quality filters", () => {

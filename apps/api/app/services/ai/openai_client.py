@@ -1,3 +1,4 @@
+# 文件说明：后端 AI 客户端封装，负责调用模型服务；当前文件：openai client
 """统一 OpenAI 客户端封装，所有 AI 请求必须走后端。"""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# 文件说明：后端数据库模型，定义业务数据表结构；当前文件：product influencer source
 """红人与来源作品链接的多对多关系（同一红人可来自多个作品）。"""
 
 from datetime import datetime

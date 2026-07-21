@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import type { CollectionTask, PlatformCapability } from "../src/lib/api.ts";
@@ -1037,4 +1038,15 @@ test("saved template keeps quality filters but not mode-specific fields", () => 
   assert.equal(applied.min_followers_count, "15000");
   assert.equal(applied.require_contact, true);
   assert.equal(applied.keywordsText, "");
+});
+
+test("task form explains auto outreach success visibility to sales users", () => {
+  const source = readFileSync(
+    new URL("../src/components/collection-tasks/task-form-dialog.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /发送成功后/);
+  assert.match(source, /发送记录/);
+  assert.match(source, /发送出去的邮件/);
 });

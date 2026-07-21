@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：competitor product discovery
 """竞品商品红人发现：解析 Amazon 输入 → IG hashtag 搜索 → caption 匹配。"""
 
 from __future__ import annotations

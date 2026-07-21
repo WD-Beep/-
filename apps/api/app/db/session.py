@@ -1,3 +1,4 @@
+# 文件说明：后端数据库连接和基础配置；当前文件：session
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine

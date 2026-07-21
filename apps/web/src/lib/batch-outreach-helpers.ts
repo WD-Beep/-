@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：batch outreach helpers
 import type { OutreachBatchPreviewResponse, OutreachPreviewItem } from "@/lib/api";
 
 export function countSendablePreviewItems(items: OutreachPreviewItem[]): number {

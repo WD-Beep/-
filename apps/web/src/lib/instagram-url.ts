@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：instagram url
 const POST_PATH_RE = /instagram\.com\/(p|reel|reels|tv)\/([^/?#]+)/i;
 const PROFILE_RESERVED = new Set([
   "p",

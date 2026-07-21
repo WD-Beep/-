@@ -1,3 +1,4 @@
+// 文件说明：前端外联活动组件；当前文件：outreach campaigns panel
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";

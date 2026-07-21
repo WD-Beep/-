@@ -1,3 +1,4 @@
+// 文件说明：前端页面组件；当前文件：admin dashboard gate
 "use client";
 
 import { useEffect, useState } from "react";

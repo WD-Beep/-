@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：collection sources
 import type { PlatformCapabilitiesResponse, PlatformCapability } from "./api.ts";
 import { PLATFORM_LABELS, URL_ONLY_PLATFORMS } from "./labels.ts";
 

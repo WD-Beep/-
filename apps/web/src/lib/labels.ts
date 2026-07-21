@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：labels
 import type { CollectionMode, CollectionTaskStatus, EmailLogStatus, TaskSourceMethod } from "@/lib/api";
 
 /** 侧边栏导航 */
@@ -628,7 +629,7 @@ const ERROR_TRANSLATIONS: Array<[RegExp, string]> = [
     "网页抓取被限流（如 Amazon 429）。请稍后重试、换商品详情页链接，或手动填写摘要/结构化知识后保存再生成话术。",
   ],
   [
-    /insufficient balance|exceeded_current_quota|quota|account suspended|额度|余额不足|充值/i,
+    /insufficient balance|exceeded_current_quota|account suspended|(?:OpenAI|DeepSeek|AI|GPT).*quota|额度|余额不足|充值/i,
     "AI 账户余额不足或额度受限，请充值 DeepSeek/API 账户或更换可用密钥后重试。",
   ],
   [/OpenAI API Key 无效或已过期/i, "DeepSeek API Key 无效或已过期，请检查 OPENAI_API_KEY（当前对接 DeepSeek）。"],
@@ -641,7 +642,7 @@ const ERROR_TRANSLATIONS: Array<[RegExp, string]> = [
   [/535.*authentication failed/i, "SMTP 认证失败：请使用企业邮箱「客户端专用密码」，不要用网页登录密码"],
   [/API_DIRECT_API_KEY/i, "未配置 API Direct 密钥（API_DIRECT_API_KEY）"],
   [/Apify 采集失败/i, "Instagram 采集 API 失败"],
-  [/APIFY_TOKEN/i, "未配置 Apify Token（APIFY_TOKEN）"],
+  [/APIFY_TOKEN/i, "备用采集通道未启用，系统会使用可用数据源继续采集"],
   [/APIFY_INSTAGRAM/i, "未配置 Instagram Apify Actor"],
   [/评论发现/i, "评论区 API 步骤失败"],
   [/Hashtag #/i, "Hashtag 采集失败"],

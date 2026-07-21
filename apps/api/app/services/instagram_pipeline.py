@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：instagram pipeline
 """Instagram 内容作者优先采集流水线：统一发现 → 去重 → 主页补采 → 质量评分。"""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# 文件说明：后端平台采集服务，负责不同平台的数据获取和标准化；当前文件：facebook apify
 """Facebook Apify 平台 provider（关键词搜索 + Page URL 导入 + 主页补采）。"""
 
 from __future__ import annotations

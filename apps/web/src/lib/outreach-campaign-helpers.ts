@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：outreach campaign helpers
 import type { ManualOutreachEmailPayload, ManualOutreachSendMode, MatchedKnowledgeItem, OutreachScheduleRequest } from "./api.ts";
 
 export const TEMPLATE_VARIABLE_HINTS = [
@@ -486,7 +487,7 @@ export function buildOneClickCampaignName(now: Date = new Date()): string {
 export function humanizeOutreachFailureReason(message: string | null | undefined): string {
   const text = (message || "").trim();
   if (!text) return "-";
-  if (/insufficient balance|exceeded_current_quota|quota|account suspended|额度|余额不足|充值/i.test(text)) {
+  if (/insufficient balance|exceeded_current_quota|account suspended|(?:OpenAI|DeepSeek|AI|GPT).*quota|额度|余额不足|充值/i.test(text)) {
     return "AI 账户余额不足或额度受限，请充值 DeepSeek/API 账户或更换可用密钥后重试。";
   }
   if (/AI 生成失败|GPT|标题.*正文.*空|OPENAI|生成.*失败/i.test(text)) {

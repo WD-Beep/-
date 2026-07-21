@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：outreach email helpers
 export function resolveInfluencerEmail(item: {
   final_email: string | null;
   business_email: string | null;

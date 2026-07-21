@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：influencer selection helpers
 import type { Influencer, InfluencerListFilters, OutreachCampaignCreatePayload } from "./api.ts";
 
 export const INFLUENCER_ONE_CLICK_EMAIL_BUTTON_LABEL = "AI一键发邮件";

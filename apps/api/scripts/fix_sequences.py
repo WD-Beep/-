@@ -1,3 +1,4 @@
+# 文件说明：后端维护脚本，用于检查、迁移、验证或批处理任务；当前文件：fix sequences
 """修复迁移后手动插入 id=1 导致的序列不同步。"""
 from __future__ import annotations
 

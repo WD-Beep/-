@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：instagram comment discovery
 """Instagram 评论区用户发现：帖子/Reel/主页 → 评论 → 评论者候选。"""
 
 from __future__ import annotations

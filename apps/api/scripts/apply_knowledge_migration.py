@@ -1,3 +1,4 @@
+# 文件说明：后端维护脚本，用于检查、迁移、验证或批处理任务；当前文件：apply knowledge migration
 """直接执行 032 知识库 migration（当 alembic CLI 不可用时备用）。"""
 
 import asyncio

@@ -1,3 +1,4 @@
+# 文件说明：后端采集器入口，负责对接不同采集来源；当前文件：mock
 from dataclasses import replace
 from datetime import UTC, datetime
 

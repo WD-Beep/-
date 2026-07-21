@@ -1,3 +1,4 @@
+// 文件说明：前端页面组件；当前文件：link knowledge panels
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";

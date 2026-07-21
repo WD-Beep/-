@@ -1,3 +1,4 @@
+// 文件说明：前端页面组件；当前文件：login brand panel
 "use client";
 
 import { Globe2, MessageCircle, PackageCheck, Sparkles, TrendingUp } from "lucide-react";

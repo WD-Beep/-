@@ -1,3 +1,4 @@
+# 文件说明：后端数据库模型，定义业务数据表结构；当前文件：link import batch
 from datetime import datetime
 
 from sqlalchemy import DateTime, Integer, String, Text, func

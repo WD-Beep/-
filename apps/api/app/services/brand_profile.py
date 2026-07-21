@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：brand profile
 """品牌资料卡：第一版从 Product 字段组合，后续可升级为独立 profile 表。"""
 
 from __future__ import annotations

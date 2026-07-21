@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：shopping seed discovery provider
 """通过导购平台关键词搜索与 bio/外链解析发现真实导购 seed profile URL。
 
 Seed 发现只围绕 LTK / ShopMy / Pinterest 三个导购平台。

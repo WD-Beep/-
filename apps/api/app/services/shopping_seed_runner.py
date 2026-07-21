@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：shopping seed runner
 """导购型 seed 自动发现 + 多平台详情补全任务执行。"""
 
 from __future__ import annotations

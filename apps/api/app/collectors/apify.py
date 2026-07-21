@@ -1,3 +1,4 @@
+# 文件说明：后端采集器入口，负责对接不同采集来源；当前文件：apify
 from app.collectors.base import BaseCollector, CollectedInfluencer
 from app.models.collection_task import CollectionTask
 from app.services.instagram_pipeline import InstagramCollectionPipeline

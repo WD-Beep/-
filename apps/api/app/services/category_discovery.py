@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：category discovery
 """类目采集：根据类目 + 国家 + 平台自动生成关键词与链接种子。"""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：collection task progress
 import type { CollectionTask } from "./api";
 import { collectionTaskSeedDiscoveryDiagnosticHint } from "./shopping-seed-diagnostics.ts";
 
@@ -132,6 +133,79 @@ export type TaskResultBreakdown = {
   highValue: boolean;
   singleLinkImport: boolean;
 };
+
+export type CollectionTaskAutoOutreachNotice = {
+  tone: "success" | "info" | "warning" | "error";
+  text: string;
+  href: string | null;
+};
+
+function checkpointNumber(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.floor(value));
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return Math.max(0, Math.floor(parsed));
+  }
+  return 0;
+}
+
+function checkpointString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+export function collectionTaskAutoOutreachNotice(
+  task: Pick<CollectionTask, "outreach_enabled" | "run_checkpoint">,
+): CollectionTaskAutoOutreachNotice | null {
+  if (!task.outreach_enabled) return null;
+  const checkpoint = task.run_checkpoint ?? {};
+  const status = checkpointString(checkpoint.auto_outreach_status);
+  if (!status || status === "disabled") return null;
+
+  const campaignId = checkpointNumber(checkpoint.auto_outreach_campaign_id);
+  const href = campaignId > 0 ? `/outreach-campaigns/${campaignId}` : null;
+  const queued = checkpointNumber(checkpoint.auto_outreach_queued);
+  const sent = checkpointNumber(checkpoint.auto_outreach_sent);
+  const failed = checkpointNumber(checkpoint.auto_outreach_failed);
+  const skipped = checkpointNumber(checkpoint.auto_outreach_skipped);
+  const error = checkpointString(checkpoint.auto_outreach_error);
+
+  if (sent > 0) {
+    const suffix = failed > 0 ? `，失败 ${failed} 封` : "";
+    return {
+      tone: failed > 0 ? "warning" : "success",
+      text: `自动发信已发送 ${sent} 封${suffix}，可在发送记录查看`,
+      href,
+    };
+  }
+  if (queued > 0) {
+    return {
+      tone: status === "queued_send_failed" ? "warning" : "info",
+      text:
+        status === "queued_send_failed"
+          ? `自动发信已入队 ${queued} 封，但立即发送失败：${error || "请查看发送队列"}`
+          : `自动发信已入队 ${queued} 封，等待发送队列自动发送`,
+      href,
+    };
+  }
+  if (status === "no_eligible_recipients") {
+    return { tone: "warning", text: "自动发信未发送：没有可发送邮箱", href: null };
+  }
+  if (status === "no_queueable_recipients") {
+    return {
+      tone: "warning",
+      text: skipped > 0 ? `自动发信未发送：${skipped} 位红人被规则跳过` : "自动发信未发送：没有可入队邮件",
+      href,
+    };
+  }
+  if (status === "missing_task_context") {
+    return { tone: "error", text: "自动发信未发送：任务缺少品牌或业务员信息", href: null };
+  }
+  return {
+    tone: error ? "error" : "info",
+    text: error ? `自动发信异常：${error}` : `自动发信状态：${status}`,
+    href,
+  };
+}
 
 const PLATFORM_LABELS: Record<string, string> = {
   instagram: "Instagram",

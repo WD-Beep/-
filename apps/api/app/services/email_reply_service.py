@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：email reply service
 """Ingest and manage inbound influencer email replies."""
 
 from __future__ import annotations

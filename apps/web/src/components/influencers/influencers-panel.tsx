@@ -1,3 +1,4 @@
+// 文件说明：前端红人列表和详情组件；当前文件：influencers panel
 "use client";
 
 import Link from "next/link";

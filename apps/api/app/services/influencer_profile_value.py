@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：influencer profile value
 """判断入库红人资料是否具备业务可用价值（非空壳链接占位）。"""
 
 from __future__ import annotations

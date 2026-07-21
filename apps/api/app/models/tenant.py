@@ -1,3 +1,4 @@
+# 文件说明：后端数据库模型，定义业务数据表结构；当前文件：tenant
 """多租户：用户、工作区、产品/品牌。"""
 
 from datetime import datetime

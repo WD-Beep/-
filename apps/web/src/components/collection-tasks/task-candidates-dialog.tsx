@@ -1,3 +1,4 @@
+// 文件说明：前端采集任务组件；当前文件：task candidates dialog
 "use client";
 
 import { useCallback, useEffect, useState } from "react";

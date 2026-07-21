@@ -1,3 +1,4 @@
+# 文件说明：后端维护脚本，用于检查、迁移、验证或批处理任务；当前文件：backfill youtube about links
 """补采 YouTube 频道 About 外链并写回 influencers 表。"""
 from __future__ import annotations
 

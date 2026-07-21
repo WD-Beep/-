@@ -1,4 +1,5 @@
-﻿import { ensureTenantProductId, tenantHeaders } from "./product-context.ts";
+// 文件说明：前端公共工具和业务辅助函数；当前文件：api
+import { ensureTenantProductId, tenantHeaders } from "./product-context.ts";
 import { collectionTaskSeedDiscoveryDiagnosticHint } from "./shopping-seed-diagnostics.ts";
 
 const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "/api-proxy").replace(/\/$/, "");

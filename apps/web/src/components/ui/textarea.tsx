@@ -1,3 +1,4 @@
+// 文件说明：前端页面组件；当前文件：textarea
 import * as React from "react";
 
 import { cn } from "@/lib/utils";

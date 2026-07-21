@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：product visibility
 import { BRAND_PRODUCT_SEEDS } from "./brand-products.ts";
 import type { AuthSession } from "./auth-session.ts";
 import { ALL_PRODUCTS_ID } from "./product-context.ts";

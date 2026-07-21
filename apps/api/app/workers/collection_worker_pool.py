@@ -1,3 +1,4 @@
+# 文件说明：后端后台任务执行器，负责异步采集和队列运行；当前文件：collection worker pool
 """In-process / standalone collection worker pool.
 
 Workers atomically claim queued tasks from PostgreSQL (SKIP LOCKED),

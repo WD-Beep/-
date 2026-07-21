@@ -1,3 +1,4 @@
+# 文件说明：后端接口依赖，负责租户、权限等公共注入；当前文件：tenant
 """Tenant context dependencies: user and product access checks."""
 
 from __future__ import annotations

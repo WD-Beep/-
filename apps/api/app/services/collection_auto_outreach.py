@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：collection auto outreach
 from __future__ import annotations
 
 import logging
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.deps.tenant import TenantContext
 from app.models.collection_task import CollectionTask
 from app.models.message_template import MessageTemplate
+from app.models.outreach_email_campaign import OutreachEmailCampaign
 from app.models.outreach_send_queue import OutreachSendQueueItem
 from app.schemas.outreach_campaign import (
     OutreachCampaignCreateRequest,
@@ -21,6 +23,7 @@ from app.services.outreach_campaign_service import (
     _is_high_value_product_influencer,
 )
 from app.services.outreach_recipient import outreach_recipient_skip_reason
+from app.services.outreach_send_queue_service import OutreachSendQueueService
 from app.services.product_influencer_service import ProductInfluencerService
 from app.services.task_influencer import TaskInfluencerService
 
@@ -97,15 +100,8 @@ class CollectionAutoOutreachService:
                 "language": "English",
                 "subject_format": _template_text(templates, "subject_template"),
                 "body_structure": _template_text(templates, "body_template"),
-                "required_content": [
-                    "brand introduction",
-                    "creator-specific personalization",
-                    "video creation request",
-                    "Amazon or social media posting",
-                    "product selling points",
-                    "10%-30% Amazon affiliate commission option",
-                ],
-                "cta": _template_text(templates, "collaboration_offer"),
+                "required_content": [],
+                "forbidden_content": [],
             },
             is_default=False,
             usage_count=0,
@@ -154,6 +150,100 @@ class CollectionAutoOutreachService:
         return ids
 
     @staticmethod
+    async def _preview_queue_schedule_and_process(
+        db: AsyncSession,
+        *,
+        task: CollectionTask,
+        ctx: TenantContext,
+        campaign_id: int,
+        message_template_id: int,
+        templates: dict,
+        created: bool,
+    ) -> dict[str, int | bool | str | None]:
+        preview = await OutreachCampaignService.preview_campaign(
+            db,
+            product_id=task.product_id,
+            campaign_id=campaign_id,
+            payload=OutreachCampaignPreviewRequest(content_source="ai"),
+        )
+        queue_result = await OutreachCampaignService.queue_campaign(
+            db,
+            ctx=ctx,
+            campaign_id=campaign_id,
+            payload=OutreachCampaignQueueRequest(confirm=True),
+        )
+        hourly_limit = _template_int(templates.get("hourly_limit"), default=10, minimum=1, maximum=1000)
+        send_interval_minutes = _template_int(
+            templates.get("send_interval_minutes"),
+            default=6,
+            minimum=1,
+            maximum=1440,
+        )
+        await CollectionAutoOutreachService._spread_queue_schedule(
+            db,
+            campaign_id=campaign_id,
+            hourly_limit=hourly_limit,
+            send_interval_minutes=send_interval_minutes,
+        )
+
+        sent = failed = processed = 0
+        send_error: str | None = None
+        campaign = await db.get(OutreachEmailCampaign, campaign_id)
+        if campaign and queue_result.queued > 0:
+            try:
+                process_result = await OutreachSendQueueService.process_campaign_queue(
+                    db,
+                    ctx=ctx,
+                    campaign=campaign,
+                )
+                processed = process_result.processed
+                sent = process_result.sent
+                failed = process_result.failed
+            except Exception as exc:
+                send_error = str(getattr(exc, "detail", None) or exc)[:500]
+                logger.warning("collection auto outreach send failed for task %s: %s", task.id, send_error)
+
+        checkpoint = dict(task.run_checkpoint or {})
+        skipped = queue_result.skipped + preview.skip_count
+        if sent > 0 and failed == 0:
+            status = "sent"
+        elif sent > 0 and failed > 0:
+            status = "partial_sent"
+        elif queue_result.queued > 0 and send_error:
+            status = "queued_send_failed"
+        elif queue_result.queued > 0:
+            status = "scheduled"
+        else:
+            status = "no_queueable_recipients"
+
+        checkpoint["auto_outreach_campaign_id"] = campaign_id
+        checkpoint["auto_outreach_message_template_id"] = message_template_id
+        checkpoint["auto_outreach_status"] = status
+        checkpoint["auto_outreach_queued"] = queue_result.queued
+        checkpoint["auto_outreach_processed"] = processed
+        checkpoint["auto_outreach_sent"] = sent
+        checkpoint["auto_outreach_failed"] = failed
+        checkpoint["auto_outreach_skipped"] = skipped
+        checkpoint["auto_outreach_created_at"] = datetime.now(UTC).isoformat()
+        if send_error:
+            checkpoint["auto_outreach_error"] = send_error
+        else:
+            checkpoint.pop("auto_outreach_error", None)
+        task.run_checkpoint = checkpoint
+        await db.commit()
+        return {
+            "created": created,
+            "campaign_id": campaign_id,
+            "queued": queue_result.queued,
+            "processed": processed,
+            "sent": sent,
+            "failed": failed,
+            "skipped": skipped,
+            "status": status,
+            "error": send_error,
+        }
+
+    @staticmethod
     async def create_campaign_and_queue(
         db: AsyncSession,
         task: CollectionTask,
@@ -163,12 +253,28 @@ class CollectionAutoOutreachService:
         checkpoint = dict(task.run_checkpoint or {})
         existing_campaign_id = checkpoint.get("auto_outreach_campaign_id")
         if existing_campaign_id:
+            campaign = await db.get(OutreachEmailCampaign, int(existing_campaign_id))
+            if campaign and not campaign.previewed_at:
+                templates = dict(task.outreach_templates or {})
+                return await CollectionAutoOutreachService._preview_queue_schedule_and_process(
+                    db,
+                    task=task,
+                    ctx=ctx,
+                    campaign_id=campaign.id,
+                    message_template_id=int(checkpoint.get("auto_outreach_message_template_id") or campaign.message_template_id or 0),
+                    templates=templates,
+                    created=False,
+                )
             return {
                 "created": False,
                 "campaign_id": int(existing_campaign_id),
                 "queued": int(checkpoint.get("auto_outreach_queued") or 0),
+                "processed": int(checkpoint.get("auto_outreach_processed") or 0),
+                "sent": int(checkpoint.get("auto_outreach_sent") or 0),
+                "failed": int(checkpoint.get("auto_outreach_failed") or 0),
                 "skipped": int(checkpoint.get("auto_outreach_skipped") or 0),
                 "status": str(checkpoint.get("auto_outreach_status") or "already_created"),
+                "error": str(checkpoint.get("auto_outreach_error") or "") or None,
             }
 
         if not task.outreach_enabled or not task.product_id:
@@ -233,48 +339,16 @@ class CollectionAutoOutreachService:
                 auto_send_enabled=False,
             ),
         )
-        preview = await OutreachCampaignService.preview_campaign(
+        await db.refresh(task)
+        return await CollectionAutoOutreachService._preview_queue_schedule_and_process(
             db,
-            product_id=task.product_id,
-            campaign_id=campaign_read.id,
-            payload=OutreachCampaignPreviewRequest(content_source="ai"),
-        )
-        queue_result = await OutreachCampaignService.queue_campaign(
-            db,
+            task=task,
             ctx=ctx,
             campaign_id=campaign_read.id,
-            payload=OutreachCampaignQueueRequest(confirm=True),
+            message_template_id=message_template.id,
+            templates=templates,
+            created=True,
         )
-        hourly_limit = _template_int(templates.get("hourly_limit"), default=10, minimum=1, maximum=1000)
-        send_interval_minutes = _template_int(
-            templates.get("send_interval_minutes"),
-            default=6,
-            minimum=1,
-            maximum=1440,
-        )
-        await CollectionAutoOutreachService._spread_queue_schedule(
-            db,
-            campaign_id=campaign_read.id,
-            hourly_limit=hourly_limit,
-            send_interval_minutes=send_interval_minutes,
-        )
-        await db.refresh(task)
-        checkpoint = dict(task.run_checkpoint or {})
-        checkpoint["auto_outreach_campaign_id"] = campaign_read.id
-        checkpoint["auto_outreach_message_template_id"] = message_template.id
-        checkpoint["auto_outreach_status"] = "queued" if queue_result.queued else "no_queueable_recipients"
-        checkpoint["auto_outreach_queued"] = queue_result.queued
-        checkpoint["auto_outreach_skipped"] = queue_result.skipped + preview.skip_count
-        checkpoint["auto_outreach_created_at"] = datetime.now(UTC).isoformat()
-        task.run_checkpoint = checkpoint
-        await db.commit()
-        return {
-            "created": True,
-            "campaign_id": campaign_read.id,
-            "queued": queue_result.queued,
-            "skipped": queue_result.skipped + preview.skip_count,
-            "status": checkpoint["auto_outreach_status"],
-        }
 
     @staticmethod
     async def _spread_queue_schedule(

@@ -1,3 +1,4 @@
+// 文件说明：前端页面组件；当前文件：admin shell
 "use client";
 
 import { useState } from "react";

@@ -1,3 +1,4 @@
+// 文件说明：前端页面组件；当前文件：login background
 "use client";
 
 export function LoginPageBackdrop() {

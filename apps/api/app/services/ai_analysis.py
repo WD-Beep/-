@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：ai analysis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.global_influencer_profile import GlobalInfluencerProfile

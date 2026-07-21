@@ -1,3 +1,4 @@
+# 文件说明：后端维护脚本，用于检查、迁移、验证或批处理任务；当前文件：apply 034 email log ai
 """Manually apply migration 034 columns when alembic overlap blocks upgrade."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：collection targets
 """采集目标：discovery_limit 作为合格入库目标数，发现阶段 over-fetch。"""
 
 from __future__ import annotations

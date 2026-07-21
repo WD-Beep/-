@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：keyword discovery
 """关键词发现：扩展 hashtag → 帖子作者 + 评论用户。"""
 
 from __future__ import annotations

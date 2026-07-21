@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：product influencer service
 """产品维度红人库查询（隔离 + 全局资料投影）。"""
 
 from __future__ import annotations

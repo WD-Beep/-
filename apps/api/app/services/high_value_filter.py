@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：high value filter
 """采集任务高价值评估：粉丝/互动/联系方式与入库门禁。"""
 
 from __future__ import annotations

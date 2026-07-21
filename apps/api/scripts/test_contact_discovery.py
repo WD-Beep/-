@@ -1,3 +1,4 @@
+# 文件说明：后端维护脚本，用于检查、迁移、验证或批处理任务；当前文件：test contact discovery
 """联系方式深挖单元验证（不访问外网）。"""
 
 import asyncio

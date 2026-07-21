@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：product slug
 export function slugifyProductName(name: string): string {
   const ascii = name
     .trim()

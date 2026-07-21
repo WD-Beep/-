@@ -1,3 +1,4 @@
+# 文件说明：后端知识库服务，负责资料解析、保存和检索；当前文件：document parser
 """PDF / PPTX 文本提取与语义分段。"""
 
 from __future__ import annotations

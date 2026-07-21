@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：instagram provider
 """Instagram 数据采集 Provider：api_direct（默认）/ apify / hikerapi / yepapi。"""
 
 from __future__ import annotations

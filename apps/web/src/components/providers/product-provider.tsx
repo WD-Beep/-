@@ -1,3 +1,4 @@
+// 文件说明：前端页面组件；当前文件：product provider
 "use client";
 
 import { createContext, useContext, useLayoutEffect, useMemo, useState } from "react";

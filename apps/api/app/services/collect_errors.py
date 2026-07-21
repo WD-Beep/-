@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：collect errors
 """采集/导入过程可读错误汇总。"""
 
 from __future__ import annotations

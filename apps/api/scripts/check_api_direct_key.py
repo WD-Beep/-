@@ -1,3 +1,4 @@
+# 文件说明：后端维护脚本，用于检查、迁移、验证或批处理任务；当前文件：check api direct key
 """检查 .env 中的 API_DIRECT_API_KEY 是否可用。"""
 from __future__ import annotations
 

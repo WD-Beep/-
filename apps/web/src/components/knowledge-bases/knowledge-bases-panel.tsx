@@ -1,3 +1,4 @@
+// 文件说明：前端页面组件；当前文件：knowledge bases panel
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";

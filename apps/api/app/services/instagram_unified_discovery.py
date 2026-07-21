@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：instagram unified discovery
 """统一 Instagram 发现：关键词/链接/混合 + 可选评论区增强。"""
 
 from __future__ import annotations

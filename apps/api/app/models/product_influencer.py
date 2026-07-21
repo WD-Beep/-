@@ -1,3 +1,4 @@
+# 文件说明：后端数据库模型，定义业务数据表结构；当前文件：product influencer
 """产品维度红人业务记录（评分、跟进、备注等按产品隔离）。"""
 
 from datetime import datetime

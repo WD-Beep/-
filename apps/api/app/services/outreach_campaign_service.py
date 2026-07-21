@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：outreach campaign service
 """批量邮件活动：逐红人生成个性化草稿 -> 入队 -> 手动/定时按窗口/限额发送。"""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：outreach campaign detail helpers
 export type CampaignDetailTabKey = "all" | "sent" | "skipped" | "failed" | "replied" | "unreplied";
 
 export const CAMPAIGN_DETAIL_TABS: Array<{ key: CampaignDetailTabKey; label: string }> = [

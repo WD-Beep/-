@@ -1,3 +1,4 @@
+# 文件说明：后端内部脚本入口，用于初始化、验收或数据处理；当前文件：admin sales data bootstrap
 """Bootstrap admin verification data for sales brand isolation.
 
 The script is intentionally idempotent and only uses the existing application

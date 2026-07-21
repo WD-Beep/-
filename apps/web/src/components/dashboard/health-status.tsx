@@ -1,3 +1,4 @@
+// 文件说明：前端页面组件；当前文件：health status
 "use client";
 
 import { useEffect, useMemo, useState } from "react";

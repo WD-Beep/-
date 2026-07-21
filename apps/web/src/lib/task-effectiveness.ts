@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：task effectiveness
 import type { CollectionTask, LinkImportBatch } from "@/lib/api";
 
 export type TaskEffectivenessCategory = "high_value" | "effective" | "low_value_result" | "no_result" | "failed";

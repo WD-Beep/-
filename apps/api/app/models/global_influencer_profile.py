@@ -1,3 +1,4 @@
+# 文件说明：后端数据库模型，定义业务数据表结构；当前文件：global influencer profile
 """全局红人基础资料池（跨产品共享、按平台身份去重）。"""
 
 from datetime import datetime

@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：product visibility
 """产品/品牌可见性：过滤测试、临时、自动生成数据。"""
 
 from __future__ import annotations

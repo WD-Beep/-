@@ -1,3 +1,4 @@
+// 文件说明：前端管理员后台组件；当前文件：admin products management
 "use client";
 
 import { useEffect, useMemo, useState, type FormEvent } from "react";

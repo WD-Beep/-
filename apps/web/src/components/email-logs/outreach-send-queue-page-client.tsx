@@ -1,3 +1,4 @@
+// 文件说明：前端邮件记录和发送队列组件；当前文件：outreach send queue page client
 "use client";
 
 import Link from "next/link";

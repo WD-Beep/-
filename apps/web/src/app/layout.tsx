@@ -1,3 +1,4 @@
+// 文件说明：前端页面路由入口；当前文件：layout
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 

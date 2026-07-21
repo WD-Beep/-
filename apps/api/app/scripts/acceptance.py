@@ -1,3 +1,4 @@
+# 文件说明：后端内部脚本入口，用于初始化、验收或数据处理；当前文件：acceptance
 """端到端 API 验收脚本。需先启动 PostgreSQL、migrate，并启动 API 服务。"""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：email log helpers
 export type EmailLogView = "all" | "sent" | "failed" | "replied" | "unreplied";
 
 const EMAIL_LOG_VIEWS = new Set<EmailLogView>(["all", "sent", "failed", "replied", "unreplied"]);

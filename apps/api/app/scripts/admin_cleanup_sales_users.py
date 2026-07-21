@@ -1,3 +1,4 @@
+# 文件说明：后端内部脚本入口，用于初始化、验收或数据处理；当前文件：admin cleanup sales users
 """Remove non-admin salesperson accounts for admin CRUD verification.
 
 Clears per-user email/reply/task rows, unassigns brands, then deletes users.

@@ -1,3 +1,4 @@
+# 文件说明：后端平台采集服务，负责不同平台的数据获取和标准化；当前文件：url only
 """URL-only platform providers for commerce/discovery surfaces.
 
 These platforms are useful for curated creator URLs today, but do not have a

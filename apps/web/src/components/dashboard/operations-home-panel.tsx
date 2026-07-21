@@ -1,3 +1,4 @@
+// 文件说明：前端页面组件；当前文件：operations home panel
 import Link from "next/link";
 import {
   BookOpen,

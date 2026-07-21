@@ -1,3 +1,4 @@
+# 文件说明：项目源码文件；当前文件：manager
 import logging
 import asyncio
 from dataclasses import dataclass, field

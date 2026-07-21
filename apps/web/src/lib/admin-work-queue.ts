@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：admin work queue
 export type AdminWorkItemType = "reply" | "email";
 
 export type AdminWorkStatus = "pending" | "reminded" | "in_progress" | "handled" | "no_action";

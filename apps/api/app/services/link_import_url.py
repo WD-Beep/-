@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：link import url
 """链接导入 URL 解析：区分主页 / 作品 / 短链，保留 source_post_url。"""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：outreach recipient
 """真实红人外联收件人校验（与 SMTP 测试邮件分离）。"""
 
 from __future__ import annotations

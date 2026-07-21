@@ -1,3 +1,4 @@
+// 文件说明：前端公共工具和业务辅助函数；当前文件：product options cache
 import type { TenantProduct } from "./api.ts";
 
 const PRODUCT_OPTIONS_CACHE_KEY = "influencer_intel_tenant_products";

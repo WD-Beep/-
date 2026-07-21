@@ -1,3 +1,4 @@
+# 文件说明：后端维护脚本，用于检查、迁移、验证或批处理任务；当前文件：test youtube collect5
 """YouTube 类目采集测试：目标 5 条合格入库。"""
 from __future__ import annotations
 

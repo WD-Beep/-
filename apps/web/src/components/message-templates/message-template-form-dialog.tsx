@@ -1,3 +1,4 @@
+// 文件说明：前端话术模板组件；当前文件：message template form dialog
 "use client";
 
 import { useState } from "react";

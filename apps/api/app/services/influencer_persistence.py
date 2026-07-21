@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：influencer persistence
 """全局红人资料 + 产品维度业务记录：去重与入库。"""
 
 from __future__ import annotations

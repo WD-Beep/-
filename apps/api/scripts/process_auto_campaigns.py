@@ -1,3 +1,4 @@
+# 文件说明：后端维护脚本，用于检查、迁移、验证或批处理任务；当前文件：process auto campaigns
 """CLI: process due outreach email campaign auto-send slots."""
 
 from __future__ import annotations

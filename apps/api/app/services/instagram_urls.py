@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：instagram urls
 """Instagram 链接清洗、规范化与校验（入库与 API 输出统一使用）。"""
 
 from __future__ import annotations

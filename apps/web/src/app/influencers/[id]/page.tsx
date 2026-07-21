@@ -1,3 +1,4 @@
+// 文件说明：前端页面路由入口；当前文件：page
 import { notFound } from "next/navigation";
 
 import { InfluencerDetail } from "@/components/influencers/influencer-detail";

@@ -1,3 +1,4 @@
+# 文件说明：后端业务服务，负责采集、筛选、AI、邮件和任务流程；当前文件：collection runner
 from datetime import UTC, datetime, timedelta
 
 import asyncio
@@ -2325,7 +2326,7 @@ class CollectionRunnerService:
                 await db.refresh(task)
                 try:
                     if task.user_id and task.product_id and task.workspace_id:
-                        await CollectionAutoOutreachService.create_campaign_and_queue(
+                        auto_outreach_result = await CollectionAutoOutreachService.create_campaign_and_queue(
                             db,
                             task,
                             ctx=TenantContext(
@@ -2335,6 +2336,20 @@ class CollectionRunnerService:
                                 is_admin=False,
                             ),
                         )
+                        sent = int(auto_outreach_result.get("sent") or 0)
+                        queued = int(auto_outreach_result.get("queued") or 0)
+                        failed = int(auto_outreach_result.get("failed") or 0)
+                        skipped = int(auto_outreach_result.get("skipped") or 0)
+                        status = str(auto_outreach_result.get("status") or "")
+                        if sent > 0:
+                            task.status_summary = f"{task.status_summary or '采集已完成'}；自动发信：已发送 {sent} 封，已入队 {queued} 封，失败 {failed}，跳过 {skipped}"
+                        elif status == "no_eligible_recipients":
+                            task.status_summary = f"{task.status_summary or '采集已完成'}；自动发信：没有可发送红人"
+                        elif queued > 0:
+                            task.status_summary = f"{task.status_summary or '采集已完成'}；自动发信：已入队 {queued} 封，等待发送队列自动发送"
+                        else:
+                            task.status_summary = f"{task.status_summary or '采集已完成'}；自动发信：未生成可发送邮件"
+                        await db.commit()
                     else:
                         checkpoint = dict(task.run_checkpoint or {})
                         checkpoint["auto_outreach_status"] = "missing_task_context"

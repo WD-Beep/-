@@ -1,3 +1,4 @@
+# 文件说明：后端核心配置和通用异常处理；当前文件：exceptions
 SMTP_NOT_CONFIGURED_MSG = "邮件服务未配置，请先在环境变量中配置 SMTP。"
 SMTP_AUTH_FAILED_MSG = (
     "SMTP 认证失败：请确认腾讯企业邮箱已开启 SMTP 服务，"

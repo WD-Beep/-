@@ -1,3 +1,4 @@
+// 文件说明：前端管理员后台页面入口；当前文件：page
 import type { Metadata } from "next";
 
 import { AdminProductsPanel } from "@/components/admin/admin-products-panel";

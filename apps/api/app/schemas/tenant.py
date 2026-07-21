@@ -1,3 +1,4 @@
+# 文件说明：后端接口数据结构，定义请求和响应字段；当前文件：tenant
 from pydantic import BaseModel, Field
 
 from app.schemas.common import ORMModel, TimestampMixin
